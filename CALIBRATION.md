@@ -159,6 +159,28 @@ from reachy_mini import ReachyMini
 
 ---
 
+## 8. take_snapshot 看图(V-01-1)✅(2026-06-05)
+
+机器人"看一眼"能力:Realtime 工具调用 → 抓当前帧 → chat.completions 回合制看图 → 语音转述。实现合并在 `voice/d01_realtime_chat.py`;编排测试 `voice/_v01_orchestrated.py`。
+
+### 链路与实测数据
+- **抓帧:** `media.get_frame()` 连抓 3 帧取最新(appsink drop=True 只留最新,多抓防旧帧/黑帧),实测 **47ms**;两次快照画面随用户姿势变化,确证是当前帧。
+- **压缩:** 1080p BGR → Pillow `[:, :, ::-1]` 转 RGB → 640×360 jpg q85 ≈ **29KB**(Qwen 建议单张 ≤256KB,余量大)。
+- **看图:** chat.completions(`qwen3.5-omni-plus`,北京 compatible-mode),`image_url` 传 `data:image/jpeg;base64,...`,**必须 `stream=True`** + `extra_body={"modalities":["text"]}`(只要文本,省音频生成)。往返 **~3s**,工具调用→描述就绪全程 **~3.1–3.3s**。
+- **并存性:** 抓帧/看图期间录音上行与播放零中断(摄像头与音频是独立 GStreamer 管线),等待期插话打断也正常。
+
+### 与手势工具的协调差异(关键设计)
+- 手势 = **乐观即时回 output**(不等动作做完);
+- take_snapshot = **必须等描述就绪才回 output**(模型要拿着内容才能转述),回完即 `create_response()` 让模型开口;
+- `response.done` 的"纯动作立即补话"逻辑在 **快照挂起时跳过**(`snapshot_pending` 计数),否则模型会在没拿到描述时抢跑;
+- 期间被打断(代际变化)→ 仍回 output(协议要求)但不补话。
+
+### 体验设计
+- ~3s 等待由模型的**口头过渡**填充(调用工具的同响应里自带"让我看看…"音频),不冷场——instructions 引导即可,无需代码。
+- 快照存 `voice/output/`(**已 gitignore,可能含人像,严禁推送**)。
+
+---
+
 ## 体检汇总(2026-06-03)
 
 | 项 | 通道 | 结果 | 关键数据 |
@@ -176,3 +198,5 @@ from reachy_mini import ReachyMini
 | 五项硬件 I/O 体检 | 2026-06-03 | ✅ 全过(上表) |
 | D-01 Realtime 语音对话(含打断) | 2026-06-05 | ✅ 首音频 ~370ms,打断 ~20ms,见 §6 |
 | O-01a-1 动作工具(function calling) | 2026-06-05 | ✅ 8 工具,边说边动并发实测,见 §7 |
+| O-01a-2 idle 微动 + 幅度加大 + 同时出发 | 2026-06-05 | ✅ 微动让位 30ms,4/4 语音动作重叠,见 §7 |
+| V-01-1 take_snapshot 看图 | 2026-06-05 | ✅ 抓帧 47ms,看图 ~3s,口头过渡,见 §8 |

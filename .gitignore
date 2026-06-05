@@ -1,5 +1,7 @@
 # 隐私:体检产物(人脸照片 / 录音 / 测试音频)——不上传
 healthcheck/output/
+# 隐私:take_snapshot 快照(可能含人脸)——不上传
+voice/output/
 
 # Python 缓存
 __pycache__/
