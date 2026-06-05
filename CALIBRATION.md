@@ -128,7 +128,31 @@ from reachy_mini import ReachyMini
 
 ### 已知待办
 - 麦克风常开 → 环境闲聊也会被当输入接话,需要唤醒词/按键门控(后续阶段)。
-- function calling(Realtime 原生支持,与联网搜索不兼容)留给 O-01 工具调用阶段。
+
+---
+
+## 7. 动作工具(function calling)✅(2026-06-05,O-01a-1)
+
+模型自主调用动作做身体语言,**边说边动**已实测(语音播放与动作执行并发,互不阻塞)。实现合并在 `voice/d01_realtime_chat.py`;编排测试 `voice/_o01a1_orchestrated.py`;诊断工具 `voice/_diag_o01.py`。
+
+### 协议(实测验证)
+- **声明:** 扁平格式 `{"type":"function","name":...,"description":...,"parameters":{...}}`(不是 chat.completions 的嵌套),经 SDK `update_session(..., tools=TOOLS)` 传入(走 kwargs 进 session 配置)。
+- **调用事件:** `response.function_call_arguments.done`,字段 `name` / `arguments`(JSON 字符串)/ `call_id`。模型**一个响应可连发多个调用**(实测"你好"一次发了 nod + wiggle_antennas)。
+- **回结果:** `create_item({"type":"function_call_output","call_id":...,"output":...})`。
+- **是否补 `response.create`(关键设计,避免双重说话):**
+  - 发起调用的响应**带音频**(边说边动)→ 动作完成只回 output,**不补**;
+  - 发起调用的响应**纯动作无音频** → 全部动作完成后**补一次** `response.create`,模型才继续开口;
+  - 判据:`response.created` 时清零本响应 audio.delta 计数,`response.done` 时看计数是否为 0;期间被打断(代际变化)则不补。
+
+### 并发与线程模型
+- 动作任务入队,**独立动作线程串行执行**(`goto_target` 是阻塞插值,绝不能在音频回调/播放线程里调)。
+- 8 个工具:nod / shake_head / look_left|right|up|down / wiggle_antennas / tilt_head,全部复用 §2 标定幅度(头 ±10~12°、天线 ±0.5rad、`automatic_body_yaw=False` + 全程 `body_yaw=0`),单个动作 1.6~1.8s。
+- tilt_head 用 roll ±12°(roll 方向当时未标定,幅度在安全范围,实测无异响)。
+- **barge-in 时动作不中断**(动作短,让它做完),只停音频。
+
+### 踩坑记录
+- **semantic_vad 有音量门槛:** 上行 RMS ≈0.004(说话太小声/离远)**完全不触发** speech_started——表现为"上行了 75s 音频但服务端零事件",像断连但其实是没过门槛。正常说话 RMS ≥0.01 即稳定触发。排查手段:上行循环里按周期打印 RMS(已内置在正式脚本,<0.005 时提示)。
+- `update_session` 不传 `tools` 字段时**不会清除**已注册的工具(继承上次配置);要清除需显式传空。
 
 ---
 
@@ -148,3 +172,4 @@ from reachy_mini import ReachyMini
 |---|---|---|
 | 五项硬件 I/O 体检 | 2026-06-03 | ✅ 全过(上表) |
 | D-01 Realtime 语音对话(含打断) | 2026-06-05 | ✅ 首音频 ~370ms,打断 ~20ms,见 §6 |
+| O-01a-1 动作工具(function calling) | 2026-06-05 | ✅ 8 工具,边说边动并发实测,见 §7 |

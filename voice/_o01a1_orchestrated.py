@@ -1,30 +1,23 @@
 # -*- coding: utf-8 -*-
-"""Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01 + O-01a:可打断 + 动作工具)。
+"""O-01a-1 编排版:语音对话 + 动作工具(function calling),固定时序测试。
 
-对着机器人说话 → Qwen 全双工识别并生成语音 → 从机器人扬声器播放;
-说话时可随时插话打断(barge-in);模型自主调用动作工具做身体语言
-(点头/摇头/看向/摆天线/歪头),可边说边动。
+在 D-01b(打断+抖动缓冲)基础上新增,D-01 链路不动:
 
-音频链路(实测验证,见 ../CALIBRATION.md §6):
-  上行:麦克风 16kHz 原生 → 取 audio[:,0] → int16 → base64(零重采样)
-  下行:24kHz PCM16 → resample_poly 24k→16k → 抖动缓冲 ~300ms → push_audio_sample
-  打断:speech_started → 队列代际作废 + audio.clear_player() + 必要时 cancel_response
+1. session.update 里声明 8 个动作工具(扁平格式,经 SDK tools= 传入)。
+2. 收到 response.function_call_arguments.done → 动作任务入队,
+   【独立动作线程】串行执行(goto_target 平滑插值,标定安全幅度),
+   绝不阻塞音频收包/播放线程 → 边说边动。
+3. 动作完成 → conversation.item.create 回 function_call_output;
+   仅当"发起调用的那个响应没出过音频"才补 response.create
+   (避免双重说话;纯动作响应后模型能继续开口)。
+4. barge-in 时只停音频,在执行的动作让它做完(动作都很短)。
 
-动作工具(实测验证,见 ../CALIBRATION.md §7):
-  session.update 声明扁平 tools → response.function_call_arguments.done →
-  动作入队【独立线程】串行执行(不阻塞音频)→ 完成回 function_call_output →
-  仅当发起调用的响应没出过音频才补 response.create(避免双重说话)。
-  动作参数复用 §2 标定结论;barge-in 时动作不中断,只停音频。
-
-运行(需 daemon 已启动、DASHSCOPE_API_KEY 已配):
-  $env:PYTHONUTF8=1
-  & "C:\\Users\\ldkji\\AppData\\Local\\Reachy Mini Control\\.venv\\Scripts\\python.exe" voice\\d01_realtime_chat.py
-按 Ctrl+C 退出。
+动作参数复用 CALIBRATION.md §2 标定结论:yaw+=左 pitch+=下,
+头部 ±10~12°、天线 ±0.5rad,automatic_body_yaw=False,全程 body_yaw=0。
 """
 
 import os
 
-# ── 代理隔离:必须在 import reachy_mini / dashscope 之前 ──
 _no_proxy = "localhost,127.0.0.1,::1,.aliyuncs.com,aliyuncs.com"
 os.environ["NO_PROXY"] = _no_proxy
 os.environ["no_proxy"] = _no_proxy
@@ -49,27 +42,30 @@ from dashscope.audio.qwen_omni import (
 )
 from reachy_mini import ReachyMini
 
-# ───────────────────────── 配置 ─────────────────────────
 MODEL = "qwen3.5-omni-plus-realtime"
 VOICE = "Ethan"
 INSTRUCTIONS = (
     "你是桌面机器人 Reachy Mini,有真实的身体(头、天线)。"
-    "用简体中文、口语化、简短地回答,一般不超过两三句话。"
+    "用简体中文、口语化、简短地回答。"
     "回答时自然地配合动作工具表达身体语言:打招呼/同意时点头,否定时摇头,"
     "开心/兴奋/被夸时摆天线,好奇/疑惑时歪头。可以边说边做动作。"
 )
 
-OUT_SR = 24000   # Realtime 下行采样率
-PLAY_SR = 16000  # Reachy 播放管线 appsrc 固定 16kHz
+OUT_SR = 24000
+PLAY_SR = 16000
 JITTER_S = 0.30
 JITTER_WALL_S = 0.50
+REC_WINDOW_S = 75.0      # 3 个测试回合
+RESPONSE_TIMEOUT_S = 20.0
+
+T0 = time.monotonic()
 
 
 def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[t+{time.monotonic() - T0:7.2f}s] {msg}", flush=True)
 
 
-# ───────────────────────── 动作库(CALIBRATION.md §2 标定参数)─────────────────────────
+# ───────────────────────── 动作库(标定参数,均为短动作)─────────────────────────
 INIT_HEAD_POSE = np.eye(4)
 INIT_ANTENNAS = [-0.1745, 0.1745]
 
@@ -80,34 +76,34 @@ def head_pose(pitch_deg: float = 0.0, yaw_deg: float = 0.0, roll_deg: float = 0.
     return T
 
 
-def act_nod(m: ReachyMini) -> None:
+def act_nod(m: ReachyMini) -> None:           # 点头:pitch 下/上 ×2
     for _ in range(2):
         m.goto_target(head_pose(pitch_deg=+10), duration=0.35, body_yaw=0.0)
         m.goto_target(head_pose(pitch_deg=-6), duration=0.35, body_yaw=0.0)
     m.goto_target(INIT_HEAD_POSE, duration=0.35, body_yaw=0.0)
 
 
-def act_shake(m: ReachyMini) -> None:
+def act_shake(m: ReachyMini) -> None:         # 摇头:yaw 左/右 ×2
     for _ in range(2):
         m.goto_target(head_pose(yaw_deg=+10), duration=0.35, body_yaw=0.0)
         m.goto_target(head_pose(yaw_deg=-10), duration=0.35, body_yaw=0.0)
     m.goto_target(INIT_HEAD_POSE, duration=0.35, body_yaw=0.0)
 
 
-def _look(m: ReachyMini, **kw) -> None:
+def _look(m: ReachyMini, **kw) -> None:       # 看向某方向,停 0.8s 回中
     m.goto_target(head_pose(**kw), duration=0.6, body_yaw=0.0)
     time.sleep(0.8)
     m.goto_target(INIT_HEAD_POSE, duration=0.6, body_yaw=0.0)
 
 
-def act_wiggle(m: ReachyMini) -> None:
+def act_wiggle(m: ReachyMini) -> None:        # 天线摆动:左右交替 ×2
     for _ in range(2):
         m.goto_target(antennas=[+0.5, -0.5], duration=0.3, body_yaw=0.0)
         m.goto_target(antennas=[-0.5, +0.5], duration=0.3, body_yaw=0.0)
     m.goto_target(antennas=INIT_ANTENNAS, duration=0.35, body_yaw=0.0)
 
 
-def act_tilt(m: ReachyMini) -> None:
+def act_tilt(m: ReachyMini) -> None:          # 歪头(roll,幅度同安全标定)
     m.goto_target(head_pose(roll_deg=12), duration=0.5, body_yaw=0.0)
     time.sleep(0.8)
     m.goto_target(INIT_HEAD_POSE, duration=0.5, body_yaw=0.0)
@@ -137,27 +133,34 @@ TOOLS = [
 ]
 
 
-# ───────────────────────── 共享状态 ─────────────────────────
 class State:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.session_updated = threading.Event()
-        # 播放 / 打断
+        # 播放 / 打断(同 D-01b)
         self.play_gen = 0
         self.drop_audio = False
         self.in_flight = 0
         self.playback_end_estimate = 0.0
         # function calling 协调
-        self.resp_audio_count = 0
-        self.fc_pending = 0
+        self.resp_audio_count = 0      # 当前响应已出的 audio.delta 数(response.created 时清零)
+        self.fc_pending = 0            # 已派发未回 output 的动作数
         self.fc_seen_this_resp = False
         self.fc_response_done = False
-        self.fc_needs_rc = False
+        self.fc_needs_rc = False       # 发起调用的响应无音频 → 动作做完后补 response.create
         self.fc_rc_sent = False
         self.fc_gen = 0
+        # 留痕
+        self.input_transcripts: list[str] = []
+        self.reply_parts: list[str] = []
+        self.fc_records: list[dict] = []
+        self.motion_records: list[dict] = []
+        self.barge_ins: list[dict] = []
+        self.errors: list[dict] = []
+        self.audio_delta_count = 0
+        self.first_audio_delay_ms = None
 
 
-# ───────────────────────── 回调:收服务端事件 ─────────────────────────
 class ChatCallback(OmniRealtimeCallback):
     def __init__(self, st: State, play_q: "queue.Queue", motion_q: "queue.Queue", mini: ReachyMini):
         self.st = st
@@ -167,18 +170,19 @@ class ChatCallback(OmniRealtimeCallback):
         self.conv: OmniRealtimeConversation | None = None
 
     def on_open(self) -> None:
-        log("✅ WebSocket 已连接 dashscope.aliyuncs.com")
+        log("✅ WebSocket 已连接")
 
-    def on_close(self, close_status_code, close_msg) -> None:
-        log(f"🔌 连接关闭:code={close_status_code} msg={close_msg}")
+    def on_close(self, code, msg) -> None:
+        log(f"🔌 连接关闭 code={code} msg={msg}")
 
     def _do_barge_in(self, in_flight: bool) -> None:
-        """打断:作废队列 → flush 管线残余 → 必要时取消在途回复。动作不中断。"""
         st = self.st
         with st.lock:
             st.play_gen += 1
             st.drop_audio = True
+            residual = max(0.0, st.playback_end_estimate - time.monotonic())
             st.playback_end_estimate = time.monotonic()
+            st.barge_ins.append({"t": round(time.monotonic() - T0, 2), "residual_s": round(residual, 2)})
         while True:
             try:
                 self.play_q.get_nowait()
@@ -187,77 +191,83 @@ class ChatCallback(OmniRealtimeCallback):
         try:
             self.mini.media.audio.clear_player()
         except Exception as e:
-            log(f"⚠ clear_player 失败:{type(e).__name__}: {e}")
+            log(f"⚠ clear_player 失败:{e}")
         if in_flight and self.conv is not None:
             self.conv.cancel_response()
-        log("⛔ 打断:已停止播放" + (",并取消在途回复" if in_flight else ""))
+        log(f"⛔ BARGE-IN(残余 {residual:.2f}s 已清,动作不中断)")
 
     def _maybe_continue_locked(self) -> bool:
-        """锁内判断:动作全回完 + 响应已结束 + 该响应无音频 + 没被打断 → 补 response.create。"""
+        """锁内判断:动作全部回完 + 响应已结束 + 需要补说话 → 该发 response.create 了。"""
         st = self.st
         if (
             st.fc_pending == 0
             and st.fc_response_done
             and st.fc_needs_rc
             and not st.fc_rc_sent
-            and st.fc_gen == st.play_gen
+            and st.fc_gen == st.play_gen  # 期间没被打断
         ):
             st.fc_rc_sent = True
             return True
         return False
 
-    def on_event(self, event) -> None:  # SDK 实际传入已解析的 dict
+    def on_event(self, event) -> None:
         st = self.st
         try:
             etype = event.get("type", "")
             now = time.monotonic()
             if etype == "session.created":
-                log(f"✅ 会话已建立 session_id={event['session']['id']}")
+                log(f"✅ session.created id={event['session']['id']}")
             elif etype == "session.updated":
-                log("✅ 会话配置生效(semantic_vad / 8 个动作工具已注册)")
-                log("▶ 可以对机器人说话了;它说话时可随时插话打断(Ctrl+C 退出)")
+                log("✅ session.updated(8 个动作工具已注册)")
                 st.session_updated.set()
             elif etype == "input_audio_buffer.speech_started":
                 with st.lock:
                     playing = (now < st.playback_end_estimate) or (not self.play_q.empty())
                     in_flight = st.in_flight > 0
-                log("🎤 检测到你开始说话…")
+                log(f"🎤 speech_started(播放中={playing},生成中={in_flight})")
                 if playing or in_flight:
                     self._do_barge_in(in_flight)
             elif etype == "input_audio_buffer.speech_stopped":
-                log("🤫 检测到你说完了,等模型回应…")
+                log("🤫 speech_stopped")
             elif etype == "conversation.item.input_audio_transcription.completed":
-                log(f"📝 听到的是:「{(event.get('transcript') or '').strip()}」")
+                t = (event.get("transcript") or "").strip()
+                with st.lock:
+                    st.input_transcripts.append(t)
+                log(f"📝 输入转写:「{t}」")
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
                     st.drop_audio = False
                     st.resp_audio_count = 0
-                    if st.fc_pending == 0:
+                    if st.fc_pending == 0:  # 新一轮,清上轮 fc 标志
                         st.fc_seen_this_resp = False
                         st.fc_response_done = False
                         st.fc_needs_rc = False
                         st.fc_rc_sent = False
-                log("💭 模型开始生成回复…")
+                log("💭 response.created")
             elif etype == "response.function_call_arguments.done":
                 name = event.get("name", "")
                 call_id = event.get("call_id", "")
+                args = event.get("arguments", "")
                 with st.lock:
                     st.fc_pending += 1
                     st.fc_seen_this_resp = True
                     st.fc_gen = st.play_gen
-                log(f"🤖 模型调用动作: {name}")
+                    st.fc_records.append(
+                        {"t": round(now - T0, 2), "name": name, "call_id": call_id, "args": args}
+                    )
+                log(f"🤖 模型调用动作: {name}(call_id={call_id})")
                 self.motion_q.put({"name": name, "call_id": call_id})
             elif etype == "response.audio_transcript.delta":
-                print(event.get("delta", ""), end="", flush=True)
-            elif etype == "response.audio_transcript.done":
-                print(flush=True)
+                with st.lock:
+                    st.reply_parts.append(event.get("delta", ""))
             elif etype == "response.audio.delta":
                 with st.lock:
                     if st.drop_audio:
                         return
                     gen = st.play_gen
                     st.resp_audio_count += 1
+                    st.audio_delta_count += 1
                 b64 = event.get("delta") or event.get("audio") or ""
                 pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
                 f16k = resample_poly(pcm.astype(np.float32) / 32768.0, PLAY_SR, OUT_SR).astype(np.float32)
@@ -270,17 +280,24 @@ class ChatCallback(OmniRealtimeCallback):
                         st.fc_response_done = True
                         st.fc_needs_rc = st.resp_audio_count == 0
                         fire_rc = self._maybe_continue_locked()
-                d = self.conv.get_last_first_audio_delay() if self.conv else None
-                log(f"✅ 本轮回复完成{f'(首音频延迟 {d:.0f}ms)' if d else ''}")
+                        mode = "纯动作(做完后补说话)" if st.fc_needs_rc else "音频+动作并发"
+                        log(f"✅ response.done(本响应含动作调用,{mode})")
+                    else:
+                        log("✅ response.done")
                 if fire_rc and self.conv is not None:
                     self.conv.create_response()
+                    log("▶ 已发 response.create(动作已先完成)")
+                if self.conv is not None:
+                    st.first_audio_delay_ms = self.conv.get_last_first_audio_delay()
             elif etype == "error":
-                log(f"❌ 服务端错误事件:{event}")
+                with st.lock:
+                    st.errors.append(event)
+                log(f"❌ error 事件:{event}")
         except Exception as e:
-            log(f"❌ on_event 处理异常:{type(e).__name__}: {e}\n   原始事件:{str(event)[:300]}")
+            log(f"❌ on_event 异常 {type(e).__name__}: {e} | 事件:{str(event)[:300]}")
 
 
-# ───────────────────────── 动作线程:串行执行,不阻塞音频 ─────────────────────────
+# ───────────────────────── 动作线程:串行执行,完了回 output ─────────────────────────
 def motion_loop(mini: ReachyMini, st: State, cb: ChatCallback, motion_q: "queue.Queue", stop: threading.Event) -> None:
     while not stop.is_set():
         try:
@@ -289,6 +306,10 @@ def motion_loop(mini: ReachyMini, st: State, cb: ChatCallback, motion_q: "queue.
             continue
         name, call_id = job["name"], job["call_id"]
         fn = ACTIONS.get(name)
+        t_start = time.monotonic()
+        with st.lock:
+            playing_at_start = t_start < st.playback_end_estimate
+        log(f"🦾 动作开始: {name}(此刻机器人{'正在' if playing_at_start else '没在'}说话)")
         ok = True
         if fn is None:
             ok = False
@@ -299,27 +320,33 @@ def motion_loop(mini: ReachyMini, st: State, cb: ChatCallback, motion_q: "queue.
             except Exception as e:
                 ok = False
                 log(f"⚠ 动作 {name} 执行失败:{type(e).__name__}: {e}")
-        log(f"✅ 动作完成: {name}")
+        dur = time.monotonic() - t_start
+        with st.lock:
+            st.motion_records.append(
+                {"name": name, "t_start": round(t_start - T0, 2), "dur_s": round(dur, 2),
+                 "speaking_at_start": playing_at_start, "ok": ok}
+            )
+        log(f"✅ 动作完成: {name}({dur:.1f}s)")
+        # 按协议回结果
+        output = json.dumps({"success": ok, "action": name}, ensure_ascii=False)
         fire_rc = False
         try:
-            cb.conv.create_item({
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": json.dumps({"success": ok, "action": name}, ensure_ascii=False),
-            })
+            cb.conv.create_item({"type": "function_call_output", "call_id": call_id, "output": output})
             with st.lock:
                 st.fc_pending = max(0, st.fc_pending - 1)
                 fire_rc = cb._maybe_continue_locked()
+            log(f"↩ 已回 function_call_output({name})")
         except Exception as e:
             log(f"⚠ 回 function_call_output 失败:{e}")
         if fire_rc:
             try:
                 cb.conv.create_response()
+                log("▶ 已发 response.create(纯动作响应,让模型继续说)")
             except Exception as e:
                 log(f"⚠ response.create 失败:{e}")
 
 
-# ───────────────────────── 播放线程:队列 → 扬声器 ─────────────────────────
+# ───────────────────────── 播放线程(同 D-01b)─────────────────────────
 def player_loop(mini: ReachyMini, st: State, play_q: "queue.Queue", stop: threading.Event) -> None:
     def current_gen() -> int:
         with st.lock:
@@ -364,17 +391,14 @@ def player_loop(mini: ReachyMini, st: State, play_q: "queue.Queue", stop: thread
             push(chunk)
 
 
-# ───────────────────────── 主流程 ─────────────────────────
 def main() -> int:
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
-        log("❌ 环境变量 DASHSCOPE_API_KEY 未配置,退出。")
+        log("❌ 无 DASHSCOPE_API_KEY")
         return 1
     dashscope.api_key = api_key
 
-    print("=== Reachy Mini 语音对话:可打断 + 动作工具 ===", flush=True)
-    log(f"模型:{MODEL}|semantic_vad|16k上行|24k→16k下行|8 动作工具")
-
+    print("=== O-01a-1 编排版:语音对话 + 动作工具 ===", flush=True)
     st = State()
     play_q: "queue.Queue" = queue.Queue()
     motion_q: "queue.Queue" = queue.Queue()
@@ -389,14 +413,14 @@ def main() -> int:
         try:
             mini.media.start_recording()
             mini.media.start_playing()
-            log("✅ 录音/播放管线已启动;回中立位…")
+            log("录音/播放管线已启动;回中立位…")
             mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.0, body_yaw=0.0)
             time.sleep(0.8)
 
-            callback = ChatCallback(st, play_q, motion_q, mini)
-            conv = OmniRealtimeConversation(model=MODEL, callback=callback)
-            callback.conv = conv
-            log("连接 Qwen-Omni-Realtime(北京端点)…")
+            cb = ChatCallback(st, play_q, motion_q, mini)
+            conv = OmniRealtimeConversation(model=MODEL, callback=cb)
+            cb.conv = conv
+            log("连接 Qwen-Omni-Realtime…")
             conv.connect()
             conv.update_session(
                 output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
@@ -407,7 +431,7 @@ def main() -> int:
                 enable_turn_detection=True,
                 turn_detection_type="semantic_vad",
                 instructions=INSTRUCTIONS,
-                tools=TOOLS,
+                tools=TOOLS,  # ★ 动作工具注册(扁平格式,经 kwargs 进 session)
             )
             if not st.session_updated.wait(timeout=10):
                 log("❌ 10s 内未收到 session.updated,中止")
@@ -415,54 +439,81 @@ def main() -> int:
                 return 1
 
             threading.Thread(target=player_loop, args=(mini, st, play_q, stop), daemon=True).start()
-            threading.Thread(target=motion_loop, args=(mini, st, callback, motion_q, stop), daemon=True).start()
+            threading.Thread(target=motion_loop, args=(mini, st, cb, motion_q, stop), daemon=True).start()
 
             while mini.media.get_audio_sample() is not None:
                 pass
 
-            # 主循环:麦克风 → Realtime 上行(每 10s 报一次电平,便于排查"说话没被听见")
-            sent_samples = 0
+            log(f"READY_FOR_SPEECH(录音窗口 {REC_WINDOW_S:.0f}s 现在打开)")
+            win_end = time.monotonic() + REC_WINDOW_S
+            sent = 0
             rms_acc: list[float] = []
             rms_t = time.monotonic()
+            while time.monotonic() < win_end:
+                chunk = mini.media.get_audio_sample()
+                if chunk is None or len(chunk) == 0:
+                    time.sleep(0.01)
+                    continue
+                mono = chunk[:, 0]
+                rms_acc.append(float(np.sqrt(np.mean(mono**2))))
+                pcm16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
+                conv.append_audio(base64.b64encode(pcm16.tobytes()).decode("ascii"))
+                sent += len(mono)
+                if time.monotonic() - rms_t >= 5.0:  # 每 5s 报一次上行电平,排查"说话没被听见"
+                    rms = float(np.mean(rms_acc)) if rms_acc else 0.0
+                    log(f"🎙 近5s 上行 RMS={rms:.4f}({'有声' if rms > 0.005 else '偏弱/静音,请大声靠近'})")
+                    rms_acc = []
+                    rms_t = time.monotonic()
+            log(f"录音窗口关闭,共上行 {sent / PLAY_SR:.1f}s 音频;补 1.5s 静音帧")
+            silence = base64.b64encode(np.zeros(8000, dtype=np.int16).tobytes()).decode("ascii")
+            for _ in range(3):
+                conv.append_audio(silence)
+                time.sleep(0.5)
+
+            deadline = time.monotonic() + RESPONSE_TIMEOUT_S
+            while time.monotonic() < deadline:
+                with st.lock:
+                    pending = st.in_flight > 0 or st.fc_pending > 0
+                if not pending and play_q.empty() and motion_q.empty():
+                    break
+                time.sleep(0.2)
+
+            with st.lock:
+                tail = st.playback_end_estimate - time.monotonic()
+            if tail > 0:
+                log(f"等待播放余量 {tail:.1f}s…")
+                time.sleep(tail + 1.0)
+
+            stop.set()
             try:
-                while True:
-                    chunk = mini.media.get_audio_sample()
-                    if chunk is None or len(chunk) == 0:
-                        time.sleep(0.01)
-                        continue
-                    mono = chunk[:, 0]
-                    rms_acc.append(float(np.sqrt(np.mean(mono**2))))
-                    pcm16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
-                    conv.append_audio(base64.b64encode(pcm16.tobytes()).decode("ascii"))
-                    sent_samples += len(mono)
-                    if time.monotonic() - rms_t >= 10.0:
-                        rms = float(np.mean(rms_acc)) if rms_acc else 0.0
-                        if rms < 0.005:
-                            log(f"🎙 近10s 上行电平偏低(RMS={rms:.4f}),说话请大声靠近")
-                        rms_acc = []
-                        rms_t = time.monotonic()
-            except KeyboardInterrupt:
-                print(flush=True)
-                log(f"收到 Ctrl+C,退出。本次共上行音频 {sent_samples / 16000:.1f} 秒")
-            finally:
-                stop.set()
-                try:
-                    conv.close()
-                except Exception:
-                    pass
-                try:
-                    mini.media.stop_recording()
-                    mini.media.stop_playing()
-                    mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.0, body_yaw=0.0)
-                except Exception:
-                    pass
-                log("已释放 Realtime 连接与 Reachy 媒体资源。")
+                conv.close()
+            except Exception:
+                pass
+            mini.media.stop_recording()
+            mini.media.stop_playing()
+            mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.0, body_yaw=0.0)
         finally:
             try:
                 mini.set_automatic_body_yaw(True)
             except Exception:
                 pass
-    return 0
+
+    # ── 汇总 ──
+    print("\n========== 汇总 ==========", flush=True)
+    print(f"输入转写:{st.input_transcripts}", flush=True)
+    print(f"回复全文:「{''.join(st.reply_parts).strip()}」", flush=True)
+    print(f"模型动作调用({len(st.fc_records)} 次):", flush=True)
+    for r in st.fc_records:
+        print(f"  t+{r['t']}s {r['name']}", flush=True)
+    print(f"动作执行记录({len(st.motion_records)} 次):", flush=True)
+    for r in st.motion_records:
+        concur = "【边说边动】" if r["speaking_at_start"] else ""
+        print(f"  t+{r['t_start']}s {r['name']} {r['dur_s']}s ok={r['ok']} {concur}", flush=True)
+    print(f"barge-in:{st.barge_ins if st.barge_ins else '无'}", flush=True)
+    print(f"audio.delta 总数:{st.audio_delta_count}|error:{st.errors if st.errors else '无'}", flush=True)
+    ok = bool(st.fc_records) and all(r["ok"] for r in st.motion_records) and not st.errors
+    print(f"=== {'动作工具闭环成功' if ok else '未达验收,看上方记录'} ===", flush=True)
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
