@@ -2,7 +2,7 @@
 
 > 设备:Reachy Mini **Lite**(USB 版,VID 38FB Pollen),电机走 COM3。
 > daemon:`reachy-mini-daemon.exe`(venv Scripts 下),localhost:8000。
-> 本文件记录 2026-06-03 五项硬件体检经**实测验证**的结论,供后续开发(OpenAI Realtime 语音对话 / Edge Runtime / D-01 等)直接引用。
+> 本文件记录经**实测验证**的结论(2026-06-03 五项硬件体检 + 2026-06-05 Qwen-Omni-Realtime 语音对话对接),供后续开发(Edge Runtime / 工具调用 / 唤醒词等)直接引用。
 > 体检脚本见 `healthcheck/`(各脚本作用见该目录 README)。
 
 ---
@@ -102,6 +102,36 @@ from reachy_mini import ReachyMini
 
 ---
 
+## 6. Qwen3.5-Omni-Realtime 语音对话对接 ✅(2026-06-05,D-01)
+
+全双工语音对话已跑通(说话→机器人语音回应→可随时插话打断)。实现:`voice/d01_realtime_chat.py`;编排测试版 `voice/_d01a_orchestrated.py` / `_d01b_orchestrated.py` 留作回归。
+
+### 连接
+- 模型 **`qwen3.5-omni-plus-realtime`**,北京端点 `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`(SDK 默认),鉴权 `DASHSCOPE_API_KEY`。
+- 用 **dashscope Python SDK**(装的 1.25.21,要求 ≥1.23.9):`dashscope.audio.qwen_omni` 的 `OmniRealtimeConversation` + `OmniRealtimeCallback`。注意 `on_event(event)` 实际收到的是**已解析的 dict**(类型注解写 str,别信)。
+- **代理坑扩展:** `NO_PROXY` 除 localhost 外还要加 **`.aliyuncs.com`**(dashscope 走 websocket-client,会读代理环境变量;大陆直连,别让 7897 劫持 wss)。
+- VAD 用 **`semantic_vad`**(官方对 qwen3.5 系列的推荐),说话起止/回复触发全部服务端自动;单连接最长 120 分钟。
+
+### 音频管线(实测参数)
+- **上行零重采样:** Realtime 要求 16kHz/PCM16/单声道,与 Reachy 麦克风原生格式完全一致 → `get_audio_sample()[:,0]`(A-01)→ `int16` → base64 → `append_audio()`。录音管线常开(A-02)。
+- **下行必须重采样:** Realtime 输出 **24kHz** PCM16,而播放管线 appsrc caps 固定 **16kHz**(`audio_gstreamer.py`)→ `scipy.signal.resample_poly(f32, 16000, 24000)` 后 `push_audio_sample()` 流播。
+  (若改走"存 wav + `play_sound()`"则任意采样率都行,decodebin 自己转。)
+- **抖动缓冲:** 每段回复先攒 **~0.32s**(300ms 目标 + 0.5s 兜底超时)再开播,句中无停顿;收包回调只解码入队,播放由独立线程消费,不阻塞 WebSocket。
+- **实测延迟:** 首音频延迟稳定 **~370ms**;回声消除有效——机器人自己说话不会触发 VAD(无自问自答)。
+
+### 三层打断(barge-in,实测打断到静音 ~20ms)
+播放中或生成中收到 `input_audio_buffer.speech_started` →
+1. **代际计数** `play_gen += 1`:播放队列里旧代际块全部作废;
+2. **`mini.media.audio.clear_player()`** ⭐:SDK 原生接口(media_manager **没**透出,要从 `.audio` 后端拿),flush appsrc,已推未播的残余瞬间清空——实测一次清掉 7.1s 残余;
+3. 回复仍在生成则 **`cancel_response()`**(此分支因模型生成快于播放,极少触发,尚未实测踩到)。
+另:打断后到下一个 `response.created` 之间的 `response.audio.delta` 全部丢弃(在途旧块)。
+
+### 已知待办
+- 麦克风常开 → 环境闲聊也会被当输入接话,需要唤醒词/按键门控(后续阶段)。
+- function calling(Realtime 原生支持,与联网搜索不兼容)留给 O-01 工具调用阶段。
+
+---
+
 ## 体检汇总(2026-06-03)
 
 | 项 | 通道 | 结果 | 关键数据 |
@@ -111,3 +141,10 @@ from reachy_mini import ReachyMini
 | 3 | 摄像头 | ✅ | 1920×1080 BGR,FPS≈49 |
 | 4 | 麦克风 | ✅ | 16kHz 双声道(实为单声道复制),RMS 正常 |
 | 5 | 扬声器 | ✅ | 从 Reachy 声卡出声,440Hz+中文 TTS 清晰 |
+
+## 阶段进展
+
+| 阶段 | 日期 | 结果 |
+|---|---|---|
+| 五项硬件 I/O 体检 | 2026-06-03 | ✅ 全过(上表) |
+| D-01 Realtime 语音对话(含打断) | 2026-06-05 | ✅ 首音频 ~370ms,打断 ~20ms,见 §6 |
