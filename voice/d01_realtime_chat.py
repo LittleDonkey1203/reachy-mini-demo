@@ -1,21 +1,28 @@
 # -*- coding: utf-8 -*-
-"""Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01 + O-01a + V-01 + F-01:完整体)。
+"""Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-02:完整体)。
 
 对着机器人说话 → Qwen 全双工识别并生成语音 → 从机器人扬声器播放;
 说话时可随时插话打断(barge-in);模型自主调用动作工具做身体语言
 (点头/摇头/看向/摆天线/歪头),可边说边动;说话时有 idle 微动;
 让它"看"时调 take_snapshot 抓当前画面 → chat.completions 看图 → 语音转述;
-本地视觉(MediaPipe)持续看脸,聊天时头温和地跟着人转(F-01 融合)。
+本地视觉(MediaPipe)持续看脸,聊天时头温和地跟着人转(F-01 融合);
+在视场外(背后/侧后)叫它 → DOA 声源转向 → 人脸进视野 → 视觉接管(FUSION-02)。
 
-三层动作仲裁(F-01,优先级从高到低,头部 channel 唯一写入口是 head_control_loop):
+四层动作仲裁(FUSION-02,优先级从高到低,头部唯一 set_target 写入口 head_control_loop):
   Primary  明确手势(function_call):motion 线程 goto_target 独占,
-           其他层让位(head_control 停发);手势以"当前跟随姿态"为基准做
-           (点头时继续看着人),做完回基准 → 跟随无缝接管,不突跳。
-  Tracking 人脸跟随:视觉线程 41fps 检测、积分出 track_yaw/pitch 目标;
-           ⭐ 增益必须时间常数型 step=err×(1−exp(−dt/τ)),与帧率解耦
-           (帧率比例增益在 47fps 下打摆,见 CALIBRATION §9 教训)。
-  Idle     说话微动:跟随之上小幅叠加(跟随时缩到 40%,不打架);
-           无人脸时回原幅度,行为同 O-01a-2。
+           其他层让位;手势以"当前跟随姿态"为基准做(身体保持当前朝向),
+           做完回基准 → 无缝接管不突跳。
+  SoundTurn 声源转向(事件性,DOA REST 10Hz):丢脸 且 DOA 残差>25°(视场外
+           有人说话)→ 闭环链式转向(头给世界系完整角 + 身体分担,匀速 ramp,
+           每步同步状态);转向中看到脸立即中止交还视觉;最多 3 跳(后方镜像角
+           逐跳收缩,天然可达背后),仍无脸则放弃进冷却。有脸在跟时绝不抢。
+  Tracking 人脸跟随:视觉线程积分 track_yaw(头的世界朝向目标,限身体±23°);
+           ⭐ 增益必须时间常数型 step=err×(1−exp(−dt/τ))(CALIBRATION §9);
+           丢脸衰减回"身体正前"而不是世界 0°。
+  Idle     说话微动:跟随之上小幅叠加(跟随时缩到 40%,不打架)。
+
+⭐ 参考系(CALIBRATION §11 教训):head pose 是世界系;body_yaw 转动被 Stewart
+反向补偿,头世界朝向不变 → 大角度转向 head 给完整目标角,body_yaw 只是分担量。
 
 音频链路(实测验证,见 ../CALIBRATION.md §6):
   上行:麦克风 16kHz 原生 → 取 audio[:,0] → int16 → base64(零重采样)
@@ -42,10 +49,13 @@ import base64
 import io
 import json
 import math
+import multiprocessing
 import queue
 import sys
 import threading
 import time
+import urllib.request
+from collections import deque
 
 import numpy as np
 from PIL import Image
@@ -62,9 +72,9 @@ from dashscope.audio.qwen_omni import (
 from openai import OpenAI
 from reachy_mini import ReachyMini
 
-import mediapipe as mp  # 只用库做推理;禁开 cv2.VideoCapture / sounddevice 流
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
+# MediaPipe 不在主进程导入(TRACK-FIX):检测在 vision_worker 子进程跑,独立 GIL。
+# 背景:六线程融合后视觉循环被 GIL 饿到 41→19fps,挪进程后与音频/动作/DOA 真并行。
+from vision_worker import vision_worker
 
 # ───────────────────────── 配置 ─────────────────────────
 MODEL = "qwen3.5-omni-plus-realtime"
@@ -78,6 +88,8 @@ INSTRUCTIONS = (
     "开心/兴奋/被夸时摆天线,好奇/疑惑时歪头。"
     "重要:做动作时必须同时用语音回应,边说边做;绝不要默默做动作不说话。"
     "用户让你看东西时调用 take_snapshot,拿到画面描述后用自己的话自然地告诉用户你看到了什么。"
+    "当用户用手指指着某个东西问'这是什么''我指的是什么''这个呢'之类、需要判断他指向哪个物体时,"
+    "调用 identify_pointed_object,拿到结果后自然地说出他指的那个东西。"
 )
 
 SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")  # 快照存放(已 gitignore)
@@ -97,11 +109,11 @@ IDLE_TAU = 0.5        # 包络时间常数(s)
 TRACK_SWAY_SCALE = 0.4  # 跟随中微动缩放(小幅叠加,不和跟随打架)
 
 # ── 本地视觉跟随(VIS-01 → F-01 融合,参数与教训见 CALIBRATION §9)──
-VIS_MODEL_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "vision", "models", "face_landmarker.task",
-)
-VIS_MAX_FPS = 30.0   # 检测限频(基线 41fps/12ms,降到 30 给对话留余量;τ 控制与帧率解耦)
+_VIS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vision", "models")
+VIS_MODEL_PATH = os.path.join(_VIS_DIR, "face_landmarker.task")
+HAND_MODEL_PATH = os.path.join(_VIS_DIR, "hand_landmarker.task")
+VIS_MAX_FPS = 40.0   # 检测限频(检测在独立进程,不再让主进程分担,放回 40)
+VIS_MISS_N = 5       # 连续 N 帧漏检才算"真丢脸"(单帧漏检不重置滤波,防侧脸闪断)
 DECIMATE = 3         # 1920×1080 → ::3 整数抽样 → 640×360
 FOV_X_DEG = 65.0
 FOV_Y_DEG = 40.0
@@ -116,9 +128,50 @@ LOST_HOLD_S = 1.5      # 丢脸后保持朝向时长,超时缓慢回中
 RETURN_TAU = 0.8       # 回中时间常数(s)(同样与帧率解耦)
 YAW_SIGN = -1.0        # 画面右(u>0.5)= 机器人右边 → yaw 负(摄像头不镜像)
 PITCH_SIGN = +1.0      # 画面下 → pitch 正(低头)
-# 手势合成安全箱:手势 offset 叠加跟随基准后裁剪到此范围(幅度均在已验证上限内)
-GES_YAW_BOX = 25.0
+# 手势合成安全箱:手势 offset 叠加跟随基准后,yaw 裁剪到身体±箱,pitch 绝对裁剪
+GES_YAW_BOX = 25.0   # 相对身体
 GES_PITCH_BOX = 16.0
+
+# ── 声源转向(FUSION-02;DOA 要点与参考系教训见 CALIBRATION §11)──
+DOA_URL = "http://127.0.0.1:8000/api/state/doa"
+DOA_POLL_HZ = 10.0
+SND_WIN_S = 1.5            # DOA 中值窗口(VAD 触发率实测仅 11~57%,窗口要够长)
+SND_MIN_SAMPLES = 5        # 窗口最少有声样本(压反射双峰)
+SND_RESID_MIN = 25.0       # 残差超过此值才算"视场外声源"(触发门槛)
+SND_DONE_RESID = 10.0      # 链式跳间:残差小于此值=已对准声源,不再转
+SND_FACE_FRESH_S = 1.2     # 最近见脸 < 此值 → 视觉在跟,DOA 不抢
+SND_MAX_HOPS = 3           # 一次事件最多链式转几跳(后方镜像角逐跳收缩,可达背后)
+SND_WAIT_FACE_S = 2.0      # 每跳后等人脸进视野的时长
+SND_COOLDOWN_S = 6.0       # 事件失败后的冷却(防无限转)
+SND_SPEED_DPS = 90.0       # 转向角速度(度/秒)
+SND_TARGET_LIMIT = 110.0   # 世界系目标限幅(身体 ±90 + 颈 ±23 以内)
+BODY_LIMIT_DEG = 90.0      # 身体转动限幅
+NECK_REL_LIMIT = 23.0      # 颈(Stewart)相对身体限幅(25° 留 2° 余量)
+
+# ── 行为状态机(FUSION-03;behavior_loop 统一调度,其余线程降级为传感器+执行器)──
+ST_IDLE = "IDLE_CENTER"    # 中立待命:头回正 + 微动,监听声音/人脸
+ST_ENGAGING = "ENGAGING"   # 转向声源 + 主动扫头找人
+ST_TRACKING = "TRACKING"   # 视觉稳定跟随 + 对话/动作/微动
+ST_SEARCHING = "SEARCHING"  # 短暂找回:原地等,有声音则 DOA 辅助
+ST_RETURNING = "RETURNING"  # 平滑回中位
+FACE_FRESH_S = 0.4         # 人脸"新鲜"判定(瞬时)
+LOCK_ON_S = 0.3            # 迟滞:持续命中多久才算"锁定"(防单帧误触发进 TRACKING)
+LOCK_OFF_S = 1.5           # 迟滞:持续丢失多久才算"丢锁"(= LOST_HOLD,防瞬断退出 TRACKING)
+ENGAGE_TIMEOUT_S = 6.0     # ENGAGING 总超时(转向+扫描都没找到 → 放弃)
+ENGAGE_SCAN_RANGE = 15.0   # 转到声源后,主动扫头找人的幅度(度)
+ENGAGE_SCAN_TIME_S = 3.0   # 扫头找人时长
+SEARCH_TIMEOUT_S = 4.0     # SEARCHING 超时 → 回中位
+NO_INTERACT_S = 15.0       # TRACKING 无说话互动多久 → 回中位(用户定 15s)
+FSM_HZ = 25.0              # behavior_loop 频率
+
+# ── 指向转头(POINT-02-b):手指 2D 方向 → 头部转角 ──
+ST_POINTING = "POINTING"   # 指向转头中(转完 → snapshot → 回 TRACKING)
+POINT_FRESH_S = 1.2        # 食指方向"新鲜"判定(behavior 读最近一次手部检测)
+POINT_YAW_GAIN = 38.0      # 水平指向 → yaw 转角(度;转头不求精确,把目标转进画面即可)
+POINT_PITCH_GAIN = 12.0    # 垂直指向 → pitch 转角(度)
+POINT_TURN_TIMEOUT_S = 2.5  # 转头封顶时长
+POINT_SETTLE_S = 0.6       # 转到位后停稳多久再抓帧(让电机+相机稳定,目标居中)
+POINT_HOLD_MAX_S = 4.0     # 抓帧后最多保持朝向多久(等看图描述返回,期间不被拽回人脸)
 
 
 def log(msg: str) -> None:
@@ -136,57 +189,64 @@ def head_pose(pitch_deg: float = 0.0, yaw_deg: float = 0.0, roll_deg: float = 0.
     return T
 
 
-def gpose(yaw: float, pitch: float, roll: float = 0.0) -> np.ndarray:
-    """手势姿态 = 跟随基准 + 手势 offset,裁剪进安全箱(F-01:点头时继续看着人)。"""
+def gpose(yaw: float, pitch: float, body: float, roll: float = 0.0) -> np.ndarray:
+    """手势姿态 = 跟随基准 + 手势 offset;yaw 裁剪到身体±箱(颈不顶限),pitch 绝对裁剪。"""
     return head_pose(
         pitch_deg=float(np.clip(pitch, -GES_PITCH_BOX, GES_PITCH_BOX)),
-        yaw_deg=float(np.clip(yaw, -GES_YAW_BOX, GES_YAW_BOX)),
+        yaw_deg=float(np.clip(yaw, body - GES_YAW_BOX, body + GES_YAW_BOX)),
         roll_deg=roll,
     )
 
 
-# 所有手势签名 (mini, base_yaw, base_pitch):以当前跟随姿态为基准,做完回基准
-def act_nod(m: ReachyMini, by: float, bp: float) -> None:
+# 所有手势签名 (mini, base_yaw, base_pitch, body):以当前跟随姿态为基准做、做完回基准;
+# ⭐ body_yaw 必须传当前身体朝向(传 0 会把转过去的身体拽回正前)
+def act_nod(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    brad = math.radians(body)
     for _ in range(2):
-        m.goto_target(gpose(by, bp + 15), duration=0.35, body_yaw=0.0)
-        m.goto_target(gpose(by, bp - 10), duration=0.35, body_yaw=0.0)
-    m.goto_target(gpose(by, bp), duration=0.35, body_yaw=0.0)
+        m.goto_target(gpose(by, bp + 15, body), duration=0.35, body_yaw=brad)
+        m.goto_target(gpose(by, bp - 10, body), duration=0.35, body_yaw=brad)
+    m.goto_target(gpose(by, bp, body), duration=0.35, body_yaw=brad)
 
 
-def act_shake(m: ReachyMini, by: float, bp: float) -> None:
+def act_shake(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    brad = math.radians(body)
     for _ in range(2):
-        m.goto_target(gpose(by + 15, bp), duration=0.35, body_yaw=0.0)
-        m.goto_target(gpose(by - 15, bp), duration=0.35, body_yaw=0.0)
-    m.goto_target(gpose(by, bp), duration=0.35, body_yaw=0.0)
+        m.goto_target(gpose(by + 15, bp, body), duration=0.35, body_yaw=brad)
+        m.goto_target(gpose(by - 15, bp, body), duration=0.35, body_yaw=brad)
+    m.goto_target(gpose(by, bp, body), duration=0.35, body_yaw=brad)
 
 
-def _look(m: ReachyMini, by: float, bp: float, **kw) -> None:
-    """看向某方向是绝对指令(离开人脸),看完回跟随基准。"""
-    m.goto_target(head_pose(**kw), duration=0.6, body_yaw=0.0)
+def _look(m: ReachyMini, by: float, bp: float, body: float,
+          yaw_off: float = 0.0, pitch_off: float = 0.0) -> None:
+    """看向某方向(相对身体正前的偏向),看完回跟随基准。"""
+    brad = math.radians(body)
+    m.goto_target(gpose(body + yaw_off, pitch_off, body), duration=0.6, body_yaw=brad)
     time.sleep(0.8)
-    m.goto_target(gpose(by, bp), duration=0.6, body_yaw=0.0)
+    m.goto_target(gpose(by, bp, body), duration=0.6, body_yaw=brad)
 
 
-def act_wiggle(m: ReachyMini, by: float, bp: float) -> None:
+def act_wiggle(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    brad = math.radians(body)
     for _ in range(2):
-        m.goto_target(antennas=[+0.8, -0.8], duration=0.3, body_yaw=0.0)
-        m.goto_target(antennas=[-0.8, +0.8], duration=0.3, body_yaw=0.0)
-    m.goto_target(antennas=INIT_ANTENNAS, duration=0.35, body_yaw=0.0)
+        m.goto_target(antennas=[+0.8, -0.8], duration=0.3, body_yaw=brad)
+        m.goto_target(antennas=[-0.8, +0.8], duration=0.3, body_yaw=brad)
+    m.goto_target(antennas=INIT_ANTENNAS, duration=0.35, body_yaw=brad)
 
 
-def act_tilt(m: ReachyMini, by: float, bp: float) -> None:
-    m.goto_target(gpose(by, bp, roll=15), duration=0.5, body_yaw=0.0)
+def act_tilt(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    brad = math.radians(body)
+    m.goto_target(gpose(by, bp, body, roll=15), duration=0.5, body_yaw=brad)
     time.sleep(0.8)
-    m.goto_target(gpose(by, bp), duration=0.5, body_yaw=0.0)
+    m.goto_target(gpose(by, bp, body), duration=0.5, body_yaw=brad)
 
 
 ACTIONS = {
     "nod": act_nod,
     "shake_head": act_shake,
-    "look_left": lambda m, by, bp: _look(m, by, bp, yaw_deg=+16),
-    "look_right": lambda m, by, bp: _look(m, by, bp, yaw_deg=-16),
-    "look_up": lambda m, by, bp: _look(m, by, bp, pitch_deg=-16),
-    "look_down": lambda m, by, bp: _look(m, by, bp, pitch_deg=+16),
+    "look_left": lambda m, by, bp, body: _look(m, by, bp, body, yaw_off=+16),
+    "look_right": lambda m, by, bp, body: _look(m, by, bp, body, yaw_off=-16),
+    "look_up": lambda m, by, bp, body: _look(m, by, bp, body, pitch_off=-16),
+    "look_down": lambda m, by, bp, body: _look(m, by, bp, body, pitch_off=+16),
     "wiggle_antennas": act_wiggle,
     "tilt_head": act_tilt,
 }
@@ -202,9 +262,25 @@ TOOLS = [
     {"type": "function", "name": "wiggle_antennas", "description": "欢快地摆动头顶天线。表达开心、兴奋、被夸奖、热情时使用。", "parameters": _NOPARAM},
     {"type": "function", "name": "tilt_head", "description": "歪头。表达好奇、疑惑、思考、没听懂时使用。", "parameters": _NOPARAM},
     {"type": "function", "name": "take_snapshot",
-     "description": "用摄像头拍一张当前画面并理解内容。当用户让你看东西、问'你看到什么''我手里是什么''这是什么'等需要视觉的问题时调用。",
+     "description": "用摄像头拍一张当前画面并理解内容。当用户让你看东西、问'你看到什么''我手里是什么'等需要视觉、但不涉及'指向'的问题时调用。",
+     "parameters": _NOPARAM},
+    {"type": "function", "name": "identify_pointed_object",
+     "description": "当用户用手指指向画面中某个物体、问'这是什么''我指的是什么''这个是啥'等需要判断他指向哪个物体时调用。会拍照并理解用户手指指向的目标。",
      "parameters": _NOPARAM},
 ]
+
+# 看图 prompt(POINT-01)。两个都做"指向感知":工具路由从音频判断"是否指向"不可靠
+# (实测模型对"你看这是什么"会选通用看图),故通用 prompt 也兜底处理指向。
+_POINT_GUIDE = ("如果用户正在用手指指向画面中某个物体(看手的朝向、伸出的食指延长线),"
+                "请重点判断并明确说出他指的是哪一个物体、那是什么;")
+SNAP_PROMPTS = {
+    "scene": ("你是机器人的眼睛。用简体中文两三句话回答。" + _POINT_GUIDE +
+              "否则描述画面主要内容,特别是人手里举着或拿着的物体(若有)。"),
+    "point": ("你是机器人的眼睛。用户正在用手指指向画面中的某个物体。"
+              "请仔细观察用户手指的指向(手的朝向、伸出的食指延长线),"
+              "判断用户指的是哪一个物体,用简体中文两三句话明确说出那个物体是什么并简要描述。"
+              "如果画面里没有看到明显的指向手势,就说你不太确定他指的是哪个,并描述画面里最可能的几个物体。"),
+}
 
 
 # ───────────────────────── One Euro 滤波(VIS-01 验证参数)─────────────────────────
@@ -245,22 +321,6 @@ class OneEuroFilter:
         self.t_prev = None
 
 
-def pick_main_face(result) -> tuple[float, float, float] | None:
-    """返回最大人脸的 (u, v, 高度占比);没有人脸返回 None。"""
-    if not result.face_landmarks:
-        return None
-    best = None
-    best_h = -1.0
-    for lms in result.face_landmarks:
-        xs = [p.x for p in lms]
-        ys = [p.y for p in lms]
-        h = max(ys) - min(ys)
-        if h > best_h:
-            best_h = h
-            best = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0, h)
-    return best
-
-
 # ───────────────────────── 共享状态 ─────────────────────────
 class State:
     def __init__(self) -> None:
@@ -275,11 +335,23 @@ class State:
         self.resp_audio_count = 0
         self.fc_seen_this_resp = False
         self.fc_gen = 0
-        # 三层仲裁
-        self.action_active = False   # Primary 手势执行中 → Tracking/Idle 让位
-        self.track_yaw = 0.0         # Tracking 目标角(视觉线程积分;head_control 读)
+        # 行为状态机(FUSION-03)
+        self.state = ST_IDLE           # 当前行为状态(behavior_loop 唯一写)
+        self.action_active = False     # Primary 手势执行中 → 头控让位给 goto
+        self.track_yaw = 0.0           # 头的【世界】朝向目标(TRACKING 由视觉积分,其余由 behavior 驱动)
         self.track_pitch = 0.0
-        self.face_seen_at = 0.0      # 最近一次检出人脸的时刻
+        self.body_yaw_deg = 0.0        # 身体当前朝向(度)
+        self.face_seen_at = 0.0        # 最近一次检出人脸的时刻(瞬时)
+        self.face_locked = False       # 迟滞后的"稳定有脸"判定(behavior 用它做 TRACKING 进出)
+        self.last_interaction_at = 0.0  # 最近一次说话互动(用户/机器人)→ RETURNING 计时
+        self.sound_resid = None        # DOA 传感器:置信的视场外声源残差(度),无则 None
+        self.sound_at = 0.0            # 上述读数的时刻
+        # 指向(POINT-02):视觉子进程发布的最近食指方向 + 待处理的指向请求
+        self.finger_angle = None       # 食指画面系角度(度),无则 None
+        self.finger_at = 0.0
+        self.finger_extended = False
+        self.point_request = None      # {"call_id","gen"}:模型调了 identify_pointed_object,待转头看图
+        self.snap_grabbed = False      # snapshot_loop 抓到帧的握手(POINTING 等它为真才许转回)
         # 帧共享(视觉线程是唯一持续 get_frame 者;take_snapshot 读这里)
         self.latest_frame = None
         self.latest_frame_t = 0.0
@@ -332,11 +404,12 @@ class ChatCallback(OmniRealtimeCallback):
             if etype == "session.created":
                 log(f"✅ 会话已建立 session_id={event['session']['id']}")
             elif etype == "session.updated":
-                log("✅ 会话配置生效(semantic_vad / 8 个动作工具 + take_snapshot 已注册)")
+                log("✅ 会话配置生效(semantic_vad / 8 动作 + take_snapshot + identify_pointed_object 已注册)")
                 log("▶ 可以对机器人说话了;它说话时可随时插话打断(Ctrl+C 退出)")
                 st.session_updated.set()
             elif etype == "input_audio_buffer.speech_started":
                 with st.lock:
+                    st.last_interaction_at = now  # 用户开口 → 喂 RETURNING 计时器
                     playing = (now < st.playback_end_estimate) or (not self.play_q.empty())
                     in_flight = st.in_flight > 0
                 log("🎤 检测到你开始说话…")
@@ -352,6 +425,7 @@ class ChatCallback(OmniRealtimeCallback):
                     st.drop_audio = False
                     st.resp_audio_count = 0
                     st.fc_seen_this_resp = False
+                    st.last_interaction_at = now  # 机器人开口 → 喂 RETURNING 计时器
                 log("💭 模型开始生成回复…")
             elif etype == "response.function_call_arguments.done":
                 name = event.get("name", "")
@@ -361,10 +435,17 @@ class ChatCallback(OmniRealtimeCallback):
                     st.fc_gen = st.play_gen
                 log(f"🤖 模型调用工具: {name}")
                 if name == "take_snapshot":
-                    # 快照:必须等图像理解结果才回 output(worker 完成后回 + 补话)
+                    # 看图:立即抓帧看图(必须等描述才回 output)
                     with st.lock:
                         st.snapshot_pending += 1
-                    self.snap_q.put({"call_id": call_id, "gen": st.fc_gen})
+                    self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "scene"})
+                elif name == "identify_pointed_object":
+                    # 指向:先转头朝手指方向,再看图(POINT-02-b)。behavior_loop 处理转头,
+                    # 转完才入 snap_q。snapshot_pending 先占位,防 response.done 抢跑。
+                    with st.lock:
+                        st.snapshot_pending += 1
+                        st.point_request = {"call_id": call_id, "gen": st.fc_gen}
+                    log("👉 收到指向请求,交给状态机转头朝手指方向")
                 else:
                     # 手势:乐观即时回 output → 说话不等动作做完
                     self.motion_q.put({"name": name, "call_id": call_id})
@@ -425,14 +506,15 @@ def motion_loop(mini: ReachyMini, st: State, motion_q: "queue.Queue", stop: thre
         name = job["name"]
         fn = ACTIONS.get(name)
         with st.lock:
-            st.action_active = True  # Tracking/Idle 让位
+            st.action_active = True  # SoundTurn/Tracking/Idle 让位
             by, bp = st.track_yaw, st.track_pitch
+            body = st.body_yaw_deg   # ⭐ 手势期间身体保持当前朝向(传 0 会拽回正前)
         try:
             if fn is None:
                 log(f"⚠ 未知动作 {name}")
             else:
-                fn(mini, by, bp)
-                log(f"✅ 动作完成: {name}(基准 yaw={by:+.1f}° pitch={bp:+.1f}°,跟随恢复)")
+                fn(mini, by, bp, body)
+                log(f"✅ 动作完成: {name}(基准 yaw={by:+.1f}° pitch={bp:+.1f}° body={body:+.1f}°,跟随恢复)")
         except Exception as e:
             log(f"⚠ 动作 {name} 执行失败:{type(e).__name__}: {e}")
         finally:
@@ -454,9 +536,10 @@ def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
         except queue.Empty:
             continue
         call_id, gen0 = job["call_id"], job["gen"]
+        mode = job.get("mode", "scene")
         snap_idx += 1
         t0 = time.monotonic()
-        log("📸 拍照:取当前画面…")
+        log(f"📸 拍照:取当前画面…({'指向理解' if mode == 'point' else '场景描述'})")
         with st.lock:
             frame = st.latest_frame
             fresh = (time.monotonic() - st.latest_frame_t) < 1.0
@@ -482,6 +565,8 @@ def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
             buf = io.BytesIO()
             img.save(buf, "JPEG", quality=85)
             jpg_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            with st.lock:
+                st.snap_grabbed = True  # 帧已落盘内存 → 通知 POINTING 可以转回了
             log(f"📸 取到帧并压缩({len(buf.getvalue()) / 1024:.0f}KB),送看图…")
             try:
                 comp = oai.chat.completions.create(
@@ -489,8 +574,7 @@ def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
                     messages=[{"role": "user", "content": [
                         {"type": "image_url",
                          "image_url": {"url": f"data:image/jpeg;base64,{jpg_b64}"}},
-                        {"type": "text",
-                         "text": "你是机器人的眼睛。用简体中文两三句话描述画面主要内容,特别是人手里举着或拿着的物体(若有)。"},
+                        {"type": "text", "text": SNAP_PROMPTS[mode]},
                     ]}],
                     stream=True,  # omni 必须流式
                     stream_options={"include_usage": True},
@@ -526,38 +610,12 @@ def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
                 log(f"⚠ response.create 失败:{e}")
 
 
-# ───────────────────────── 视觉线程:看脸 + 积分跟随目标 ─────────────────────────
-def vision_loop(mini: ReachyMini, st: State, stop: threading.Event) -> None:
-    """MediaPipe 看脸:唯一持续 get_frame 者(最新帧共享给 take_snapshot)。
-    只负责"感知 + 积分目标角",不直接动头(头部唯一写入口在 head_control_loop)。
-    手势执行中(action_active)冻结积分,手势结束后从基准平滑收敛到人脸。"""
-    if not os.path.exists(VIS_MODEL_PATH):
-        log(f"⚠ 视觉模型不存在({VIS_MODEL_PATH}),本次无人脸跟随(其余功能不受影响)")
-        return
-    try:
-        landmarker = mp_vision.FaceLandmarker.create_from_options(
-            mp_vision.FaceLandmarkerOptions(
-                base_options=mp_python.BaseOptions(model_asset_path=VIS_MODEL_PATH),
-                running_mode=mp_vision.RunningMode.VIDEO,
-                num_faces=2,
-            )
-        )
-    except Exception as e:
-        log(f"⚠ MediaPipe 初始化失败:{type(e).__name__}: {e};本次无人脸跟随")
-        return
-    log(f"👁 视觉跟随就绪(MediaPipe VIDEO 模式,检测限频 {VIS_MAX_FPS:.0f}fps)")
-
-    fx = OneEuroFilter(min_cutoff=0.8, beta=0.08)
-    fy = OneEuroFilter(min_cutoff=0.8, beta=0.08)
-    t_start = time.monotonic()
-    last_ts_ms = -1            # VIDEO 模式时间戳必须严格递增(同毫秒帧防撞)
-    t_prev_ctrl = t_start
-    t_last_det = 0.0
-    n_det = 0
-    n_hit = 0
-    infer_acc: list[float] = []
-    stat_t = t_start
-
+# ──────────────── 视觉(TRACK-FIX):抓帧泵(主进程)+ MediaPipe 子进程 + 结果积分 ────────────────
+def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event) -> None:
+    """轻量抓帧泵:唯一持续 get_frame 者。最新帧共享给 take_snapshot;
+    降采样(numpy 抽样 ~1ms)喂视觉子进程,maxsize=1 背压只留最新帧。
+    重活(MediaPipe 12ms/帧)在子进程独立 GIL 跑,不再饿主进程。"""
+    t_last = 0.0
     while not stop.is_set():
         frame = mini.media.get_frame()
         now = time.monotonic()
@@ -567,35 +625,75 @@ def vision_loop(mini: ReachyMini, st: State, stop: threading.Event) -> None:
         with st.lock:
             st.latest_frame = frame
             st.latest_frame_t = now
-        if now - t_last_det < 1.0 / VIS_MAX_FPS:
-            continue  # 限频:帧照常共享,检测降频省 CPU
-        t_last_det = now
-
-        rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        t_inf = time.monotonic()
-        last_ts_ms = max(last_ts_ms + 1, int((now - t_start) * 1000))
-        try:
-            result = landmarker.detect_for_video(mp_img, last_ts_ms)
-        except Exception as e:
-            log(f"⚠ MediaPipe 检测异常:{type(e).__name__}: {e}")
+        if now - t_last < 1.0 / VIS_MAX_FPS:
             continue
-        infer_acc.append((time.monotonic() - t_inf) * 1000)
-        n_det += 1
+        t_last = now
+        rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])
+        try:
+            frame_q.put_nowait((now, rgb))
+        except Exception:
+            try:  # 队列满:丢旧换新(检测只该吃最新帧)
+                frame_q.get_nowait()
+                frame_q.put_nowait((now, rgb))
+            except Exception:
+                pass
 
-        face = pick_main_face(result)
+
+def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
+    """消费视觉子进程结果 → 时间常数型积分跟随目标(逻辑同 F-01,数据源改进程队列)。
+    丢脸缓冲(1c):连续 VIS_MISS_N 帧漏检才重置滤波/进入丢脸路径,防侧脸闪断。"""
+    fx = OneEuroFilter(min_cutoff=0.8, beta=0.08)
+    fy = OneEuroFilter(min_cutoff=0.8, beta=0.08)
+    t_prev_ctrl = time.monotonic()
+    miss_streak = 0
+    hit_run_start = None       # 连续命中起点(锁定迟滞用)
+    miss_run_start = None      # 连续丢失起点(丢锁迟滞用)
+    locked = False
+    n_det = 0
+    n_hit = 0
+    infer_acc: list[float] = []
+    stat_t = time.monotonic()
+
+    while not stop.is_set():
+        try:
+            msg = result_q.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        if msg.get("kind") == "ready":
+            log("👁 视觉子进程就绪(Face 跟随 + Hand 指向,独立 GIL)")
+            continue
+        now = time.monotonic()
+        face = msg.get("face")
+        u_raw, v_raw = (face[0], face[1]) if face else (None, None)
+        infer_ms = msg.get("face_ms", 0.0)
+        n_det += 1
+        infer_acc.append(infer_ms)
+        # 手部结果(降频帧才有):发布最近食指方向给 behavior(指向转头用)
+        hand = msg.get("hand")
+        if hand is not None:
+            with st.lock:
+                st.finger_angle = hand["angle"]
+                st.finger_extended = hand["extended"]
+                st.finger_at = now
         with st.lock:
-            action = st.action_active
-        if face is not None:
+            # 视觉只在 TRACKING 且无手势时积分头部目标;其余状态只感知(face_seen_at),
+            # 头部目标由 behavior_loop 驱动(避免双写 track_yaw)。
+            integrate = (st.state == ST_TRACKING) and (not st.action_active)
+        if u_raw is not None:
             n_hit += 1
-            u_raw, v_raw, _h = face
+            miss_streak = 0
+            # 迟滞锁定:持续命中 LOCK_ON_S → locked=True
+            miss_run_start = None
+            if hit_run_start is None:
+                hit_run_start = now
+            if not locked and (now - hit_run_start) >= LOCK_ON_S:
+                locked = True
             u = fx(u_raw, now)
             v = fy(v_raw, now)
-            if action:
-                t_prev_ctrl = now  # 手势期间冻结积分(滤波继续,保持可见性)
-                with st.lock:
-                    st.face_seen_at = now
-            else:
+            with st.lock:
+                st.face_seen_at = now  # 始终更新(瞬时);behavior 用 face_locked
+                st.face_locked = locked
+            if integrate:
                 err_yaw = YAW_SIGN * (u - 0.5) * FOV_X_DEG
                 err_pitch = PITCH_SIGN * (v - 0.5) * FOV_Y_DEG
                 if abs(err_yaw) < TRACK_DEADBAND:
@@ -608,40 +706,265 @@ def vision_loop(mini: ReachyMini, st: State, stop: threading.Event) -> None:
                 with st.lock:
                     sy = float(np.clip(k * err_yaw, -TRACK_MAX_STEP, TRACK_MAX_STEP))
                     sp = float(np.clip(k * err_pitch, -TRACK_MAX_STEP, TRACK_MAX_STEP))
-                    st.track_yaw = float(np.clip(st.track_yaw + sy, -TRACK_YAW_LIMIT, TRACK_YAW_LIMIT))
+                    st.track_yaw = float(np.clip(st.track_yaw + sy,
+                                                 st.body_yaw_deg - NECK_REL_LIMIT,
+                                                 st.body_yaw_deg + NECK_REL_LIMIT))
                     st.track_pitch = float(np.clip(st.track_pitch + sp, -TRACK_PITCH_LIMIT, TRACK_PITCH_LIMIT))
-                    st.face_seen_at = now
+            else:
+                t_prev_ctrl = now  # 非积分态:滤波/计时继续走,但不写头部目标
         else:
-            fx.reset()
-            fy.reset()
-            dt = max(1e-3, now - t_prev_ctrl)
+            miss_streak += 1
             t_prev_ctrl = now
-            with st.lock:
-                if not action and now - st.face_seen_at > LOST_HOLD_S:
-                    decay = math.exp(-dt / RETURN_TAU)  # 丢脸超时:时间常数型缓慢回中
-                    st.track_yaw *= decay
-                    st.track_pitch *= decay
+            # 迟滞丢锁:持续丢失 LOCK_OFF_S → locked=False
+            hit_run_start = None
+            if miss_run_start is None:
+                miss_run_start = now
+            if locked and (now - miss_run_start) >= LOCK_OFF_S:
+                locked = False
+                with st.lock:
+                    st.face_locked = False
+            if miss_streak >= VIS_MISS_N:  # 1c:连续 N 帧漏检才重置滤波(防侧脸闪断)
+                fx.reset()
+                fy.reset()
 
         if now - stat_t >= 10.0:
             fps = n_det / (now - stat_t)
             avg_inf = float(np.mean(infer_acc)) if infer_acc else 0.0
             hit = 100.0 * n_hit / max(1, n_det)
             with st.lock:
-                ty, tp = st.track_yaw, st.track_pitch
+                ty, tp, sname = st.track_yaw, st.track_pitch, st.state
             log(f"👁 视觉:检测 {fps:.1f}fps|推理均值 {avg_inf:.1f}ms|检出率 {hit:.0f}%|"
-                f"跟随目标 yaw={ty:+.1f}° pitch={tp:+.1f}°")
+                f"[{sname}] 头目标 yaw={ty:+.1f}° pitch={tp:+.1f}°")
             stat_t = now
             n_det = 0
             n_hit = 0
             infer_acc = []
 
 
-# ───────────────────────── 头部控制线程:三层仲裁唯一写入口 ─────────────────────────
+# ───────────────────────── DOA 传感器线程(FUSION-03):只感知,不动头 ─────────────────────────
+def _read_doa(opener) -> tuple[float, bool] | None:
+    try:
+        with opener.open(DOA_URL, timeout=2.0) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return math.degrees(float(d["angle"])), bool(d["speech_detected"])
+    except Exception:
+        return None
+
+
+def doa_sensor_loop(st: State, stop: threading.Event) -> None:
+    """DOA 纯传感器:10Hz 轮询 → 中值窗口 → 置信的视场外残差发布到 st.sound_resid。
+    机器人自己说话期间的读数不入窗(防自声/扬声器反射污染)。behavior_loop 消费,不动头。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if _read_doa(opener) is None:
+        log("⚠ DOA 端点不可用,本次无声源转向(其余功能不受影响)")
+        return
+    log("👂 声源传感器就绪(DOA REST 10Hz)")
+    buf: "deque[tuple[float, float]]" = deque()
+    while not stop.is_set():
+        time.sleep(1.0 / DOA_POLL_HZ)
+        r = _read_doa(opener)
+        now = time.monotonic()
+        with st.lock:
+            robot_speaking = now < st.playback_end_estimate + 0.4
+        if r is not None and r[1] and not robot_speaking:
+            buf.append((now, r[0]))
+        while buf and now - buf[0][0] > SND_WIN_S:
+            buf.popleft()
+        if len(buf) < SND_MIN_SAMPLES:
+            continue
+        angles = sorted(a for _, a in buf)
+        resid = 90.0 - angles[len(angles) // 2]  # 残差:0=正前,+左 -右(相对头当前朝向)
+        with st.lock:
+            st.sound_resid = resid
+            st.sound_at = now
+
+
+def _fresh_sound(st: State) -> float | None:
+    """读取新鲜(<0.6s)且偏离够大(>25°)的声源残差;否则 None。"""
+    now = time.monotonic()
+    with st.lock:
+        if st.sound_resid is None or (now - st.sound_at) > 0.6:
+            return None
+        return st.sound_resid if abs(st.sound_resid) >= SND_RESID_MIN else None
+
+
+# ───────────────────────── 行为状态机(FUSION-03):统一调度大脑 ─────────────────────────
+def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event) -> None:
+    """唯一的状态调度者。在非 TRACKING 态驱动 track_yaw/body/pitch(head_control 渲染);
+    TRACKING 态把头部目标交给视觉积分,自己只做状态切换。手势(action_active)永远优先,
+    behavior 在手势期间暂停驱动。状态:IDLE→ENGAGING→TRACKING↔SEARCHING→RETURNING→IDLE;
+    指向请求(POINT-02)→ POINTING(转头朝手指方向)→ snapshot → 回 TRACKING。"""
+    dt = 1.0 / FSM_HZ
+    step = SND_SPEED_DPS * dt           # 每帧最大转角
+    phase_t = time.monotonic()          # 当前状态进入时刻
+    scan_dir = 1.0
+    pt_yaw_goal = pt_body_goal = pt_pitch_goal = 0.0  # POINTING 目标
+    pt_phase = "turn"                                  # POINTING 子阶段
+    pt_settle_t = pt_hold_t = 0.0
+
+    def set_state(s: str, seed_interact: bool = False) -> None:
+        nonlocal phase_t
+        with st.lock:
+            if st.state != s:
+                log(f"🧭 状态:{st.state} → {s}")
+                st.state = s
+            # Bug2 修:只在"首次捕获"(IDLE/ENGAGING/RETURNING→TRACKING)播种无互动计时;
+            # SEARCHING↔TRACKING 的短暂回切不重置(否则抖动让 15s 永远清零)
+            if seed_interact:
+                st.last_interaction_at = time.monotonic()
+        phase_t = time.monotonic()
+
+    def approach(ty_goal: float, body_goal: float, tp_goal: float) -> bool:
+        """把 track/body/pitch 朝目标各走一步(匀速);返回是否已到位。"""
+        with st.lock:
+            ty, b, tp = st.track_yaw, st.body_yaw_deg, st.track_pitch
+            def mv(cur, goal):
+                d = goal - cur
+                return goal if abs(d) <= step else cur + math.copysign(step, d)
+            st.track_yaw = mv(ty, ty_goal)
+            st.body_yaw_deg = mv(b, body_goal)
+            st.track_pitch = mv(tp, tp_goal)
+            done = (abs(st.track_yaw - ty_goal) < 0.5 and
+                    abs(st.body_yaw_deg - body_goal) < 0.5 and
+                    abs(st.track_pitch - tp_goal) < 0.5)
+        return done
+
+    engage_target = 0.0  # 本次 ENGAGING 的世界朝向目标
+    while not stop.is_set():
+        time.sleep(dt)
+        now = time.monotonic()
+        with st.lock:
+            state = st.state
+            action = st.action_active
+            locked = st.face_locked                 # Bug1 修:用迟滞锁定判定,不用瞬时 face_fresh
+            last_interact = st.last_interaction_at
+            speaking = now < st.playback_end_estimate
+        if action:
+            phase_t = now  # 手势期间状态计时冻结(手势结束后从当前态继续)
+            continue
+
+        # 指向请求(POINT-02-b):从任何态进入 POINTING,计算"手指方向→头部转角"
+        with st.lock:
+            preq = st.point_request
+        if preq is not None and state != ST_POINTING:
+            with st.lock:
+                fa = st.finger_angle
+                fa_fresh = (now - st.finger_at) < POINT_FRESH_S
+                cy = st.track_yaw
+                cp = st.track_pitch
+            if fa is not None and fa_fresh:
+                ar = math.radians(fa)
+                dx, dy = math.cos(ar), math.sin(ar)
+                # 画面右(dx>0)= 机器人右 → yaw 负;画面下(dy>0)→ pitch 正(CALIBRATION §11 约定)
+                pt_yaw_goal = float(np.clip(cy - dx * POINT_YAW_GAIN, -SND_TARGET_LIMIT, SND_TARGET_LIMIT))
+                pt_pitch_goal = float(np.clip(dy * POINT_PITCH_GAIN, -TRACK_PITCH_LIMIT, TRACK_PITCH_LIMIT))
+                log(f"👉 指向转头:食指 {fa:+.0f}° → yaw{pt_yaw_goal:+.0f}° pitch{pt_pitch_goal:+.0f}°")
+            else:
+                pt_yaw_goal, pt_pitch_goal = cy, cp  # 没抓到手指方向 → 原地看图(兜底)
+                log("👉 未抓到手指方向,原地看图")
+            pt_body_goal = float(np.clip(pt_yaw_goal, -BODY_LIMIT_DEG, BODY_LIMIT_DEG))
+            pt_phase = "turn"
+            set_state(ST_POINTING)
+            continue
+
+        snd = _fresh_sound(st)
+
+        if state == ST_IDLE:
+            approach(0.0, 0.0, 0.0)                 # 缓慢归正
+            if locked:
+                set_state(ST_TRACKING, seed_interact=True)
+            elif snd is not None:
+                with st.lock:
+                    engage_target = float(np.clip(st.track_yaw + snd, -SND_TARGET_LIMIT, SND_TARGET_LIMIT))
+                log(f"👂 视场外有人说话(残差 {snd:+.0f}°)→ ENGAGING 朝 {engage_target:+.0f}°")
+                set_state(ST_ENGAGING)
+
+        elif state == ST_ENGAGING:
+            if locked:                              # 交接①:转向中锁定人脸 → 立即交给视觉
+                log("👀 锁定人脸,交给视觉跟随")
+                set_state(ST_TRACKING, seed_interact=True)
+                continue
+            body_goal = float(np.clip(engage_target, -BODY_LIMIT_DEG, BODY_LIMIT_DEG))
+            arrived = approach(engage_target, body_goal, 0.0)
+            if arrived:
+                # 到位后主动扫头找人(±range 正弦),持续 ENGAGE_SCAN_TIME
+                tscan = now - phase_t
+                if tscan < ENGAGE_SCAN_TIME_S:
+                    off = ENGAGE_SCAN_RANGE * math.sin(2 * math.pi * 0.5 * tscan) * scan_dir
+                    with st.lock:
+                        st.track_yaw = float(np.clip(body_goal + off,
+                                                     body_goal - NECK_REL_LIMIT,
+                                                     body_goal + NECK_REL_LIMIT))
+                else:
+                    log("🛑 ENGAGING 扫描结束仍无脸 → 回中位")
+                    set_state(ST_RETURNING)
+            if now - phase_t > ENGAGE_TIMEOUT_S:
+                log("🛑 ENGAGING 超时 → 回中位")
+                set_state(ST_RETURNING)
+
+        elif state == ST_TRACKING:
+            # 头部目标由视觉积分(behavior 不写);只做转出条件判断
+            if not locked:                          # 迟滞已含 1.5s 丢锁 → 不会瞬断空转
+                set_state(ST_SEARCHING)
+            elif (now - last_interact) > NO_INTERACT_S and not speaking:
+                log(f"💤 {NO_INTERACT_S:.0f}s 无说话互动 → 回中位")
+                set_state(ST_RETURNING)
+
+        elif state == ST_SEARCHING:
+            if locked:
+                set_state(ST_TRACKING)              # 回切不播种:延续原计时(Bug2)
+            elif snd is not None:                   # 找回阶段有声音 → DOA 辅助再转
+                with st.lock:
+                    engage_target = float(np.clip(st.track_yaw + snd, -SND_TARGET_LIMIT, SND_TARGET_LIMIT))
+                set_state(ST_ENGAGING)
+            elif now - phase_t > SEARCH_TIMEOUT_S:
+                set_state(ST_RETURNING)
+            # 否则原地保持(不动头)
+
+        elif state == ST_RETURNING:
+            done = approach(0.0, 0.0, 0.0)
+            if locked:                              # 回中途中又锁定人 → 重新跟(给足新 15s)
+                set_state(ST_TRACKING, seed_interact=True)
+            elif done:
+                set_state(ST_IDLE)
+
+        elif state == ST_POINTING:
+            # 全程冻结人脸跟踪(vision 仅在 TRACKING 态积分,POINTING 天然不积分)
+            # 子阶段:turn 转向 → settle 停稳 → hold 抓帧并保持到看图返回 → 转回(RETURNING)
+            with st.lock:
+                pr = st.point_request
+            if pr is None:
+                set_state(ST_RETURNING)
+            elif pt_phase == "turn":
+                arrived = approach(pt_yaw_goal, pt_body_goal, pt_pitch_goal)
+                if arrived or (now - phase_t) > POINT_TURN_TIMEOUT_S:
+                    pt_settle_t = now
+                    pt_phase = "settle"
+            elif pt_phase == "settle":
+                approach(pt_yaw_goal, pt_body_goal, pt_pitch_goal)  # 保持在目标角
+                if now - pt_settle_t >= POINT_SETTLE_S:             # 停稳后再抓帧(目标居中)
+                    with st.lock:
+                        st.snap_grabbed = False
+                    snap_q.put({"call_id": pr["call_id"], "gen": pr["gen"], "mode": "point"})
+                    log("📸 转到位并停稳,抓居中目标帧")
+                    pt_hold_t = now
+                    pt_phase = "hold"
+            elif pt_phase == "hold":
+                approach(pt_yaw_goal, pt_body_goal, pt_pitch_goal)  # 保持朝向,不被拽回人脸
+                with st.lock:
+                    pending = st.snapshot_pending
+                # 帧抓到 + 看图完成(pending 归零)→ 或封顶 → 转回看人
+                if (now - pt_hold_t > POINT_HOLD_MAX_S) or (st.snap_grabbed and pending == 0):
+                    with st.lock:
+                        st.point_request = None
+                    log("↩ 看图完成,转回看人")
+                    set_state(ST_RETURNING)
+
+
+# ───────────────────────── 头部控制线程:渲染层(唯一 set_target 写入口)─────────────────────────
 def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> None:
-    """25Hz set_target,头部姿态 = Tracking 目标 + Idle 微动叠加。
-    Primary 手势执行中(action_active)完全让位(不发包,motion 线程 goto_target 独占);
-    手势结束于跟随基准 → 本线程接管时姿态一致,无突跳。
-    微动:说话时包络升起;跟随中缩到 40% 小幅叠加,无人脸时回原幅度(O-01a-2 行为)。"""
+    """25Hz 唯一硬件写入口:头部姿态 = behavior/视觉给的 track 目标 + 微动叠加 + body_yaw。
+    手势执行中(action_active)完全让位(motion goto 独占);微动仅在 IDLE/TRACKING 且说话时叠加。"""
     dt = 1.0 / IDLE_HZ
     amp = 0.0
     sway_scale = 1.0
@@ -650,19 +973,22 @@ def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> Non
         with st.lock:
             action = st.action_active
             speaking = now < st.playback_end_estimate
-            ty, tp = st.track_yaw, st.track_pitch
+            ty, tp, body = st.track_yaw, st.track_pitch, st.body_yaw_deg
+            state = st.state
             tracked = (now - st.face_seen_at) < LOST_HOLD_S
         if action:
-            amp = 0.0  # 硬让位:立即停发,包络清零
+            amp = 0.0  # 硬让位:手势 goto 独占
             time.sleep(dt)
             continue
-        amp += ((1.0 if speaking else 0.0) - amp) * (dt / IDLE_TAU)
+        sway_ok = state in (ST_IDLE, ST_TRACKING)   # 转向/搜寻/回中途中不叠微动
+        amp += ((1.0 if (speaking and sway_ok) else 0.0) - amp) * (dt / IDLE_TAU)
         target_scale = TRACK_SWAY_SCALE if tracked else 1.0
-        sway_scale += (target_scale - sway_scale) * (dt / IDLE_TAU)  # 幅度切换也平滑
+        sway_scale += (target_scale - sway_scale) * (dt / IDLE_TAU)
         sway_yaw = amp * sway_scale * IDLE_YAW_AMP * math.sin(2 * math.pi * IDLE_YAW_F * now)
         sway_pitch = amp * sway_scale * IDLE_PITCH_AMP * math.sin(2 * math.pi * IDLE_PITCH_F * now + 1.0)
         try:
-            mini.set_target(head=head_pose(pitch_deg=tp + sway_pitch, yaw_deg=ty + sway_yaw))
+            mini.set_target(head=head_pose(pitch_deg=tp + sway_pitch, yaw_deg=ty + sway_yaw),
+                            body_yaw=math.radians(body))
         except Exception:
             time.sleep(1.0)
         time.sleep(dt)
@@ -724,8 +1050,8 @@ def main() -> int:
 
     run_seconds = float(sys.argv[1]) if len(sys.argv) > 1 else None  # 编排测试用:到时干净退出
 
-    print("=== Reachy Mini 语音对话:可打断 + 动作工具 + 看图 + 人脸跟随 ===", flush=True)
-    log(f"模型:{MODEL}|semantic_vad|16k上行|24k→16k下行|8 动作 + take_snapshot|三层仲裁")
+    print("=== Reachy Mini 语音对话:可打断 + 动作 + 看图 + 人脸跟随 + 听声转头 ===", flush=True)
+    log(f"模型:{MODEL}|semantic_vad|16k上行|24k→16k下行|8 动作 + 看图 + 指向理解|四层仲裁(手势>声源>跟随>微动)")
 
     st = State()
     play_q: "queue.Queue" = queue.Queue()
@@ -775,11 +1101,27 @@ def main() -> int:
                 conv.close()
                 return 1
 
+            st.last_interaction_at = time.monotonic()  # 种子:防 RETURNING 计时器一上来就误触发
             threading.Thread(target=player_loop, args=(mini, st, play_q, stop), daemon=True).start()
             threading.Thread(target=motion_loop, args=(mini, st, motion_q, stop), daemon=True).start()
-            threading.Thread(target=vision_loop, args=(mini, st, stop), daemon=True).start()
             threading.Thread(target=head_control_loop, args=(mini, st, stop), daemon=True).start()
             threading.Thread(target=snapshot_loop, args=(mini, st, callback, oai, snap_q, stop), daemon=True).start()
+            threading.Thread(target=doa_sensor_loop, args=(st, stop), daemon=True).start()
+            threading.Thread(target=behavior_loop, args=(st, snap_q, stop), daemon=True).start()
+            # 视觉(TRACK-FIX):MediaPipe 在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
+            vis_frame_q = None
+            if os.path.exists(VIS_MODEL_PATH):
+                vis_frame_q = multiprocessing.Queue(maxsize=1)
+                vis_result_q = multiprocessing.Queue(maxsize=64)
+                multiprocessing.Process(
+                    target=vision_worker,
+                    args=(VIS_MODEL_PATH, HAND_MODEL_PATH, vis_frame_q, vis_result_q),
+                    daemon=True,
+                ).start()
+                threading.Thread(target=frame_pump_loop, args=(mini, st, vis_frame_q, stop), daemon=True).start()
+                threading.Thread(target=vision_result_loop, args=(st, vis_result_q, stop), daemon=True).start()
+            else:
+                log(f"⚠ 视觉模型不存在({VIS_MODEL_PATH}),本次无人脸跟随(其余功能不受影响)")
 
             # 排空预热期旧音频(限时 3s,防排空循环被持续来帧拖死)
             drain_dl = time.monotonic() + 3.0
@@ -816,6 +1158,11 @@ def main() -> int:
                 log(f"收到 Ctrl+C,退出。本次共上行音频 {sent_samples / 16000:.1f} 秒")
             finally:
                 stop.set()
+                if vis_frame_q is not None:
+                    try:
+                        vis_frame_q.put_nowait(None)  # 视觉子进程退出哨兵(daemon 进程兜底)
+                    except Exception:
+                        pass
                 time.sleep(0.15)  # 让 head_control 最后一帧 set_target 落地,避免与回中 goto 抢
                 try:
                     conv.close()
@@ -824,7 +1171,8 @@ def main() -> int:
                 try:
                     mini.media.stop_recording()
                     mini.media.stop_playing()
-                    mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.0, body_yaw=0.0)
+                    # 身体可能转到 ±90°,回正给足时间
+                    mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.5, body_yaw=0.0)
                 except Exception:
                     pass
                 log("已释放 Realtime 连接与 Reachy 媒体资源。")

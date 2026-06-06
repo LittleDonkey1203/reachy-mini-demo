@@ -27,6 +27,12 @@ import urllib.request
 os.environ["NO_PROXY"] = "localhost,127.0.0.1,::1"
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
 
+# 启动器要自洽:不依赖外部 PYTHONUTF8,否则 emoji 在 GBK 控制台崩(实测踩过)
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 DAEMON_EXE = r"C:\Users\ldkji\AppData\Local\Reachy Mini Control\.venv\Scripts\reachy-mini-daemon.exe"
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon_logs")
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
