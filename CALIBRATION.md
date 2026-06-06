@@ -156,6 +156,8 @@ from reachy_mini import ReachyMini
 - **semantic_vad 有音量门槛:** 上行 RMS ≈0.004(说话太小声/离远)**完全不触发** speech_started——表现为"上行了 75s 音频但服务端零事件",像断连但其实是没过门槛。正常说话 RMS ≥0.01 即稳定触发。排查手段:上行循环里按周期打印 RMS(已内置在正式脚本,<0.005 时提示)。
 - `update_session` 不传 `tools` 字段时**不会清除**已注册的工具(继承上次配置);要清除需显式传空。
 - **⚠ daemon 媒体重取崩溃(7×24 长跑前必须解决):** daemon 连续运行 ~45 分钟、经历多轮媒体 acquire/release 后,`no_media` 客户端退出触发 `Re-acquiring media hardware...` 时 daemon 进程崩溃(exit 116),客户端侧表现为 `/api/media/acquire` ConnectionReset。短期对策:长会话前重启 daemon;根因在 daemon 侧,未修。
+- **"No motors detected" ≠ 偶发通信错,先查电源(2026-06-06 实证):** 连续两次启动报 "No motors detected. Check if the power supply is connected and turned on!"(COM3 找得到、9 电机全失联)——实为**机器人电机电源没通**(USB 在 ≠ 电机有电,两路供电独立)。通电后一次启动成功。之前"首启失败重试即好"的经验仅适用于单电机零星通信错;**全员失联直接查电源/线**。
+- **左天线 Overload Error 会锁存:** Dynamixel 过载保护触发后持续刷 `Motor 'left_antenna' hardware errors: ['Overload Error']`,重启 daemon 无效——**必须给机器人断电**(检查天线无卡滞、扶正)再上电才清除。实测断电清错后零复发。
 
 ---
 
@@ -183,7 +185,7 @@ from reachy_mini import ReachyMini
 
 ## 9. 本地视觉:MediaPipe 看脸 + 转头跟随(VIS-01)✅(2026-06-05)
 
-第一次引入本地视觉栈(与音频/Qwen 独立)。实现 `vision/vis01_face_track.py`(独立脚本,未接对话);诊断工具 `vision/_diag_face.py` / `_diag_face2.py`。
+第一次引入本地视觉栈(与音频/Qwen 独立)。实现 `vision/vis01_face_track.py`(独立脚本;**2026-06-06 已经 F-01 融合进正式对话脚本,见 §10**);诊断工具 `vision/_diag_face.py` / `_diag_face2.py`。
 
 ### 环境与性能(本机实测)
 - **MediaPipe 0.10.35**(清华镜像装,Python 3.12 venv 直接可用;依赖带入 opencv-contrib 与 sounddevice——**照旧禁止开 `cv2.VideoCapture`/sounddevice 流**,只用其库代码)。
@@ -200,6 +202,35 @@ from reachy_mini import ReachyMini
 ### 踩坑记录
 - **MediaPipe VIDEO 模式时间戳必须严格递增**:同一毫秒两帧会抛 "Input timestamp must be monotonically increasing";用 `ts = max(prev+1, 真实ms)` 防撞。
 - **零检出先怀疑画面再怀疑代码**:连续两轮 0% 检出,最后发现是机器人对着衣柜/人在画面边缘躺着侧脸。排查路径:存帧人工看 → 标准人脸图(mediapipe-assets portrait.jpg)验证安装 → 全尺寸帧重测。`vision/_diag_face2.py` 即此流程,可复用。
+
+---
+
+## 10. F-01 融合:人脸跟随并进对话完整体(三层动作仲裁)✅(2026-06-06)
+
+VIS-01 跟随与对话栈合体,`voice/d01_realtime_chat.py` 现为最终完整体:对话+打断+动作+微动+看图+**人脸跟随**。用户验收:"跟随平滑、让位恢复无突跳、整体像一个看着我聊天的伙伴"。
+
+### 三层仲裁(优先级从高到低)与结构保证
+```
+视觉线程(MediaPipe ~19fps)──积分──▶ track_yaw/pitch(跟随目标角)
+                                         │
+头部控制线程(25Hz set_target)◀──读──────┘   ←── 头部唯一 set_target 写入口
+  头部姿态 = 跟随目标 + 微动叠加;action_active 时完全停发(硬让位)
+                                         ▲
+动作线程(goto_target 手势)──独占时置 action_active
+```
+- **Primary 手势:** 进场读当前跟随姿态为**基准**,手势相对基准执行(点头=在看着人的朝向上点头,不甩回正中),做完回基准 → 头控线程接管时姿态一致,**零突跳**。手势 offset 叠加基准后裁剪进安全箱(yaw ±25° / pitch ±16°,均在已验证范围)。look_* 是绝对方向指令(本来就要离开人脸),看完回基准。
+- **Tracking:** 沿用 §9 全套验证参数(τ=0.4s 时间常数增益、死区 2°、单帧限步 1.5°、One Euro 0.8/0.08);视觉线程**只积分目标角不动头**;手势期间冻结积分,丢脸回中也改成时间常数型(τ=0.8s,等效原 ×0.97/帧@41fps,彻底去帧率化)。
+- **Idle 微动:** 跟随中缩到 **40% 幅度**小幅叠加(不打架但保留"活着感");无人脸时平滑恢复原幅度(行为退化为 O-01a-2);幅度切换走包络,无跳变。
+
+### get_frame 协调(单一抓帧者)
+- 视觉线程是**唯一持续 get_frame 者**,最新帧(引用)共享在 State;take_snapshot 直接读共享帧(≤25ms 新,优于原"连抓 3 帧",实测当秒完成),视觉线程没帧时才退回直接抓。
+
+### 融合后实测(2026-06-06,120s + 180s 两轮)
+- **检测帧率 ~19fps**(独立跑 41fps,限频 30 之下仍被音频线程抢 GIL 压到 19)——**τ 型控制与帧率解耦,19fps 跟随依旧平滑**,这正是 §9 铁律的回报;推理均值:有脸 12~15ms,无脸 2~4ms(landmark 图早退)。
+- **对话实时性零退化:** 首音频延迟 35~376ms(与融合前同档),打断 7/7 干净,手势 5 次全部"基准上做、做完恢复跟随"。
+- 跟随目标会顶到限位(pitch +15°/yaw −25°):人贴近、坐姿低于摄像头时脸超出头部可达角,物理极限非 bug。
+- MediaPipe 遥测上传失败的 E0000 clearcut 日志无害,可忽略。
+- 正式脚本支持可选时长参数(`python voice\d01_realtime_chat.py 120` 到时干净退出),编排回归用。
 
 ---
 
@@ -223,3 +254,4 @@ from reachy_mini import ReachyMini
 | O-01a-2 idle 微动 + 幅度加大 + 同时出发 | 2026-06-05 | ✅ 微动让位 30ms,4/4 语音动作重叠,见 §7 |
 | V-01-1 take_snapshot 看图 | 2026-06-05 | ✅ 抓帧 47ms,看图 ~3s,口头过渡,见 §8 |
 | VIS-01 MediaPipe 看脸+转头跟随 | 2026-06-05 | ✅ 41FPS/12ms,时间常数控制平滑跟随,见 §9 |
+| F-01 融合:跟随并进对话(三层仲裁) | 2026-06-06 | ✅ 单一头控写入口,手势基准化零突跳,19fps 够用,见 §10 |
