@@ -87,7 +87,15 @@ from reachy_mini import ReachyMini
 
 # MediaPipe 不在主进程导入(TRACK-FIX):检测在 vision_worker 子进程跑,独立 GIL。
 # 背景:六线程融合后视觉循环被 GIL 饿到 41→19fps,挪进程后与音频/动作/DOA 真并行。
-from vision_worker import vision_worker
+# 在 mediapipe 不可用的平台(macOS x86_64)自动降级到 OpenCV Haar Cascade 后备。
+try:
+    import mediapipe as _mp_probe  # noqa: F401 — 仅探测可用性
+    del _mp_probe
+    from vision_worker import vision_worker as _vision_worker_fn
+    _VISION_BACKEND = "mediapipe"
+except ImportError:
+    from vision_worker_cv import vision_worker as _vision_worker_fn
+    _VISION_BACKEND = "opencv"
 
 # ───────────────────────── 配置 ─────────────────────────
 MODEL = "qwen3.5-omni-plus-realtime"
@@ -1610,13 +1618,19 @@ def main() -> int:
             threading.Thread(target=snapshot_loop, args=(mini, st, callback, oai, snap_q, stop), daemon=True).start()
             threading.Thread(target=doa_sensor_loop, args=(st, stop), daemon=True).start()
             threading.Thread(target=behavior_loop, args=(st, snap_q, stop, not no_wake), daemon=True).start()
-            # 视觉(TRACK-FIX):MediaPipe 在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
+            # 视觉(TRACK-FIX):检测在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
+            # mediapipe 后端需 .task 模型文件;opencv 后端无需模型文件,直接启用
             vis_frame_q = None
-            if os.path.exists(VIS_MODEL_PATH):
+            _vis_enabled = (
+                (_VISION_BACKEND == "mediapipe" and os.path.exists(VIS_MODEL_PATH)) or
+                (_VISION_BACKEND == "opencv")
+            )
+            if _vis_enabled:
+                log(f"视觉后端: {_VISION_BACKEND}")
                 vis_frame_q = multiprocessing.Queue(maxsize=1)
                 vis_result_q = multiprocessing.Queue(maxsize=64)
                 multiprocessing.Process(
-                    target=vision_worker,
+                    target=_vision_worker_fn,
                     args=(VIS_MODEL_PATH, HAND_MODEL_PATH, vis_frame_q, vis_result_q),
                     daemon=True,
                 ).start()
