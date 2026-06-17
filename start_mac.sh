@@ -26,7 +26,7 @@ stop_all() {
   info "停止主程序..."
   [ -f "$MAIN_PID" ] && kill "$(cat "$MAIN_PID")" 2>/dev/null && info "主程序已停止" || warn "主程序未在运行"
   sleep 1
-  info "停止 daemon（机器人将进入睡眠）..."
+  info "停止 daemon (机器人将进入睡眠)..."
   [ -f "$DAEMON_PID" ] && kill "$(cat "$DAEMON_PID")" 2>/dev/null && info "Daemon 已停止" || warn "Daemon 未在运行"
   info "完成。"
   exit 0
@@ -45,16 +45,20 @@ echo ""
 info "检查 Python 环境..."
 [ -f "$PYTHON" ] || error "找不到 .venv，请先在项目根目录执行: uv sync"
 
-# ── 2. 检查 DASHSCOPE_API_KEY ────────────────────────────────
-if [ -z "${DASHSCOPE_API_KEY:-}" ]; then
-  echo ""
-  warn "未检测到 DASHSCOPE_API_KEY"
-  echo -n "  请输入阿里云百炼 API Key（sk-...）: "
-  read -r DASHSCOPE_API_KEY
-  [ -z "$DASHSCOPE_API_KEY" ] && error "API Key 不能为空"
-  export DASHSCOPE_API_KEY
+# ── 2. 检查 DASHSCOPE_API_KEY（NO_VOICE=1 时跳过）───────────────
+if [ "${NO_VOICE:-0}" != "1" ]; then
+  if [ -z "${DASHSCOPE_API_KEY:-}" ]; then
+    echo ""
+    warn "未检测到 DASHSCOPE_API_KEY"
+    echo -n "  请输入阿里云百炼 API Key（sk-...）: "
+    read -r DASHSCOPE_API_KEY
+    [ -z "$DASHSCOPE_API_KEY" ] && error "API Key 不能为空"
+    export DASHSCOPE_API_KEY
+  fi
+  info "DASHSCOPE_API_KEY 已就绪 (${#DASHSCOPE_API_KEY} 位)"
+else
+  info "NO_VOICE=1 — 跳过 API Key 检查（仅视觉测试模式）"
 fi
-info "DASHSCOPE_API_KEY 已就绪（${#DASHSCOPE_API_KEY} 位）"
 
 # ── 3. 找串口 ────────────────────────────────────────────────
 info "扫描 USB 串口..."
@@ -68,20 +72,21 @@ if [ -z "$SERIAL_PORT" ]; then
 fi
 info "找到串口: $SERIAL_PORT"
 
-# ── 4. 停止残留进程 ──────────────────────────────────────────
-if [ -f "$DAEMON_PID" ] && kill -0 "$(cat "$DAEMON_PID")" 2>/dev/null; then
-  warn "发现旧 daemon 进程，先停止..."
-  kill "$(cat "$DAEMON_PID")" 2>/dev/null; sleep 2
-fi
-if [ -f "$MAIN_PID" ] && kill -0 "$(cat "$MAIN_PID")" 2>/dev/null; then
-  warn "发现旧主程序进程，先停止..."
-  kill "$(cat "$MAIN_PID")" 2>/dev/null; sleep 1
-fi
+# # ── 4. 停止残留进程 ──────────────────────────────────────────
+# if [ -f "$DAEMON_PID" ] && kill -0 "$(cat "$DAEMON_PID")" 2>/dev/null; then
+#   warn "发现旧 daemon 进程，先停止..."
+#   kill "$(cat "$DAEMON_PID")" 2>/dev/null; sleep 2
+# fi
+# if [ -f "$MAIN_PID" ] && kill -0 "$(cat "$MAIN_PID")" 2>/dev/null; then
+#   warn "发现旧主程序进程，先停止..."
+#   kill "$(cat "$MAIN_PID")" 2>/dev/null; sleep 1
+# fi
 
 # ── 5. 启动 daemon ───────────────────────────────────────────
 mkdir -p "$LOG_DIR"
-info "启动 daemon（串口: $SERIAL_PORT）..."
+info "启动 daemon (串口: ${SERIAL_PORT})..."
 export PYTHONUNBUFFERED=1
+export HF_HUB_OFFLINE=1          # 禁止 daemon 访问 HuggingFace 网络
 export NO_PROXY="localhost,127.0.0.1,::1"
 export no_proxy="localhost,127.0.0.1,::1"
 
@@ -91,7 +96,7 @@ nohup "$PROJECT_ROOT/.venv/bin/reachy-mini-daemon" \
   --log-level INFO \
   >> "$LOG_DIR/daemon.log" 2>&1 &
 echo $! > "$DAEMON_PID"
-info "Daemon PID: $(cat "$DAEMON_PID")，等待上电就绪..."
+info "Daemon PID: $(cat "${DAEMON_PID}"), 等待上电就绪..."
 
 # 轮询 API，最多等 30 秒
 READY=0
@@ -120,11 +125,16 @@ echo $! > "$MAIN_PID"
 cd "$SCRIPT_DIR"
 info "主程序 PID: $(cat "$MAIN_PID")"
 
-# 等首条就绪日志
+# 等首条就绪日志（NO_VOICE 模式等视觉就绪，否则等语音就绪）
 info "等待程序就绪..."
+if [ "${NO_VOICE:-0}" = "1" ]; then
+  READY_STR="vision_worker ready"
+else
+  READY_STR="可以对机器人说话了"
+fi
 for i in $(seq 1 20); do
   sleep 1
-  if grep -q "可以对机器人说话了" "$LOG_DIR/main.log" 2>/dev/null; then
+  if grep -q "$READY_STR" "$LOG_DIR/main.log" 2>/dev/null; then
     break
   fi
   printf "."
@@ -138,8 +148,12 @@ echo "  ╚═══════════════════════
 echo ""
 info "实时日志: tail -f $LOG_DIR/main.log"
 info "停止程序: bash $0 stop"
+if [ "${VIS_DEBUG:-0}" = "1" ]; then
+  VIS_PORT="${VIS_DEBUG_PORT:-7654}"
+  info "🔍 视觉调试流: http://localhost:${VIS_PORT}  (蓝框=人脸 绿/黄框=手 左上=状态)"
+fi
 echo ""
 
 # ── 7. 实时跟进日志（Ctrl+C 只停 tail，不杀进程）──────────────
-trap 'echo ""; info "日志已停止（进程仍在后台运行）。停止请执行: bash start_mac.sh stop"; exit 0' INT
+trap 'echo ""; info "日志已停止 (进程仍在后台运行)。停止请执行: bash start_mac.sh stop"; exit 0' INT
 tail -f "$LOG_DIR/main.log"

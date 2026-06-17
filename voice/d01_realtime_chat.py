@@ -50,6 +50,11 @@ take_snapshot 直接读共享帧(≤25ms 新),不再和跟随抢 get_frame。
 """
 
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载 demo 目录的 .env（voice/ 向上一级 = reachy-mini-demo/）
+load_dotenv(Path(__file__).parent.parent / ".env", override=False)
 
 # ── 代理隔离:必须在 import reachy_mini / dashscope 之前 ──
 _no_proxy = "localhost,127.0.0.1,::1,.aliyuncs.com,aliyuncs.com"
@@ -86,8 +91,7 @@ import sherpa_onnx                       # WAKE-01:唤醒词 KWS(本地、离线
 from reachy_mini import ReachyMini
 
 # MediaPipe 不在主进程导入(TRACK-FIX):检测在 vision_worker 子进程跑,独立 GIL。
-# 背景:六线程融合后视觉循环被 GIL 饿到 41→19fps,挪进程后与音频/动作/DOA 真并行。
-# 在 mediapipe 不可用的平台(macOS x86_64)自动降级到 OpenCV Haar Cascade 后备。
+# mediapipe 可用时用 vision_worker.py(手势+指向);否则降级到 vision_worker_cv.py(HSV后备)。
 try:
     import mediapipe as _mp_probe  # noqa: F401 — 仅探测可用性
     del _mp_probe
@@ -96,6 +100,19 @@ try:
 except ImportError:
     from vision_worker_cv import vision_worker as _vision_worker_fn
     _VISION_BACKEND = "opencv"
+
+# 仿真模式摄像头源切换:USE_WEBCAM=1 时 frame_pump_loop 从 Mac 摄像头取帧,
+# 绕过 MuJoCo 虚拟摄像头(空棋盘格场景无人脸,人脸检测永远失败)。
+# 用 --sim 启动 daemon 时在 .env 设 USE_WEBCAM=1;真机时不需要。
+USE_WEBCAM = os.environ.get("USE_WEBCAM", "").lower() in ("1", "true", "yes")
+
+# NO_VOICE=1:跳过麦克风/扬声器/Qwen 连接,只跑视觉跟随 + 行为状态机,便于单独调试人脸跟踪/指向/逗它。
+NO_VOICE = os.environ.get("NO_VOICE", "").lower() in ("1", "true", "yes")
+
+# VIS_DEBUG=1：启动 MJPEG HTTP 服务，浏览器实时查看视觉子进程实际处理的帧 + 检测结果标注。
+# 头部照常运动。打开 http://localhost:VIS_DEBUG_PORT 即可。
+VIS_DEBUG = os.environ.get("VIS_DEBUG", "").lower() in ("1", "true", "yes")
+VIS_DEBUG_PORT = int(os.environ.get("VIS_DEBUG_PORT", "7654"))
 
 # ───────────────────────── 配置 ─────────────────────────
 MODEL = "qwen3.5-omni-flash-realtime-2026-03-15"
@@ -528,6 +545,13 @@ class State:
         self.latest_frame_t = 0.0
         # take_snapshot:进行中的快照数(挂起时 response.done 不补话,等描述回来)
         self.snapshot_pending = 0
+        # VIS_DEBUG 专用：视觉子进程实际看到的降采样帧 + 最新检测结果（VIS_DEBUG=1 时写入）
+        self.dbg_frame_small = None   # ndarray RGB H×W×3，与视觉子进程收到的帧相同
+        self.dbg_det = None           # dict {"face":(u,v,h)|None, "hand":{...}|None, "n_faces":int}
+        # 手势状态（GESTURE-01，仅 onnx/mediapipe backend 填充）
+        self.gesture = None        # 最新手势 str 或 None
+        self.gesture_at = 0.0      # 上次检出有效手势的时刻
+        self.gesture_fingers = 0   # 最新手指数
 
 
 # ───────────────────────── ①对话:回调,收服务端事件(打断/工具分发/计时器喂养)─────────────────────────
@@ -833,29 +857,49 @@ def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
 def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event) -> None:
     """轻量抓帧泵:唯一持续 get_frame 者。最新帧共享给 take_snapshot;
     降采样(numpy 抽样 ~1ms)喂视觉子进程,maxsize=1 背压只留最新帧。
+    USE_WEBCAM=1 时用 Mac 摄像头代替 MuJoCo 虚拟摄像头(仿真模式需真实画面做人脸检测)。
     重活(MediaPipe 12ms/帧)在子进程独立 GIL 跑,不再饿主进程。"""
+    import cv2 as _cv2
+    cap = None
+    if USE_WEBCAM:
+        cap = _cv2.VideoCapture(0)
+        cap.set(_cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        log("📷 USE_WEBCAM=1 → 使用 Mac 摄像头(绕过 MuJoCo 虚拟摄像头)")
     t_last = 0.0
-    while not stop.is_set():
-        frame = mini.media.get_frame()
-        now = time.monotonic()
-        if frame is None:
-            time.sleep(0.005)
-            continue
-        with st.lock:
-            st.latest_frame = frame
-            st.latest_frame_t = now
-        if now - t_last < 1.0 / VIS_MAX_FPS:
-            continue
-        t_last = now
-        rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])
-        try:
-            frame_q.put_nowait((now, rgb))
-        except Exception:
-            try:  # 队列满:丢旧换新(检测只该吃最新帧)
-                frame_q.get_nowait()
+    try:
+        while not stop.is_set():
+            if cap is not None:
+                ret, frame = cap.read()  # BGR(与 get_frame() 格式一致)
+                if not ret:
+                    frame = None
+            else:
+                frame = mini.media.get_frame()
+            now = time.monotonic()
+            if frame is None:
+                time.sleep(0.005)
+                continue
+            with st.lock:
+                st.latest_frame = frame
+                st.latest_frame_t = now
+            if now - t_last < 1.0 / VIS_MAX_FPS:
+                continue
+            t_last = now
+            rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])  # BGR→RGB
+            if VIS_DEBUG:
+                with st.lock:
+                    st.dbg_frame_small = rgb.copy()
+            try:
                 frame_q.put_nowait((now, rgb))
             except Exception:
-                pass
+                try:  # 队列满:丢旧换新(检测只该吃最新帧)
+                    frame_q.get_nowait()
+                    frame_q.put_nowait((now, rgb))
+                except Exception:
+                    pass
+    finally:
+        if cap is not None:
+            cap.release()
 
 
 def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
@@ -921,6 +965,14 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
                         st.hand_move = max(max(us) - min(us), max(vs) - min(vs))
                     else:
                         st.hand_move = 0.0
+                    # 手势字段（GESTURE-01）：fingers=-1 表示跳帧，不更新
+                    fingers = hand.get("fingers", -1)
+                    gesture = hand.get("gesture")
+                    if fingers >= 0:
+                        st.gesture_fingers = fingers
+                        if gesture:
+                            st.gesture = gesture
+                            st.gesture_at = now
         with st.lock:
             # 视觉只在 TRACKING 且无手势时积分头部目标;其余状态只感知(face_seen_at),
             # 头部目标由 behavior_loop 驱动(避免双写 track_yaw)。
@@ -1018,6 +1070,14 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
                 fx.reset()
                 fy.reset()
 
+        if VIS_DEBUG:
+            with st.lock:
+                st.dbg_det = {
+                    "face": msg.get("face"),
+                    "hand": msg.get("hand"),
+                    "n_faces": msg.get("n_faces", 0),
+                }
+
         if now - stat_t >= 10.0:
             fps = n_det / (now - stat_t)
             avg_inf = float(np.mean(infer_acc)) if infer_acc else 0.0
@@ -1040,6 +1100,136 @@ def _read_doa(opener) -> tuple[float, bool] | None:
         return math.degrees(float(d["angle"])), bool(d["speech_detected"])
     except Exception:
         return None
+
+
+# ───────────────────────── VIS_DEBUG：MJPEG HTTP 调试预览服务 ─────────────────────────
+def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
+    """VIS_DEBUG=1 时启动 MJPEG HTTP 服务，浏览器打开 http://localhost:{port} 查看实时标注帧。
+    画面 = 视觉子进程实际看到的降采样帧（DECIMATE×），叠加：
+      蓝框=人脸(u,v,h)  绿框=有效手(score≥阈值)  黄框=低置信度手(可能误检)
+      左上角=状态机/头部目标/face_locked  右上角=帧时间戳"""
+    import cv2 as _cv2
+    import http.server
+    import socketserver
+
+    def _build_frame() -> bytes:
+        with st.lock:
+            rgb = st.dbg_frame_small
+            det = st.dbg_det
+            state_name = st.state
+            ty = st.track_yaw
+            tp = st.track_pitch
+            locked = st.face_locked
+            hand_at = st.hand_at
+
+        if rgb is None:
+            blank = np.zeros((360, 640, 3), dtype=np.uint8)
+            _cv2.putText(blank, "Waiting for frame...", (20, 180),
+                        _cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2)
+            _, jpg = _cv2.imencode(".jpg", blank)
+            return jpg.tobytes()
+
+        bgr = _cv2.cvtColor(rgb, _cv2.COLOR_RGB2BGR)
+        H, W = bgr.shape[:2]
+
+        # ── 人脸框（蓝色）──
+        if det and det.get("face") is not None:
+            fu, fv, fh = det["face"]
+            fw = fh * 0.85  # 估算宽高比
+            fx0 = int((fu - fw / 2) * W)
+            fy0 = int((fv - fh / 2) * H)
+            fx1 = int((fu + fw / 2) * W)
+            fy1 = int((fv + fh / 2) * H)
+            _cv2.rectangle(bgr, (fx0, fy0), (fx1, fy1), (255, 80, 0), 2)
+            label = f"FACE u={fu:.2f} v={fv:.2f} h={fh:.2f} n={det.get('n_faces',1)}"
+            _cv2.rectangle(bgr, (fx0, fy0 - 18), (fx0 + len(label) * 9, fy0), (255, 80, 0), -1)
+            _cv2.putText(bgr, label, (fx0 + 2, fy0 - 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+
+        # ── 手部框（绿=有效 / 黄=低置信）──
+        if det and det.get("hand") is not None:
+            h = det["hand"]
+            hu, hv, hsize = h.get("u", 0.5), h.get("v", 0.5), h.get("size", 0.0)
+            hscore = h.get("score", 0.0)
+            half = hsize * max(W, H) / 2
+            hx0, hy0 = int(hu * W - half), int(hv * H - half)
+            hx1, hy1 = int(hu * W + half), int(hv * H + half)
+            valid = hscore >= PLAY_SCORE_MIN and hsize >= PLAY_SIZE_OFF
+            color = (0, 200, 0) if valid else (0, 200, 255)  # 绿 / 黄
+            tag = "HAND" if valid else "HAND(LOW)"
+            _cv2.rectangle(bgr, (hx0, hy0), (hx1, hy1), color, 2)
+            fingers = h.get("fingers", -1)
+            gesture = h.get("gesture") or ""
+            g_str = f" [{gesture}]" if gesture else (f" {fingers}f" if fingers >= 0 else "")
+            hlabel = f"{tag} size={hsize:.2f} score={hscore:.2f}{g_str}"
+            _cv2.rectangle(bgr, (hx0, hy1), (hx0 + len(hlabel) * 9, hy1 + 18), color, -1)
+            _cv2.putText(bgr, hlabel, (hx0 + 2, hy1 + 14),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+
+        # ── 左上角：状态机信息（白字黑底）──
+        now_s = time.strftime("%H:%M:%S")
+        lines = [
+            f"[{state_name}]",
+            f"yaw={ty:+.1f}deg  pitch={tp:+.1f}deg",
+            f"face_locked={'Y' if locked else 'N'}  hand_age={time.monotonic()-hand_at:.1f}s",
+            now_s,
+        ]
+        for i, line in enumerate(lines):
+            y = 18 + i * 20
+            _cv2.rectangle(bgr, (0, y - 15), (len(line) * 9 + 4, y + 4), (0, 0, 0), -1)
+            _cv2.putText(bgr, line, (2, y),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                         (0, 255, 255) if i == 0 else (255, 255, 255), 1)
+
+        # ── 底部诊断行：区分"没检出"和"管线未写入"──
+        if det is None:
+            diag = "det=None  vision_result_loop not writing (crashed?)"
+            diag_color = (0, 0, 255)   # 红
+        else:
+            face_s = f"face={det['face']}" if det.get("face") else "face=None"
+            hand_s = f"hand=size{det['hand']['size']:.2f} score{det['hand']['score']:.2f}" if det.get("hand") else "hand=None"
+            diag = f"{face_s}  {hand_s}  n={det.get('n_faces',0)}"
+            diag_color = (0, 255, 0) if det.get("face") or det.get("hand") else (100, 100, 100)
+        _cv2.rectangle(bgr, (0, H - 22), (W, H), (0, 0, 0), -1)
+        _cv2.putText(bgr, diag, (4, H - 6),
+                     _cv2.FONT_HERSHEY_SIMPLEX, 0.42, diag_color, 1)
+
+        _, jpg = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, 75])
+        return jpg.tobytes()
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):  # 静默 HTTP 日志
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.end_headers()
+            try:
+                while not stop.is_set():
+                    data = _build_frame()
+                    self.wfile.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n"
+                        + data + b"\r\n"
+                    )
+                    time.sleep(1 / 15)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    try:
+        server = _Server(("0.0.0.0", port), _Handler)
+        log(f"🔍 VIS_DEBUG → MJPEG 预览: http://localhost:{port}  (浏览器打开)")
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        stop.wait()
+        server.shutdown()
+    except Exception as e:
+        log(f"⚠ VIS_DEBUG 服务启动失败: {e}")
 
 
 def doa_sensor_loop(st: State, stop: threading.Event) -> None:
@@ -1497,6 +1687,24 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
             with st.lock:
                 h_at = st.hand_at
                 h_move = st.hand_move
+                gesture = st.gesture
+                gesture_age = now - st.gesture_at
+            # 手势行为（GESTURE-01）：1s 内的新鲜手势才响应
+            if gesture_age < 1.0:
+                if gesture == "fist":
+                    log("✊ 握拳 → 停止互动")
+                    with st.lock:
+                        st.gesture = None
+                    play_still_since = None
+                    set_state(ST_RETURNING)
+                elif gesture == "five":
+                    log("🖐 张手挥手 → 开心！")
+                    with st.lock:
+                        st.gesture = None
+                elif gesture in ("two", "three", "four"):
+                    log(f"✌️ 手势 {gesture}（{st.gesture_fingers}指）")
+                    with st.lock:
+                        st.gesture = None
             if now - h_at > PLAY_OFF_S:
                 log("💤 手离开 → 回到跟脸/待命")
                 play_still_since = None
@@ -1659,7 +1867,11 @@ def player_loop(mini: ReachyMini, st: State, play_q: "queue.Queue", stop: thread
             return st.play_gen
 
     def push(chunk: np.ndarray) -> None:
-        mini.media.push_audio_sample(chunk)
+        try:
+            mini.media.push_audio_sample(chunk)
+        except Exception as e:
+            log(f"⚠ push_audio_sample 失败: {type(e).__name__}: {e}")
+            return
         with st.lock:
             base = max(st.playback_end_estimate, time.monotonic())
             st.playback_end_estimate = base + len(chunk) / PLAY_SR
@@ -1781,17 +1993,29 @@ def main() -> int:
         automatic_body_yaw=False,
     ) as mini:
         try:
-            mini.media.start_recording()
-            mini.media.start_playing()
-            log("✅ 录音/播放管线已启动;回中立位…")
+            if not NO_VOICE:
+                audio_ok = mini.media.audio is not None
+                camera_ok = mini.media.camera is not None
+                log(f"媒体后端: audio={'✅' if audio_ok else '❌ 未初始化'} camera={'✅' if camera_ok else '❌ 未初始化'}")
+                if not audio_ok:
+                    log("⚠ audio 未初始化 → 麦克风/播放不可用。尝试用 media_backend='local' 重连...")
+                mini.media.start_recording()
+                mini.media.start_playing()
+                log("✅ 录音/播放管线已启动")
+            else:
+                log("🔇 NO_VOICE=1 → 跳过音频管线,仅测试视觉特性(人脸跟踪/指向/逗它)")
             mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.0, body_yaw=0.0)
             time.sleep(0.8)
             # 摄像头预热(顺便验证与录音管线并存)
-            warm = None
-            wdl = time.monotonic() + 10.0
-            while warm is None and time.monotonic() < wdl:
-                warm = mini.media.get_frame()
-                if warm is None:
+            if USE_WEBCAM:
+                import cv2 as _cv2
+                _cap_warm = _cv2.VideoCapture(0)
+                warm = None
+                for _ in range(10):
+                    ret, _f = _cap_warm.read()
+                    if ret:
+                        warm = _f
+                        break
                     time.sleep(0.05)
             log(f"摄像头:{'✅ 出帧 ' + str(warm.shape) if warm is not None else '⚠ 10s 无帧(跟随/take_snapshot 可能失败)'}")
 
@@ -1861,9 +2085,12 @@ def main() -> int:
             threading.Thread(target=player_loop, args=(mini, st, play_q, stop), daemon=True).start()
             threading.Thread(target=motion_loop, args=(mini, st, motion_q, stop), daemon=True).start()
             threading.Thread(target=head_control_loop, args=(mini, st, stop), daemon=True).start()
-            threading.Thread(target=snapshot_loop, args=(mini, st, callback, oai, snap_q, stop), daemon=True).start()
+            if not NO_VOICE:
+                threading.Thread(target=snapshot_loop, args=(mini, st, callback, oai, snap_q, stop), daemon=True).start()
             threading.Thread(target=doa_sensor_loop, args=(st, stop), daemon=True).start()
             threading.Thread(target=behavior_loop, args=(st, snap_q, stop, not no_wake), daemon=True).start()
+            if VIS_DEBUG:
+                threading.Thread(target=vis_debug_server, args=(st, VIS_DEBUG_PORT, stop), daemon=True).start()
             # 视觉(TRACK-FIX):检测在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
             # mediapipe 后端需 .task 模型文件;opencv 后端无需模型文件,直接启用
             vis_frame_q = None
