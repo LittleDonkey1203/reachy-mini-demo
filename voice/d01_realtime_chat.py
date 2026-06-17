@@ -74,6 +74,10 @@ import time
 import urllib.request
 from collections import deque
 
+# VIS_DEBUG 日志环形缓冲区（/state.json 消费）
+_vis_log_buf: "deque[tuple[int, str]]" = deque(maxlen=1000)
+_vis_log_seq: int = 0
+
 import numpy as np
 from PIL import Image
 from scipy.signal import resample_poly
@@ -301,7 +305,11 @@ PLAY_REENTRY_S = 3.0       # 退出后这么久内再进入算"继续逗",不重
 
 
 def log(msg: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    global _vis_log_seq
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    _vis_log_seq += 1
+    _vis_log_buf.append((_vis_log_seq, line))
 
 
 # ───────────────────────── 动作库(CALIBRATION.md §2 标定参数)─────────────────────────
@@ -1288,11 +1296,223 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
         _, jpg = _cv2.imencode(".jpg", bgr, [_cv2.IMWRITE_JPEG_QUALITY, 75])
         return jpg.tobytes()
 
+    _VIS_HTML = """<!DOCTYPE html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小艺 Debug</title>
+<style>
+:root{--bg:#09090f;--card:#131320;--bdr:#1e1e30;--txt:#dde1ea;--muted:#505877;
+     --green:#22d3a0;--red:#f25e6b;--orange:#f5a623;--blue:#38bdf8;--purple:#a78bfa;
+     --mono:'SF Mono','Fira Code',Consolas,monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--txt);font:13px/1.4 system-ui,sans-serif;overflow:hidden}
+#hdr{display:flex;align-items:center;gap:10px;padding:5px 14px;background:var(--card);
+     border-bottom:1px solid var(--bdr);height:40px;flex-shrink:0}
+#hdr h1{font-size:14px;font-weight:600;letter-spacing:-.2px}
+.badge{padding:2px 10px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+.ba{background:#1a1a2e;color:var(--muted)}.be{background:#3d2000;color:#fbbf24}
+.bt{background:#003d28;color:var(--green)}.bs{background:#001d3d;color:var(--blue)}
+.bp{background:#2a0057;color:var(--purple)}.br{background:#3d0010;color:var(--red)}
+#dot{margin-left:auto;width:7px;height:7px;border-radius:50%;background:var(--muted);transition:background .4s}
+#dot.ok{background:var(--green)}
+#main{display:grid;grid-template-columns:1fr 304px;grid-template-rows:1fr 200px;
+      gap:5px;padding:5px;height:calc(100vh - 40px)}
+#cv{background:#000;border-radius:8px;overflow:hidden;position:relative;
+    display:flex;align-items:center;justify-content:center}
+#cv img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+#cv-lbl{position:absolute;bottom:8px;left:8px;background:rgba(0,0,0,.65);
+        padding:2px 8px;border-radius:4px;font:10px var(--mono);color:var(--muted)}
+#side{display:flex;flex-direction:column;gap:5px}
+.card{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:10px}
+.ch{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);margin-bottom:8px}
+#rc{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+canvas{display:block;margin:0 auto}
+.sr{display:flex;justify-content:space-between;align-items:center;
+    padding:3px 0;border-bottom:1px solid var(--bdr);gap:8px}
+.sr:last-child{border:none}
+.sl{color:var(--muted);white-space:nowrap;font-size:12px}
+.sv{font:11px var(--mono);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#lw{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;
+    display:flex;flex-direction:column;overflow:hidden}
+#lh{padding:5px 12px;border-bottom:1px solid var(--bdr);flex-shrink:0;display:flex;align-items:center;gap:8px}
+#lh span{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+#lb{flex:1;overflow-y:auto;padding:4px 12px;font:11px/1.75 var(--mono);min-height:0}
+.ll{white-space:pre-wrap;word-break:break-all}
+.lk{color:var(--green)}.lw2{color:var(--orange)}.le{color:var(--red)}.ld{color:#6366f1}.lm{color:#4b5563}
+</style></head>
+<body>
+<div id="hdr">
+  <h1>&#x1F916; 小艺 Reachy Mini &mdash; Debug Dashboard</h1>
+  <span id="badge" class="badge ba">—</span>
+  <div id="dot"></div>
+</div>
+<div id="main">
+  <div id="cv">
+    <img src="/video" alt="">
+    <div id="cv-lbl">Camera &middot; VIS_DEBUG annotations</div>
+  </div>
+  <div id="side">
+    <div class="card" id="rc">
+      <div class="ch">声源方向 &middot; 世界坐标 (0\xb0=正前)</div>
+      <canvas id="radar" width="280" height="206"></canvas>
+    </div>
+    <div class="card">
+      <div class="ch">系统状态</div>
+      <div class="sr"><span class="sl">状态机</span><span class="sv" id="ss"></span></div>
+      <div class="sr"><span class="sl">收发音</span><span class="sv" id="sp"></span></div>
+      <div class="sr"><span class="sl">声源(世界)</span><span class="sv" id="sd"></span></div>
+      <div class="sr"><span class="sl">方向门控</span><span class="sv" id="sg"></span></div>
+      <div class="sr"><span class="sl">切换</span><span class="sv" id="sw"></span></div>
+      <div class="sr"><span class="sl">头/身偏航</span><span class="sv" id="sy"></span></div>
+    </div>
+  </div>
+  <div id="lw">
+    <div id="lh"><span>实时日志</span><span id="lc" style="margin-left:auto;color:#374151"></span></div>
+    <div id="lb"></div>
+  </div>
+</div>
+<script>
+const GATE=55;
+const cv=document.getElementById('radar'),cx=cv.getContext('2d');
+const W=cv.width,H=cv.height,CX=W/2,CY=H/2,R=Math.min(CX,CY)-16;
+const y2r=d=>-(d*Math.PI/180)-Math.PI/2;
+
+function arw(d,len,col,lw,hs=9){
+  const r=y2r(d),ex=CX+Math.cos(r)*len,ey=CY+Math.sin(r)*len;
+  cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(ex,ey);
+  cx.strokeStyle=col;cx.lineWidth=lw;cx.stroke();
+  const a=.42;cx.beginPath();
+  cx.moveTo(ex,ey);
+  cx.lineTo(ex-hs*Math.cos(r-a),ey-hs*Math.sin(r-a));
+  cx.lineTo(ex-hs*Math.cos(r+a),ey-hs*Math.sin(r+a));
+  cx.closePath();cx.fillStyle=col;cx.fill();
+}
+
+function drawRadar(s){
+  cx.clearRect(0,0,W,H);
+  cx.fillStyle='#0c0c18';cx.beginPath();cx.arc(CX,CY,R+14,0,Math.PI*2);cx.fill();
+  cx.lineWidth=1;cx.strokeStyle='#1a1a2a';
+  [.35,.7,1].forEach(f=>{cx.beginPath();cx.arc(CX,CY,R*f,0,Math.PI*2);cx.stroke()});
+  for(let a=0;a<360;a+=45){const r=y2r(a);cx.beginPath();cx.moveTo(CX,CY);
+    cx.lineTo(CX+Math.cos(r)*R,CY+Math.sin(r)*R);cx.stroke()}
+  cx.font='bold 11px system-ui';cx.textAlign='center';cx.textBaseline='middle';
+  [[0,'前','#4ade80'],[90,'左','#94a3b8'],[-90,'右','#94a3b8'],[180,'后','#374151']].forEach(([d,t,c])=>{
+    const r=y2r(d);cx.fillStyle=c;cx.fillText(t,CX+Math.cos(r)*(R+11),CY+Math.sin(r)*(R+11));
+  });
+  const hy=s.track_yaw||0;
+  const r1=y2r(hy-GATE),r2=y2r(hy+GATE);
+  cx.beginPath();cx.moveTo(CX,CY);cx.arc(CX,CY,R*.9,r1,r2,true);cx.closePath();
+  cx.fillStyle='rgba(34,211,160,.09)';cx.fill();
+  cx.strokeStyle='rgba(34,211,160,.22)';cx.lineWidth=1;cx.stroke();
+  const by=s.body_yaw_deg||0,rb=y2r(by);
+  cx.setLineDash([3,4]);cx.strokeStyle='#4b5563';cx.lineWidth=1.5;
+  cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(CX+Math.cos(rb)*R*.75,CY+Math.sin(rb)*R*.75);cx.stroke();
+  cx.setLineDash([]);
+  arw(hy,R*.72,'#38bdf8',2.5);
+  const dr=s.doa_resid_stable;
+  if(dr!=null){
+    const wd=hy+dr,fr=s.doa_fresh;
+    const col=fr?(s.doa_confident?'#22d3a0':'#f5a623'):'#374151';
+    arw(wd,R*.88,col,2);
+    const rr=y2r(wd);
+    cx.beginPath();cx.arc(CX+Math.cos(rr)*R*.88,CY+Math.sin(rr)*R*.88,4,0,Math.PI*2);
+    cx.fillStyle=col;cx.fill();
+  }
+  if(s.switching&&s.switch_target){
+    const rs=y2r(s.switch_target);
+    cx.beginPath();cx.arc(CX+Math.cos(rs)*R*.72,CY+Math.sin(rs)*R*.72,5,0,Math.PI*2);
+    cx.strokeStyle='#f97316';cx.lineWidth=2;cx.stroke();
+  }
+  cx.beginPath();cx.arc(CX,CY,3,0,Math.PI*2);cx.fillStyle='#fff';cx.fill();
+  cx.font='10px monospace';cx.textAlign='left';cx.textBaseline='alphabetic';
+  const fr2=s.doa_fresh,co2=s.doa_confident,dr2=s.doa_resid_stable;
+  [['‒ ‒','#4b5563','身(body)'],
+   ['——','#38bdf8','头(head)'],
+   ['——',dr2!=null&&fr2?(co2?'#22d3a0':'#f5a623'):'#374151','声(world)']
+  ].forEach(([sym,c,t],i)=>{cx.fillStyle=c;cx.fillText(sym+' '+t,4,H-26+i*13)});
+}
+
+const $=id=>document.getElementById(id);
+const bmap={ARMED:'ba',ENGAGING:'be',TRACKING:'bt',SEEKING:'bs',SEARCHING:'bs',PLAYING:'bp',RETURNING:'br'};
+function sv(id,txt,col){const e=$(id);e.textContent=txt;e.style.color=col||''}
+
+function refresh(s){
+  const b=$('badge');b.textContent=s.state||'—';b.className='badge '+(bmap[s.state]||'ba');
+  sv('ss',s.state||'—');
+  sv('sp',s.speaking?'🔊 说话中':'🎙️ 收听中',s.speaking?'#f97316':'#38bdf8');
+  const dr=s.doa_resid_stable,hy=s.track_yaw||0;
+  if(dr!=null&&s.doa_fresh){
+    const w=hy+dr,dir=w>5?'←左':w<-5?'右→':'↑前';
+    sv('sd',(w>=0?'+':'')+w.toFixed(0)+'\xb0 '+dir+' '+(s.doa_confident?'●':'○'),
+       s.doa_confident?'#22d3a0':'#f5a623');
+  }else{
+    sv('sd',dr!=null?(hy+dr).toFixed(0)+'\xb0(旧)':'—','#374151');
+  }
+  sv('sg',s.gate_open?'✓ 开放 (收音)':'✗ 静音 (门关)',s.gate_open?'#22d3a0':'#f25e6b');
+  sv('sw',s.switching?s.switch_phase+' → '+s.switch_target.toFixed(0)+'\xb0':'—',s.switching?'#f97316':'#374151');
+  const hv=(s.track_yaw||0).toFixed(1),bv=(s.body_yaw_deg||0).toFixed(1);
+  sv('sy','头 '+(hv>=0?'+':'')+hv+'\xb0  身 '+(bv>=0?'+':'')+bv+'\xb0');
+  drawRadar(s);
+}
+
+let seq=0;const lb=$('lb'),MAX=400;
+function lcls(t){
+  if(/❌|ERROR|Traceback/.test(t))return 'le';
+  if(/⚠|WARN|失败|failed/.test(t))return 'lw2';
+  if(/✅|👂|🎙|🤖|就绪|启动|成功/.test(t))return 'lk';
+  if(/KWS|raw=|resid=|IQR=|vad=/.test(t))return 'ld';
+  return 'lm';
+}
+function addLog(lines){
+  const bot=lb.scrollTop+lb.clientHeight>=lb.scrollHeight-40;
+  const f=document.createDocumentFragment();
+  lines.forEach(t=>{const d=document.createElement('div');d.className='ll '+lcls(t);d.textContent=t;f.appendChild(d)});
+  lb.appendChild(f);
+  while(lb.children.length>MAX)lb.removeChild(lb.firstChild);
+  if(bot)lb.scrollTop=lb.scrollHeight;
+  $('lc').textContent=lb.children.length+' lines';
+}
+
+const dot=$('dot');let conn=false;
+async function poll(){
+  try{
+    const r=await fetch('/state.json?after='+seq,{cache:'no-store'});
+    if(r.ok){
+      const s=await r.json();
+      if(!conn){dot.classList.add('ok');conn=true}
+      seq=s.log_seq||seq;refresh(s);
+      if(s.new_logs&&s.new_logs.length)addLog(s.new_logs);
+    }
+  }catch(e){dot.classList.remove('ok');conn=false}
+  setTimeout(poll,250);
+}
+poll();
+</script></body></html>"""
+
     class _Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *args):  # 静默 HTTP 日志
+        def log_message(self, *args):
             pass
 
         def do_GET(self):
+            path = self.path.split("?", 1)[0]
+            if path in ("/", "/index.html"):
+                self._html()
+            elif path == "/video":
+                self._mjpeg()
+            elif path == "/state.json":
+                self._state()
+            else:
+                self.send_error(404)
+
+        def _html(self):
+            body = _VIS_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _mjpeg(self):
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
             self.end_headers()
@@ -1308,13 +1528,52 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+        def _state(self):
+            qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+            after = 0
+            for part in qs.split("&"):
+                if part.startswith("after="):
+                    try:
+                        after = int(part[6:])
+                    except ValueError:
+                        pass
+            now = time.monotonic()
+            with st.lock:
+                data = {
+                    "state": st.state,
+                    "track_yaw": st.track_yaw,
+                    "track_pitch": st.track_pitch,
+                    "body_yaw_deg": st.body_yaw_deg,
+                    "face_locked": st.face_locked,
+                    "speaking": now < st.playback_end_estimate + 0.1,
+                    "doa_resid_stable": st.doa_resid_stable,
+                    "doa_confident": st.doa_confident,
+                    "doa_fresh": (
+                        st.doa_resid_stable is not None
+                        and (now - st.doa_at) < DOA_GATE_FRESH_S
+                    ),
+                    "gate_open": st.dbg_gate_open,
+                    "switching": st.dbg_switching,
+                    "switch_phase": st.dbg_switch_phase,
+                    "switch_target": st.dbg_switch_target,
+                }
+            data["log_seq"] = _vis_log_seq
+            data["new_logs"] = [t for s, t in _vis_log_buf if s > after]
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
     class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
         allow_reuse_address = True
 
     try:
         server = _Server(("0.0.0.0", port), _Handler)
-        log(f"🔍 VIS_DEBUG → MJPEG 预览: http://localhost:{port}  (浏览器打开)")
+        log(f"🔍 VIS_DEBUG → Dashboard: http://localhost:{port}  (浏览器打开;/video=MJPEG /state.json=状态)")
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
         stop.wait()
