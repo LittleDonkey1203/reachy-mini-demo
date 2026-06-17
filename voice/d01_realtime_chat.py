@@ -1231,9 +1231,9 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
         _cv2.rectangle(_overlay, (_gate_x0, _doa_y0 + 2), (_gate_x1, H - 24), (0, 60, 0), -1)  # 范围内=绿
         _cv2.addWeighted(_overlay, 0.4, bgr, 0.6, 0, bgr)
 
-        # 刻度线：-90 -60 -30 0 +30 +60 +90
+        # 刻度线：画面左=机器人左(resid+)，画面右=机器人右(resid-)
         for _d in (-90, -60, -30, 0, 30, 60, 90):
-            _tx = _deg2x(float(_d))
+            _tx = _deg2x(float(-_d))
             _cv2.line(bgr, (_tx, _doa_y0 + 2), (_tx, _doa_y0 + 8), (120, 120, 120), 1)
             if _d != 0:
                 _lbl = f"{_d:+d}"
@@ -1243,7 +1243,7 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 _cv2.line(bgr, (_tx, _doa_y0 + 2), (_tx, _doa_y0 + 14), (180, 180, 180), 1)
 
         # body_yaw 三角标（白色，朝下）
-        _bx = _deg2x(float(np.clip(body_yaw, -_doa_range, _doa_range)))
+        _bx = _deg2x(float(np.clip(-body_yaw, -_doa_range, _doa_range)))
         _tri = np.array([[_bx, _doa_y0 + 2], [_bx - 5, _doa_y0 + 10], [_bx + 5, _doa_y0 + 10]], np.int32)
         _cv2.fillPoly(bgr, [_tri], (220, 220, 220))
         _cv2.putText(bgr, "H", (_bx - 4, _doa_y0 + 10),
@@ -1251,14 +1251,14 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
 
         # 切换目标角（橙色三角，朝上，切换中才显示）
         if sw_active:
-            _sx = _deg2x(float(np.clip(sw_target, -_doa_range, _doa_range)))
+            _sx = _deg2x(float(np.clip(-sw_target, -_doa_range, _doa_range)))
             _stri = np.array([[_sx, H - 25], [_sx - 5, H - 33], [_sx + 5, H - 33]], np.int32)
             _cv2.fillPoly(bgr, [_stri], (0, 130, 255))  # 橙
 
         # DOA 方向箭头（主指示器，从中央向外）
         _doa_fresh = doa_resid is not None and (time.monotonic() - doa_at) < DOA_GATE_FRESH_S
         if doa_resid is not None:
-            _dx = _deg2x(float(np.clip(doa_resid, -_doa_range, _doa_range)))
+            _dx = _deg2x(float(np.clip(-doa_resid, -_doa_range, _doa_range)))
             _cy_bar = (_doa_y0 + H - 22) // 2
             if doa_conf and _doa_fresh:
                 _arrow_c = (0, 220, 0)   # 绿：confident + fresh
