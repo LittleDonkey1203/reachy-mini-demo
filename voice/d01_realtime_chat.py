@@ -1741,7 +1741,7 @@ canvas{display:block;margin:0 auto}
   </div>
   <div id="timeline-wrap"><canvas id="timeline"></canvas></div>
   <div id="fb-bar">
-    <button id="fb-btn" onmousedown="startRec()" onmouseup="stopRec()" ontouchstart="startRec()" ontouchend="stopRec()">🎙️ 按住说反馈</button>
+    <button id="fb-btn" onmousedown="startRec()" onmouseup="stopRec()" ontouchstart="startRec()" ontouchend="stopRec()">🎙️ 按住说反馈 <kbd style="font-size:10px;opacity:.6">[Space]</kbd></button>
     <span id="fb-status">松开后自动 ASR 归档到当前轮次</span>
   </div>
 </div>
@@ -2010,6 +2010,9 @@ async function poll(){
 }
 poll();
 window.addEventListener('resize',()=>{if(document.getElementById('view-conv').classList.contains('active'))drawTimeline()});
+// 空格键 push-to-talk（仅 Conversation 标签激活时）
+document.addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat&&document.getElementById('view-conv').classList.contains('active')){e.preventDefault();startRec();}});
+document.addEventListener('keyup',e=>{if(e.code==='Space'&&document.getElementById('view-conv').classList.contains('active')){e.preventDefault();stopRec();}});
 </script></body></html>"""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
