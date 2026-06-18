@@ -415,10 +415,16 @@ def _record_event(etype: str, event: dict) -> None:
 
     # 维护高层轮次
     if etype == "response.created":
+        # 收集最近 10s 内的 vis/doa/gate 事件作为"触发上下文"
+        ctx_cutoff = now_mono - 10.0
+        ctx = [e["label"] for e in _conv_events
+               if e["ts_mono"] > ctx_cutoff and e["role"] == "system"
+               and e["type"] not in ("session.created", "session.updated")]
         turn = {"turn_id": seq, "start_ts": ts, "start_mono": now_mono,
                 "end_ts": None, "end_mono": None,
                 "asr": "", "tool_calls": [], "transcript": "",
-                "snapshot_desc": "", "events": [seq]}
+                "snapshot_desc": "", "events": [seq],
+                "context": ctx[-5:]}  # 最多5条前置上下文
         _current_turn = turn
         if len(_conv_turns) >= 100:
             _conv_turns.pop(0)
@@ -464,6 +470,23 @@ def _record_snap_result(call_id: str, mode: str, desc: str, ok: bool) -> None:
             if tc["call_id"] == call_id:
                 tc["output_preview"] = preview
                 break
+
+
+def _record_vis_event(etype: str, label: str, payload: "dict | None" = None) -> None:
+    """录制非 Realtime API 事件（状态机、视觉、DOA、门控等）到 _conv_events。
+    etype 前缀约定：vis.*=视觉/行为, gate.*=门控, doa.*=声源, audio.*=音频输入。"""
+    global _conv_seq
+    _conv_seq += 1
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    ts = time.strftime("%H:%M:%S", time.localtime(now_wall)) + f".{int(now_wall * 1000) % 1000:03d}"
+    entry = {"seq": _conv_seq, "ts": ts, "ts_mono": now_mono,
+             "type": etype, "role": "system",
+             "label": label, "payload": payload or {}}
+    _conv_events.append(entry)
+    # 把行为事件也关联到当前轮次
+    if _current_turn is not None:
+        _current_turn["events"].append(_conv_seq)
 
 
 # ───────────────────────── 动作库(CALIBRATION.md §2 标定参数)─────────────────────────
@@ -1336,6 +1359,8 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
                 hit_run_start = now
             if not locked and (now - hit_run_start) >= LOCK_ON_S:
                 locked = True
+                _record_vis_event("vis.face_locked", "🔒 人脸锁定",
+                                  {"u": round(u_raw, 3), "v": round(v_raw, 3)})
             u = fx(u_raw, now)
             v = fy(v_raw, now)
             with st.lock:
@@ -1371,6 +1396,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
                 locked = False
                 with st.lock:
                     st.face_locked = False
+                _record_vis_event("vis.face_lost", "🔓 人脸丢失", {})
             if miss_streak >= VIS_MISS_N:  # 1c:连续 N 帧漏检才重置滤波(防侧脸闪断)
                 fx.reset()
                 fy.reset()
@@ -1657,6 +1683,7 @@ canvas{display:block;margin:0 auto}
 .tc-tool{color:var(--orange)}
 .tc-vlm{color:var(--purple)}
 .tc-fb{color:var(--blue);font:10px var(--mono)}
+.tc-ctx{font:10px var(--mono);color:#6366f1;opacity:.7;padding:2px 0 3px;border-bottom:1px solid #1a1a2e;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #event-panel{background:var(--card);border:1px solid var(--bdr);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
 #ep-hdr{padding:5px 12px;border-bottom:1px solid var(--bdr);flex-shrink:0;font:10px var(--mono);color:var(--muted);display:flex;gap:12px;align-items:center}
 #ep-list{flex:1;overflow-y:auto;font:11px var(--mono)}
@@ -1842,8 +1869,10 @@ function addLog(lines){
 }
 
 // ── Conversation view ──
-let convSeq=0, allEvents=[], allTurns=[], allFeedback=[];
+let convSeq=0, allEvents=[], allTurns=[], allFeedback=[], feedbackDir='';
 let selectedTurnId=null, filterTurnId=null;
+// timeline navigation state
+let tlNodes=[], tlSelIdx=-1;
 
 function renderTurnCard(t){
   const fbCount=allFeedback.filter(f=>f.turn_id===t.turn_id).length;
@@ -1852,11 +1881,16 @@ function renderTurnCard(t){
   d.dataset.tid=t.turn_id;
   d.onclick=()=>selectTurn(t.turn_id);
   const dur=t.end_mono&&t.start_mono?(t.end_mono-t.start_mono).toFixed(1)+'s':'…';
+  // context: vis/behavior events that preceded this turn
+  const ctxHtml=(t.context&&t.context.length)
+    ?`<div class="tc-ctx">${t.context.map(c=>`<span>${esc(c)}</span>`).join(' ')}</div>`:
+    '';
   d.innerHTML=`<div class="tc-hdr"><span class="tc-id">Turn #${t.turn_id}</span><span class="tc-ts">${t.start_ts||''} (${dur})</span></div>`+
-    (t.asr?`<div class="tc-row tc-asr"><span class="em">🎤</span>${esc(t.asr.slice(0,60))}</div>`:'<div class="tc-row" style="color:#374151">（等待 ASR…）</div>')+
+    ctxHtml+
+    (t.asr?`<div class="tc-row tc-asr"><span class="em">🎤</span>${esc(t.asr.slice(0,80))}</div>`:'<div class="tc-row" style="color:#374151">（等待 ASR…）</div>')+
     t.tool_calls.map(tc=>`<div class="tc-row tc-tool"><span class="em">🤖</span>${esc(tc.name)}`+(tc.output_preview?` <span style="color:#9ca3af">→ ${esc(tc.output_preview.slice(0,40))}</span>`:'')+`</div>`).join('')+
-    (t.snapshot_desc?`<div class="tc-row tc-vlm"><span class="em">🖼️</span>${esc(t.snapshot_desc.slice(0,60))}</div>`:'')+
-    (t.transcript?`<div class="tc-row tc-out"><span class="em">🔊</span>${esc(t.transcript.slice(0,70))}</div>`:'')+
+    (t.snapshot_desc?`<div class="tc-row tc-vlm"><span class="em">🖼️</span>${esc(t.snapshot_desc.slice(0,80))}</div>`:'')+
+    (t.transcript?`<div class="tc-row tc-out"><span class="em">🔊</span>${esc(t.transcript.slice(0,80))}</div>`:'')+
     (fbCount?`<div class="tc-fb">📌 ${fbCount} 条反馈</div>`:'');
   return d;
 }
@@ -1864,7 +1898,6 @@ function renderTurnCard(t){
 function refreshTurnList(){
   const list=$('turn-list');
   const scrolled=list.scrollTop+list.clientHeight>=list.scrollHeight-60;
-  // diff update
   const existing=new Map([...list.querySelectorAll('.turn-card')].map(e=>[+e.dataset.tid,e]));
   allTurns.forEach(t=>{
     const el=existing.get(t.turn_id);
@@ -1882,12 +1915,16 @@ function selectTurn(tid){
   renderEventList();
   drawTimeline();
 }
-function clearFilter(){filterTurnId=null;$('ep-title').textContent='全部事件';renderEventList()}
+function clearFilter(){filterTurnId=null;$('ep-title').textContent='全部事件';renderEventList();drawTimeline();}
 
-function renderEventList(){
-  const evs=filterTurnId!=null
+function getFilteredEvents(){
+  return filterTurnId!=null
     ?allEvents.filter(e=>{const t=allTurns.find(t=>t.turn_id===filterTurnId);return t&&t.events.includes(e.seq)})
     :allEvents;
+}
+
+function renderEventList(){
+  const evs=getFilteredEvents();
   const list=$('ep-list');
   const bot=list.scrollTop+list.clientHeight>=list.scrollHeight-40;
   list.innerHTML='';
@@ -1895,6 +1932,7 @@ function renderEventList(){
   evs.forEach(e=>{
     const d=document.createElement('div');
     d.className=`ev role-${e.role}`;
+    d.dataset.seq=e.seq;
     d.innerHTML=`<span class="es">${e.seq}</span><span class="ets">${e.ts.slice(0,12)}</span><span class="ety">${esc(e.type)}</span><span class="elb">${esc(e.label)}</span>`;
     d.onclick=()=>openModal(e);
     f.appendChild(d);
@@ -1906,8 +1944,13 @@ function renderEventList(){
 
 // timeline
 const LANES=['user','model','tool','system'];
+const LANE_LABELS={'user':'User','model':'Model','tool':'Tool','system':'Sys'};
 const LANE_COLORS={'user':'#38bdf8','model':'#22d3a0','tool':'#f5a623','system':'#6366f1'};
-const LANE_H=32;
+const LANE_H=36;
+const TL_PAD_L=44,TL_PAD_R=8,TL_PAD_T=6;
+// issue#4: selected node in timeline
+let tlSelNode=null; // {idx, evSeq}
+
 function drawTimeline(){
   const canvas=$('timeline');
   const W2=canvas.offsetWidth,H2=canvas.offsetHeight;
@@ -1915,29 +1958,126 @@ function drawTimeline(){
   const c=canvas.getContext('2d');
   c.fillStyle='#09090f';c.fillRect(0,0,W2,H2);
   if(!allEvents.length)return;
-  const evs=filterTurnId!=null
-    ?allEvents.filter(e=>{const t=allTurns.find(t=>t.turn_id===filterTurnId);return t&&t.events.includes(e.seq)})
-    :allEvents.slice(-200);
-  if(!evs.length)return;
-  const t0=evs[0].ts_mono,t1=evs[evs.length-1].ts_mono;
-  const span=Math.max(t1-t0,1);
-  const pad=40,cw=W2-pad*2;
-  const tx=t=>pad+((t-t0)/span)*cw;
-  // lane labels
+  // Issue#3 fix: always use FULL allEvents time range for axis, not filtered
+  const allMono=allEvents.map(e=>e.ts_mono);
+  const t0_full=Math.min(...allMono), t1_full=Math.max(...allMono);
+  const span=Math.max(t1_full-t0_full,1);
+  const cw=W2-TL_PAD_L-TL_PAD_R;
+  const tx=t=>TL_PAD_L+((t-t0_full)/span)*cw;
+
+  const filteredSeqs=filterTurnId!=null
+    ?(()=>{const turn=allTurns.find(t=>t.turn_id===filterTurnId);return turn?new Set(turn.events):new Set();})()
+    :null;
+
+  // draw turn backgrounds
+  allTurns.forEach(turn=>{
+    const ts=turn.start_mono, te=turn.end_mono||t1_full;
+    const x0=tx(ts), x1=tx(te);
+    const isSelected=(turn.turn_id===filterTurnId);
+    c.fillStyle=isSelected?'rgba(56,189,248,.07)':'rgba(255,255,255,.02)';
+    c.fillRect(x0,0,Math.max(x1-x0,2),H2);
+    if(isSelected){c.strokeStyle='rgba(56,189,248,.2)';c.lineWidth=1;c.beginPath();c.moveTo(x0,0);c.lineTo(x0,H2);c.stroke();}
+  });
+
+  // lane labels + lines
   LANES.forEach((l,i)=>{
-    const y=28+i*LANE_H;
-    c.fillStyle=LANE_COLORS[l];c.font='10px system-ui';c.textAlign='left';
-    c.fillText(l,4,y+4);
-    c.strokeStyle='#1a1a2a';c.lineWidth=1;c.beginPath();c.moveTo(pad,y);c.lineTo(W2-4,y);c.stroke();
+    const y=TL_PAD_T+i*LANE_H+LANE_H/2;
+    c.fillStyle=LANE_COLORS[l];c.font='9px system-ui';c.textAlign='left';c.textBaseline='middle';
+    c.fillText(LANE_LABELS[l],2,y);
+    c.strokeStyle='#1a1a2a';c.lineWidth=1;c.beginPath();c.moveTo(TL_PAD_L,y);c.lineTo(W2-TL_PAD_R,y);c.stroke();
   });
-  evs.forEach(e=>{
+
+  // draw events and build tlNodes
+  tlNodes=[];
+  const displayEvs=allEvents.slice(-300);
+  displayEvs.forEach(e=>{
     const li=LANES.indexOf(e.role);if(li<0)return;
-    const x=tx(e.ts_mono),y=20+li*LANE_H;
-    const ishl=filterTurnId!=null&&selectedTurnId===filterTurnId;
-    c.fillStyle=LANE_COLORS[e.role];c.beginPath();c.arc(x,y+8,4,0,Math.PI*2);c.fill();
-    if(cw/evs.length>30){c.fillStyle='#9ca3af';c.font='9px monospace';c.textAlign='center';
-      c.fillText(e.label.slice(0,12),x,y+22);}
+    const x=tx(e.ts_mono),y=TL_PAD_T+li*LANE_H+LANE_H/2;
+    const inFilter=!filteredSeqs||filteredSeqs.has(e.seq);
+    const isSelNode=tlSelNode&&tlSelNode.evSeq===e.seq;
+    const r=isSelNode?6:4;
+    c.globalAlpha=inFilter?1.0:0.2;
+    c.fillStyle=inFilter?LANE_COLORS[e.role]:'#374151';
+    c.beginPath();c.arc(x,y,r,0,Math.PI*2);c.fill();
+    if(isSelNode){c.strokeStyle='#fff';c.lineWidth=1.5;c.beginPath();c.arc(x,y,r+2,0,Math.PI*2);c.stroke();}
+    c.globalAlpha=1.0;
+    if(cw/Math.max(displayEvs.length,1)>28){
+      c.fillStyle=inFilter?'#9ca3af':'#374151';c.font='8px monospace';c.textAlign='center';c.textBaseline='top';
+      c.fillText(e.label.slice(0,10),x,y+r+2);
+    }
+    tlNodes.push({idx:tlNodes.length, evSeq:e.seq, x, y, role:e.role, laneIdx:li, event:e});
   });
+}
+
+// Issue#4: timeline click → scroll to turn card + highlight
+$('timeline').addEventListener('click',function(ev){
+  const rect=this.getBoundingClientRect();
+  const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
+  let best=null, bestD=Infinity;
+  tlNodes.forEach(n=>{
+    const d=Math.hypot(n.x-mx,n.y-my);
+    if(d<bestD){bestD=d;best=n;}
+  });
+  if(!best||bestD>14)return;
+  tlSelNode=best;
+  // find which turn this event belongs to
+  const turn=allTurns.find(t=>t.events.includes(best.evSeq));
+  if(turn){
+    selectTurn(turn.turn_id);
+    // scroll turn card into view
+    const card=document.querySelector(`.turn-card[data-tid="${turn.turn_id}"]`);
+    if(card)card.scrollIntoView({behavior:'smooth',block:'nearest'});
+  } else {
+    // system/vis event not in any turn — just highlight in event list
+    document.querySelectorAll('.ev').forEach(el=>el.classList.toggle('hl',+el.dataset.seq===best.evSeq));
+    drawTimeline();
+  }
+  drawTimeline();
+});
+
+// Issue#4: arrow key navigation on timeline
+document.addEventListener('keydown',function(e){
+  const convActive=document.getElementById('view-conv').classList.contains('active');
+  if(e.code==='Space'&&!e.repeat&&convActive){e.preventDefault();startRec();return;}
+  if(!convActive||!tlNodes.length)return;
+  if(e.code==='ArrowLeft'||e.code==='ArrowRight'){
+    e.preventDefault();
+    // navigate events on same lane
+    const curLane=tlSelNode?tlSelNode.laneIdx:0;
+    const sameLane=tlNodes.filter(n=>n.laneIdx===curLane);
+    if(!sameLane.length)return;
+    const curPos=tlSelNode?sameLane.findIndex(n=>n.evSeq===tlSelNode.evSeq):-1;
+    const next=e.code==='ArrowRight'
+      ?sameLane[Math.min(curPos+1,sameLane.length-1)]
+      :sameLane[Math.max(curPos-1,0)];
+    if(next){tlSelNode=next;scrollToTlNode(next);drawTimeline();}
+  } else if(e.code==='ArrowUp'||e.code==='ArrowDown'){
+    e.preventDefault();
+    // navigate lanes
+    const curLane=tlSelNode?tlSelNode.laneIdx:0;
+    const nextLane=e.code==='ArrowDown'?Math.min(curLane+1,LANES.length-1):Math.max(curLane-1,0);
+    const laneEvs=tlNodes.filter(n=>n.laneIdx===nextLane);
+    if(!laneEvs.length)return;
+    // jump to closest event in time
+    const curMono=tlSelNode?tlSelNode.event.ts_mono:(allEvents[0]||{ts_mono:0}).ts_mono;
+    const next=laneEvs.reduce((a,b)=>Math.abs(b.event.ts_mono-curMono)<Math.abs(a.event.ts_mono-curMono)?b:a);
+    if(next){tlSelNode=next;scrollToTlNode(next);drawTimeline();}
+  }
+});
+document.addEventListener('keyup',function(e){
+  if(e.code==='Space'&&document.getElementById('view-conv').classList.contains('active')){e.preventDefault();stopRec();}
+});
+
+function scrollToTlNode(node){
+  // scroll event list to show this event
+  const el=document.querySelector(`.ev[data-seq="${node.evSeq}"]`);
+  if(el)el.scrollIntoView({behavior:'smooth',block:'nearest'});
+  // also navigate to turn if possible
+  const turn=allTurns.find(t=>t.events.includes(node.evSeq));
+  if(turn){
+    const card=document.querySelector(`.turn-card[data-tid="${turn.turn_id}"]`);
+    if(card)card.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
 }
 
 // modal
@@ -1959,25 +2099,31 @@ async function startRec(){
     mediaRec=new MediaRecorder(stream);recChunks=[];
     recTurnId=selectedTurnId;
     mediaRec.ondataavailable=e=>recChunks.push(e.data);
-    mediaRec.start();$('fb-btn').classList.add('recording');$('fb-status').textContent='录音中…';
-  }catch(e){$('fb-status').textContent='麦克风不可用:'+e.message;}
+    mediaRec.start(100);
+    $('fb-btn').classList.add('recording');
+    $('fb-status').textContent='🔴 录音中… (松开 Space 或按钮结束)';
+  }catch(e){
+    $('fb-status').textContent='⚠ 麦克风不可用: '+e.message;
+  }
 }
 async function stopRec(){
   if(!mediaRec)return;
-  mediaRec.stop();
-  mediaRec.stream.getTracks().forEach(t=>t.stop());
-  mediaRec.onstop=async()=>{
+  const rec=mediaRec; mediaRec=null;
+  rec.stop();
+  rec.stream.getTracks().forEach(t=>t.stop());
+  rec.onstop=async()=>{
+    if(!recChunks.length){$('fb-status').textContent='⚠ 未录到音频';return;}
     const blob=new Blob(recChunks,{type:'audio/webm'});
     const ab=await blob.arrayBuffer();
     const b64=btoa(String.fromCharCode(...new Uint8Array(ab)));
-    $('fb-status').textContent='识别中…';$('fb-btn').classList.remove('recording');
+    $('fb-status').textContent='⏳ 识别中…';$('fb-btn').classList.remove('recording');
     try{
       const r=await fetch('/feedback',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({audio_b64:b64,turn_id:recTurnId})});
       const d=await r.json();
-      $('fb-status').textContent='📌 已归档: '+d.transcript;
-    }catch(e){$('fb-status').textContent='归档失败: '+e.message;}
-    mediaRec=null;
+      const loc=feedbackDir?` | 归档: ${feedbackDir}/feedback_*.jsonl`:'';
+      $('fb-status').textContent='📌 已归档: '+d.transcript+loc;
+    }catch(e){$('fb-status').textContent='⚠ 归档失败: '+e.message;}
   };
 }
 
@@ -2001,6 +2147,7 @@ async function poll(){
       }
       if(s.conv_turns)allTurns=s.conv_turns;
       if(s.feedback)allFeedback=s.feedback;
+      if(s.feedback_dir)feedbackDir=s.feedback_dir;
       if(document.getElementById('view-conv').classList.contains('active')){
         refreshTurnList();renderEventList();drawTimeline();
       }
@@ -2010,9 +2157,6 @@ async function poll(){
 }
 poll();
 window.addEventListener('resize',()=>{if(document.getElementById('view-conv').classList.contains('active'))drawTimeline()});
-// 空格键 push-to-talk（仅 Conversation 标签激活时）
-document.addEventListener('keydown',e=>{if(e.code==='Space'&&!e.repeat&&document.getElementById('view-conv').classList.contains('active')){e.preventDefault();startRec();}});
-document.addEventListener('keyup',e=>{if(e.code==='Space'&&document.getElementById('view-conv').classList.contains('active')){e.preventDefault();stopRec();}});
 </script></body></html>"""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -2096,6 +2240,7 @@ document.addEventListener('keyup',e=>{if(e.code==='Space'&&document.getElementBy
             data["conv_events"] = [e for e in _conv_events if e["seq"] > after_conv]
             data["conv_turns"] = _conv_turns[-30:]
             data["feedback"] = _feedback_notes[-50:]
+            data["feedback_dir"] = SNAP_DIR
             data["instructions"] = INSTRUCTIONS  # 前端首次拿到后可缓存
             body = json.dumps(data, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
@@ -2146,6 +2291,14 @@ document.addEventListener('keyup',e=>{if(e.code==='Space'&&document.getElementBy
                         "audio_b64": audio_b64}
                 _feedback_notes.append(note)
                 log(f"📌 反馈笔记 #{_feedback_seq}: {transcript[:60]}")
+                # 持久化到磁盘
+                try:
+                    os.makedirs(SNAP_DIR, exist_ok=True)
+                    fb_path = os.path.join(SNAP_DIR, f"feedback_{time.strftime('%Y%m%d')}.jsonl")
+                    with open(fb_path, "a", encoding="utf-8") as _ff:
+                        _ff.write(json.dumps(note, ensure_ascii=False) + "\n")
+                except Exception as _pe:
+                    log(f"⚠ 反馈写盘失败:{_pe}")
                 resp = json.dumps({"ok": True, "transcript": transcript,
                                    "id": _feedback_seq}, ensure_ascii=False).encode()
                 self.send_response(200)
@@ -2259,8 +2412,11 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
         nonlocal phase_t
         with st.lock:
             if st.state != s:
-                log(f"🧭 状态:{st.state} → {s}")
+                prev = st.state
+                log(f"🧭 状态:{prev} → {s}")
                 st.state = s
+                _record_vis_event("vis.state", f"🧭 {prev} → {s}",
+                                  {"from": prev, "to": s})
             # Bug2 修:只在"首次捕获"(IDLE/ENGAGING/RETURNING→TRACKING)播种无互动计时;
             # SEARCHING↔TRACKING 的短暂回切不重置(否则抖动让 15s 永远清零)
             if seed_interact:
@@ -2346,6 +2502,7 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                 wide_scan = True
                 greet_armed = True
                 log(f"🔎 唤醒 → SEEK 寻人({hint})")
+                _record_vis_event("vis.seek_start", f"🔎 SEEK 寻人: {hint}", {"hint": hint})
                 set_state(ST_ENGAGING, seed_interact=True)
             else:
                 approach(0.0, 0.0, 0.0)                 # 缓慢保持回正(头控渲染慢呼吸)
@@ -2469,6 +2626,8 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                     engage_target = float(np.clip(st.track_yaw + snd, -SND_TARGET_LIMIT, SND_TARGET_LIMIT))
                 wide_scan = False    # in-conversation 声源转向走原"转到目标+小扫",非 SEEK 宽扫
                 log(f"👂 视场外有人说话(残差 {snd:+.0f}°)→ ENGAGING 朝 {engage_target:+.0f}°")
+                _record_vis_event("doa.engage", f"👂 DOA 触发转向 {snd:+.0f}° → {engage_target:+.0f}°",
+                                  {"resid": round(snd, 1), "target": round(engage_target, 1)})
                 set_state(ST_ENGAGING)
             elif wake_mode and (now - last_interact) > NO_INTERACT_S and not speaking:
                 log(f"💤 engaged 无互动 {NO_INTERACT_S:.0f}s → 回 armed 待命")
@@ -3243,6 +3402,7 @@ def main() -> int:
                                 st.wake_cue = "heard"
                                 st.wake_cue_t = time.monotonic()
                             log("🔔 听到「小艺」(上扬)→ 连接 Qwen…")
+                            _record_vis_event("vis.wake_word", "🔔 唤醒词「小艺」触发", {})
                             tc = time.monotonic()
                             conv = None if sim_fail else open_session()
                             if conv is not None:
@@ -3317,8 +3477,10 @@ def main() -> int:
                     if gate_open != prev_gate_open:
                         if gate_open:
                             log("🚪 门控:开 → 正常上行")
+                            _record_vis_event("gate.open", "🚪 门控开放(收音)", {"resid": round(g_resid, 1) if g_resid is not None else None})
                         else:
                             log(f"🚪 门控:关(确信范围外 resid {g_resid:+.0f}° >±{GATE_DEG:.0f})→ 发静音,不送/不打断/不计时")
+                            _record_vis_event("gate.closed", f"🚪 门控关闭(方向外 {g_resid:+.0f}°)", {"resid": round(g_resid, 1), "gate_deg": GATE_DEG})
                         prev_gate_open = gate_open
                         with st.lock:
                             st.dbg_gate_open = gate_open
