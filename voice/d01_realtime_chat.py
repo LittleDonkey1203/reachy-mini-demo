@@ -85,6 +85,7 @@ _vis_log_seq: int = 0
 _conv_events: "deque[dict]" = deque(maxlen=2000)  # 原始事件流
 _conv_turns: "list[dict]" = []                     # 高层轮次（最近 100 轮）
 _conv_seq: int = 0                                 # 事件全局递增 ID
+_turn_counter: int = 0                             # 轮次编号（人类可读，连续递增）
 _feedback_notes: "list[dict]" = []                # 用户语音反馈归档
 _current_turn: "dict | None" = None               # 当前打开的轮次（response.created 开，response.done 关）
 _feedback_seq: int = 0
@@ -389,7 +390,7 @@ def _event_label(etype: str, event: dict) -> str:
 
 def _record_event(etype: str, event: dict) -> None:
     """录制一条 Realtime API 事件到 _conv_events，并维护高层轮次。不影响任何现有逻辑。"""
-    global _conv_seq, _current_turn
+    global _conv_seq, _current_turn, _turn_counter
     label = _event_label(etype, event)
     if label is None:
         return  # 跳过高频 delta 事件
@@ -420,7 +421,9 @@ def _record_event(etype: str, event: dict) -> None:
         ctx = [e["label"] for e in _conv_events
                if e["ts_mono"] > ctx_cutoff and e["role"] == "system"
                and e["type"] not in ("session.created", "session.updated")]
-        turn = {"turn_id": seq, "start_ts": ts, "start_mono": now_mono,
+        _turn_counter += 1
+        turn = {"turn_id": seq, "turn_num": _turn_counter,
+                "start_ts": ts, "start_mono": now_mono,
                 "end_ts": None, "end_mono": None,
                 "asr": "", "tool_calls": [], "transcript": "",
                 "snapshot_desc": "", "events": [seq],
@@ -1698,6 +1701,10 @@ canvas{display:block;margin:0 auto}
 .ev.role-model .elb{color:var(--green)}
 .ev.role-tool .elb{color:var(--orange)}
 .ev.role-system .elb{color:var(--muted)}
+/* Issue#2: highlight overlay for filtered events */
+.ev.ev-hl{background:#0c1820;border-left:3px solid var(--blue)}
+.ev.ev-hl .ety{color:#818cf8}
+.ev.ev-dim{opacity:.28}
 /* timeline canvas */
 #timeline-wrap{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;overflow:hidden;position:relative}
 #timeline{width:100%;height:100%}
@@ -1877,15 +1884,18 @@ let tlNodes=[], tlSelIdx=-1;
 function renderTurnCard(t){
   const fbCount=allFeedback.filter(f=>f.turn_id===t.turn_id).length;
   const d=document.createElement('div');
+  // Issue#4 fix: set class directly here (no separate classList.toggle pass needed)
   d.className='turn-card'+(selectedTurnId===t.turn_id?' selected':'');
   d.dataset.tid=t.turn_id;
   d.onclick=()=>selectTurn(t.turn_id);
   const dur=t.end_mono&&t.start_mono?(t.end_mono-t.start_mono).toFixed(1)+'s':'…';
+  // Issue#1 fix: use turn_num (sequential 1,2,3…) instead of turn_id (event seq, has gaps)
+  const numLabel=t.turn_num!=null?t.turn_num:t.turn_id;
   // context: vis/behavior events that preceded this turn
   const ctxHtml=(t.context&&t.context.length)
-    ?`<div class="tc-ctx">${t.context.map(c=>`<span>${esc(c)}</span>`).join(' ')}</div>`:
+    ?`<div class="tc-ctx">${t.context.map(c=>`<span>${esc(c)}</span>`).join(' · ')}</div>`:
     '';
-  d.innerHTML=`<div class="tc-hdr"><span class="tc-id">Turn #${t.turn_id}</span><span class="tc-ts">${t.start_ts||''} (${dur})</span></div>`+
+  d.innerHTML=`<div class="tc-hdr"><span class="tc-id">Turn #${numLabel}</span><span class="tc-ts">${t.start_ts||''} (${dur})</span></div>`+
     ctxHtml+
     (t.asr?`<div class="tc-row tc-asr"><span class="em">🎤</span>${esc(t.asr.slice(0,80))}</div>`:'<div class="tc-row" style="color:#374151">（等待 ASR…）</div>')+
     t.tool_calls.map(tc=>`<div class="tc-row tc-tool"><span class="em">🤖</span>${esc(tc.name)}`+(tc.output_preview?` <span style="color:#9ca3af">→ ${esc(tc.output_preview.slice(0,40))}</span>`:'')+`</div>`).join('')+
@@ -1898,48 +1908,72 @@ function renderTurnCard(t){
 function refreshTurnList(){
   const list=$('turn-list');
   const scrolled=list.scrollTop+list.clientHeight>=list.scrollHeight-60;
+  // Issue#4 fix: full re-render ensures selected class is always in sync with selectedTurnId.
+  // diff by innerHTML to avoid thrashing, but always re-create when selected state might differ.
   const existing=new Map([...list.querySelectorAll('.turn-card')].map(e=>[+e.dataset.tid,e]));
   allTurns.forEach(t=>{
     const el=existing.get(t.turn_id);
     const fresh=renderTurnCard(t);
-    if(!el){list.appendChild(fresh)}
-    else if(el.innerHTML!==fresh.innerHTML){list.replaceChild(fresh,el)}
+    if(!el){
+      list.appendChild(fresh);
+    } else {
+      // always replace if selected state changed OR content changed
+      const wasSelected=el.classList.contains('selected');
+      const nowSelected=(selectedTurnId===t.turn_id);
+      if(wasSelected!==nowSelected||el.innerHTML!==fresh.innerHTML){
+        list.replaceChild(fresh,el);
+      }
+    }
   });
   if(scrolled)list.scrollTop=list.scrollHeight;
 }
 
 function selectTurn(tid){
   selectedTurnId=tid; filterTurnId=tid;
-  document.querySelectorAll('.turn-card').forEach(e=>e.classList.toggle('selected',+e.dataset.tid===tid));
-  $('ep-title').textContent='Turn #'+tid+' 事件';
+  // Issue#4 fix: re-render cards so selection border is authoritative (not just classList toggle)
+  refreshTurnList();
+  const turn=allTurns.find(t=>t.turn_id===tid);
+  const numLabel=turn&&turn.turn_num!=null?turn.turn_num:tid;
+  $('ep-title').textContent='Turn #'+numLabel+' 事件';
   renderEventList();
   drawTimeline();
 }
-function clearFilter(){filterTurnId=null;$('ep-title').textContent='全部事件';renderEventList();drawTimeline();}
-
-function getFilteredEvents(){
-  return filterTurnId!=null
-    ?allEvents.filter(e=>{const t=allTurns.find(t=>t.turn_id===filterTurnId);return t&&t.events.includes(e.seq)})
-    :allEvents;
+function clearFilter(){
+  filterTurnId=null;selectedTurnId=null;
+  $('ep-title').textContent='全部事件';
+  refreshTurnList();renderEventList();drawTimeline();
 }
 
+function getFilteredSeqs(){
+  if(filterTurnId==null)return null;
+  const t=allTurns.find(t=>t.turn_id===filterTurnId);
+  return t?new Set(t.events):new Set();
+}
+
+// Issue#2 fix: render ALL events, highlight the ones in the selected turn with overlay
 function renderEventList(){
-  const evs=getFilteredEvents();
+  const hlSeqs=getFilteredSeqs(); // null=no filter, Set=highlight these
+  const evs=allEvents; // always show all events
   const list=$('ep-list');
   const bot=list.scrollTop+list.clientHeight>=list.scrollHeight-40;
   list.innerHTML='';
   const f=document.createDocumentFragment();
+  let firstHl=null;
   evs.forEach(e=>{
     const d=document.createElement('div');
-    d.className=`ev role-${e.role}`;
+    const isHl=hlSeqs==null||hlSeqs.has(e.seq);
+    d.className=`ev role-${e.role}`+(isHl&&hlSeqs!=null?' ev-hl':'')+(hlSeqs!=null&&!isHl?' ev-dim':'');
     d.dataset.seq=e.seq;
     d.innerHTML=`<span class="es">${e.seq}</span><span class="ets">${e.ts.slice(0,12)}</span><span class="ety">${esc(e.type)}</span><span class="elb">${esc(e.label)}</span>`;
     d.onclick=()=>openModal(e);
     f.appendChild(d);
+    if(isHl&&hlSeqs!=null&&firstHl==null)firstHl=d;
   });
   list.appendChild(f);
-  $('ep-count').textContent=evs.length+' events';
-  if(bot)list.scrollTop=list.scrollHeight;
+  $('ep-count').textContent=(hlSeqs!=null?hlSeqs.size+'/':'')+evs.length+' events';
+  // scroll to first highlighted event
+  if(firstHl)setTimeout(()=>firstHl.scrollIntoView({behavior:'smooth',block:'center'}),50);
+  else if(bot)list.scrollTop=list.scrollHeight;
 }
 
 // timeline
@@ -2888,6 +2922,12 @@ def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> Non
     _no_breathe = st.no_breathe
     _no_variation = st.no_variation
     _no_expression = st.no_expression
+    # Issue#3: pose change tracer
+    _pose_last_ty = 0.0
+    _pose_last_body = 0.0
+    _pose_log_t = 0.0
+    _POSE_THRESH = 3.0
+    _POSE_MIN_INT = 0.5
     while not stop.is_set():
         now = time.monotonic()
         with st.lock:
@@ -3031,6 +3071,21 @@ def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> Non
         sway_pitch = amp * sway_scale * IDLE_PITCH_AMP * math.sin(2 * math.pi * IDLE_PITCH_F * now + 1.0)
         if cue_ant is not None:
             antennas = cue_ant
+        # Issue#3: trace significant head/body movements to conv dashboard
+        if now - _pose_log_t >= _POSE_MIN_INT:
+            d_ty = abs(ty - _pose_last_ty)
+            d_body = abs(body - _pose_last_body)
+            if d_ty > _POSE_THRESH or d_body > _POSE_THRESH:
+                action_src = "gesture" if action else state
+                _record_vis_event(
+                    "vis.head_move",
+                    f"📐 头 yaw {ty:+.0f}° 身 {body:+.0f}° [{action_src}]",
+                    {"track_yaw": round(ty, 1), "body_yaw": round(body, 1),
+                     "track_pitch": round(tp, 1), "state": state,
+                     "action": bool(action)})
+                _pose_last_ty = ty
+                _pose_last_body = body
+                _pose_log_t = now
         try:
             mini.set_target(
                 head=head_pose(pitch_deg=tp + sway_pitch + cue_pitch + breath + think_pitch_off,
