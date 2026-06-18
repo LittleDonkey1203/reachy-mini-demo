@@ -126,6 +126,7 @@ info "Daemon 就绪，control_mode=enabled ✅"
 
 # ── 6. 启动主程序 ────────────────────────────────────────────
 info "启动小艺主程序..."
+> "$LOG_DIR/main.log"   # 清空旧日志，防止 grep 命中上次运行的内容
 cd "$SCRIPT_DIR/voice"
 nohup "$PYTHON" -u d01_realtime_chat.py \
   >> "$LOG_DIR/main.log" 2>&1 &
@@ -158,10 +159,35 @@ info "实时日志: tail -f $LOG_DIR/main.log"
 info "停止程序: bash $0 stop"
 if [ "${VIS_DEBUG:-0}" = "1" ]; then
   VIS_PORT="${VIS_DEBUG_PORT:-7654}"
-  info "🔍 视觉调试流: http://localhost:${VIS_PORT}  (蓝框=人脸 绿/黄框=手 左上=状态)"
+  info "视觉调试流: http://localhost:${VIS_PORT}  (蓝框=人脸 绿/黄框=手 左上=状态)"
 fi
 echo ""
 
-# ── 7. 实时跟进日志（Ctrl+C 只停 tail，不杀进程）──────────────
-trap 'echo ""; info "日志已停止 (进程仍在后台运行)。停止请执行: bash start_mac.sh stop"; exit 0' INT
+# ── 7. 实时跟进日志（Ctrl+C 停主程序 + daemon）──────────────────
+trap '
+  echo ""
+  info "收到 Ctrl+C，正在停止..."
+  [ -f "$MAIN_PID" ] && kill "$(cat "$MAIN_PID")" 2>/dev/null && info "主程序已停止"
+  sleep 1
+  [ -f "$DAEMON_PID" ] && kill "$(cat "$DAEMON_PID")" 2>/dev/null && info "Daemon 已停止 (机器人将进入睡眠)"
+  exit 0
+' INT
+
+# VIS_DEBUG: 后台等日志中出现 Dashboard 行再 open
+if [ "${VIS_DEBUG:-0}" = "1" ]; then
+  VIS_URL="http://localhost:${VIS_PORT}"
+  (
+    for _ in $(seq 1 60); do
+      sleep 1
+      if grep -q "视觉子进程就绪" "$LOG_DIR/main.log" 2>/dev/null; then
+        open "$VIS_URL" 2>/dev/null || true
+        exit 0
+      fi
+    done
+    # 60s 内未出现就绪日志，兜底等 10s 再打开
+    sleep 10
+    open "$VIS_URL" 2>/dev/null || true
+  ) &
+fi
+
 tail -f "$LOG_DIR/main.log"

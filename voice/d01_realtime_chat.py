@@ -89,6 +89,7 @@ _turn_counter: int = 0                             # 轮次编号（人类可读
 _feedback_notes: "list[dict]" = []                # 用户语音反馈归档
 _current_turn: "dict | None" = None               # 当前打开的轮次（response.created 开，response.done 关）
 _feedback_seq: int = 0
+_pending_asr: str = ""                             # ASR 在 response.created 之前到达时的缓冲
 
 import numpy as np
 from PIL import Image
@@ -391,7 +392,7 @@ def _event_label(etype: str, event: dict) -> str:
 
 def _record_event(etype: str, event: dict) -> None:
     """录制一条 Realtime API 事件到 _conv_events，并维护高层轮次。不影响任何现有逻辑。"""
-    global _conv_seq, _current_turn, _turn_counter
+    global _conv_seq, _current_turn, _turn_counter, _pending_asr
     label = _event_label(etype, event)
     if label is None:
         return  # 跳过高频 delta 事件
@@ -416,7 +417,19 @@ def _record_event(etype: str, event: dict) -> None:
     _conv_events.append(entry)
 
     # 维护高层轮次
+    if etype == "conversation.item.input_audio_transcription.completed":
+        asr_text = (event.get("transcript") or "").strip()
+        if _current_turn is not None:
+            # turn already open (rare: ASR very late)
+            _current_turn["asr"] = asr_text
+        else:
+            # normal case: ASR arrives before response.created — buffer it
+            _pending_asr = asr_text
     if etype == "response.created":
+        # 如果上一轮因服务端错误/断连未正常关闭，先强制结束它
+        if _current_turn is not None:
+            _current_turn["end_ts"] = ts
+            _current_turn["end_mono"] = now_mono
         # 收集最近 10s 内的 vis/doa/gate 事件作为"触发上下文"
         ctx_cutoff = now_mono - 10.0
         ctx = [e["label"] for e in _conv_events
@@ -426,18 +439,17 @@ def _record_event(etype: str, event: dict) -> None:
         turn = {"turn_id": seq, "turn_num": _turn_counter,
                 "start_ts": ts, "start_mono": now_mono,
                 "end_ts": None, "end_mono": None,
-                "asr": "", "tool_calls": [], "transcript": "",
+                "asr": _pending_asr, "tool_calls": [], "transcript": "",
                 "snapshot_desc": "", "events": [seq],
                 "context": ctx[-5:]}  # 最多5条前置上下文
+        _pending_asr = ""  # consumed
         _current_turn = turn
         if len(_conv_turns) >= 100:
             _conv_turns.pop(0)
         _conv_turns.append(turn)
     elif _current_turn is not None:
         _current_turn["events"].append(seq)
-        if etype == "conversation.item.input_audio_transcription.completed":
-            _current_turn["asr"] = (event.get("transcript") or "").strip()
-        elif etype == "response.function_call_arguments.done":
+        if etype == "response.function_call_arguments.done":
             _current_turn["tool_calls"].append({
                 "name": event.get("name", ""),
                 "call_id": event.get("call_id", ""),
@@ -1500,25 +1512,35 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             _cv2.putText(bgr, label, (fx0 + 2, fy0 - 4),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
 
-        # ── 手部框（绿=有效 / 黄=低置信）──
+        # ── 手部框（绿=有效 / 黄=低置信 / 橙=底部过滤）──
         if det and det.get("hand") is not None:
             h = det["hand"]
             hu, hv, hsize = h.get("u", 0.5), h.get("v", 0.5), h.get("size", 0.0)
             hscore = h.get("score", 0.0)
-            half = hsize * max(W, H) / 2
-            hx0, hy0 = int(hu * W - half), int(hv * H - half)
-            hx1, hy1 = int(hu * W + half), int(hv * H + half)
+            # bbox: hsize is the max(dx,dy) in normalised coords — apply to each axis separately
+            half_w = int(hsize * W / 2)
+            half_h = int(hsize * H / 2)
+            hx0 = max(0, int(hu * W) - half_w)
+            hy0 = max(0, int(hv * H) - half_h)
+            hx1 = min(W - 1, int(hu * W) + half_w)
+            hy1 = min(H - 1, int(hv * H) + half_h)
             valid = hscore >= PLAY_SCORE_MIN and hsize >= PLAY_SIZE_OFF and hv <= PLAY_HAND_V_MAX
-            color = (0, 200, 0) if valid else (0, 200, 255)  # 绿 / 黄
+            color = (0, 200, 0) if valid else ((0, 120, 255) if hv > PLAY_HAND_V_MAX else (0, 200, 255))  # 绿/橙(底部)/黄
             tag = "HAND" if valid else ("HAND(BOT)" if hv > PLAY_HAND_V_MAX else "HAND(LOW)")
             _cv2.rectangle(bgr, (hx0, hy0), (hx1, hy1), color, 2)
             fingers = h.get("fingers", -1)
             gesture = h.get("gesture") or ""
             g_str = f" [{gesture}]" if gesture else (f" {fingers}f" if fingers >= 0 else "")
-            hlabel = f"{tag} size={hsize:.2f} score={hscore:.2f}{g_str}"
-            _cv2.rectangle(bgr, (hx0, hy1), (hx0 + len(hlabel) * 9, hy1 + 18), color, -1)
-            _cv2.putText(bgr, hlabel, (hx0 + 2, hy1 + 14),
+            hlabel = f"{tag} sz={hsize:.2f} sc={hscore:.2f} v={hv:.2f}{g_str}"
+            lbl_y = min(hy1 + 18, H - 4)
+            _cv2.rectangle(bgr, (hx0, lbl_y - 16), (hx0 + len(hlabel) * 9, lbl_y + 2), color, -1)
+            _cv2.putText(bgr, hlabel, (hx0 + 2, lbl_y - 2),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+            # v-threshold line
+            vy = int(PLAY_HAND_V_MAX * H)
+            _cv2.line(bgr, (0, vy), (W, vy), (0, 120, 255), 1)
+            _cv2.putText(bgr, f"v_max={PLAY_HAND_V_MAX}", (4, vy - 4),
+                         _cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 120, 255), 1)
 
         # ── 左上角：状态机信息（白字黑底）──
         now_s = time.strftime("%H:%M:%S")
@@ -1677,7 +1699,7 @@ canvas{display:block;margin:0 auto}
 /* ── Conversation view ── */
 #view-conv{grid-template-columns:320px 1fr;grid-template-rows:1fr 180px 44px;gap:5px;padding:5px}
 #turn-list{overflow-y:auto;display:flex;flex-direction:column;gap:4px;padding-right:2px}
-.turn-card{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:8px 10px;cursor:pointer;transition:.15s;min-height:60px}
+.turn-card{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:8px 10px;cursor:pointer;transition:border-color .15s,background .15s;height:auto;overflow:visible}
 .turn-card:hover{border-color:var(--blue)}
 .turn-card.selected{border-color:var(--blue);background:#0d1a26}
 .tc-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
@@ -1712,8 +1734,10 @@ canvas{display:block;margin:0 auto}
 /* timeline canvas */
 #timeline-wrap{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;overflow:hidden;position:relative;display:flex;flex-direction:column}
 #tl-lanes{position:absolute;left:0;top:0;bottom:0;width:44px;background:var(--card);z-index:2;border-right:1px solid var(--bdr);pointer-events:none}
-#tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;padding-left:44px;cursor:grab}
-#tl-scroll:active{cursor:grabbing}
+#tl-scroll{flex:1;overflow-x:auto;overflow-y:hidden;position:relative;padding-left:44px}
+#tl-latest-btn{position:absolute;right:10px;bottom:6px;background:#1e3a5f;border:1px solid #38bdf8;color:#38bdf8;font:11px system-ui;padding:3px 10px;border-radius:12px;cursor:pointer;z-index:10;display:none;opacity:.9}
+#tl-latest-btn:hover{opacity:1}
+#tl-tip{position:fixed;background:#1e1e2e;border:1px solid #374151;color:#e5e7eb;font:11px monospace;padding:4px 8px;border-radius:6px;pointer-events:none;z-index:200;display:none;max-width:280px;white-space:pre-wrap;line-height:1.4}
 #timeline{display:block;height:100%}
 /* feedback bar */
 #fb-bar{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;
@@ -1783,7 +1807,9 @@ canvas{display:block;margin:0 auto}
   <div id="timeline-wrap">
     <canvas id="tl-lanes"></canvas>
     <div id="tl-scroll"><canvas id="timeline"></canvas></div>
+    <button id="tl-latest-btn" onclick="tlScrollToLatest()">▶ 滚到最新</button>
   </div>
+  <div id="tl-tip"></div>
   <div id="fb-bar">
     <button id="fb-btn" onmousedown="startRec()" onmouseup="stopRec()" ontouchstart="startRec()" ontouchend="stopRec()">🎙️ 按住说反馈 <kbd style="font-size:10px;opacity:.6">[Space]</kbd></button>
     <span id="fb-status">松开后自动 ASR 归档到当前轮次</span>
@@ -1939,19 +1965,51 @@ function refreshTurnList(){
 }
 
 function selectTurn(tid){
-  selectedTurnId=tid; filterTurnId=tid;
-  // Issue#4 fix: re-render cards so selection border is authoritative (not just classList toggle)
+  // Clicking a card sets selectedTurnId (border highlight) but NOT filterTurnId.
+  // filterTurnId is only set by explicit filter buttons if any. Scroll + card highlight only.
+  selectedTurnId=tid;
   refreshTurnList();
   const turn=allTurns.find(t=>t.turn_id===tid);
-  const numLabel=turn&&turn.turn_num!=null?turn.turn_num:tid;
-  $('ep-title').textContent='Turn #'+numLabel+' 事件';
-  renderEventList();
+  scrollCardIntoView(tid);
+  // highlight this turn's events in event list without locking filter
+  if(turn){
+    const hlSeqs=new Set(turn.events);
+    document.querySelectorAll('.ev').forEach(el=>{
+      const s=+el.dataset.seq;
+      el.classList.toggle('ev-hl',hlSeqs.has(s));
+      el.classList.toggle('ev-dim',!hlSeqs.has(s));
+    });
+    const first=document.querySelector('.ev.ev-hl');
+    if(first)setTimeout(()=>first.scrollIntoView({behavior:'smooth',block:'center'}),50);
+    const numLabel=turn.turn_num!=null?turn.turn_num:tid;
+    $('ep-title').textContent='Turn #'+numLabel+' 事件';
+  }
   drawTimeline();
 }
 function clearFilter(){
-  filterTurnId=null;selectedTurnId=null;
+  filterTurnId=null;selectedTurnId=null;tlSelNode=null;
   $('ep-title').textContent='全部事件';
   refreshTurnList();renderEventList();drawTimeline();
+}
+
+// Smart scroll: scroll turn-list so the card is fully visible with minimum movement
+function scrollCardIntoView(tid){
+  const list=$('turn-list');
+  const card=document.querySelector(`.turn-card[data-tid="${tid}"]`);
+  if(!card)return;
+  const listRect=list.getBoundingClientRect();
+  const cardRect=card.getBoundingClientRect();
+  const topOff=cardRect.top-listRect.top;    // card top relative to list visible area
+  const botOff=cardRect.bottom-listRect.bottom; // positive = card bottom is below list bottom
+  if(topOff<0){
+    // card top is hidden above — scroll up just enough
+    list.scrollTop+=topOff-6;
+  } else if(botOff>0){
+    // card bottom is hidden below — scroll down just enough
+    list.scrollTop+=botOff+6;
+  }
+  // if both partially visible and card is taller than list, prefer showing top
+  if(cardRect.height>listRect.height) list.scrollTop+=topOff-6;
 }
 
 function getFilteredSeqs(){
@@ -1996,8 +2054,7 @@ const TL_PAD_R=12, TL_PAD_T=6;
 const TL_MIN_PX=24;    // minimum pixels per event (controls scroll width)
 const TL_DOT_R=4;
 let tlSelNode=null;
-// drag-to-scroll state
-let tlDrag={active:false,startX:0,startScrollLeft:0};
+let tlAutoScroll=true;  // auto-follow latest; set false when user manually scrolls
 
 function tlHeight(){return LANES.length*LANE_H+TL_PAD_T*2;}
 
@@ -2071,7 +2128,7 @@ function drawTimeline(){
     c.fillStyle='#4b5563'; c.fillText(s.toFixed(0)+'s',x,H2);
   }
 
-  // draw events
+  // draw events — no inline labels (shown on hover via tl-tip)
   tlNodes=[];
   displayEvs.forEach(e=>{
     const li=LANES.indexOf(e.role); if(li<0)return;
@@ -2087,60 +2144,94 @@ function drawTimeline(){
       c.beginPath(); c.arc(x,y,r+2,0,Math.PI*2); c.stroke();
     }
     c.globalAlpha=1.0;
-    // label if enough space
-    const density=cw/Math.max(displayEvs.length,1);
-    if(density>20){
-      c.fillStyle=inFilter?'#9ca3af':'#374151';
-      c.font='8px monospace'; c.textAlign='center'; c.textBaseline='top';
-      c.fillText(e.label.slice(0,10),x,y+r+2);
-    }
     tlNodes.push({idx:tlNodes.length, evSeq:e.seq, x, y, role:e.role, laneIdx:li, event:e});
   });
   drawLaneLabels();
-  // auto-scroll to keep latest events visible (only if already at right edge)
-  const atRight=wrap.scrollLeft>=wrap.scrollWidth-wrap.clientWidth-40;
-  if(atRight) wrap.scrollLeft=wrap.scrollWidth;
+  // auto-scroll: if tlAutoScroll=true, always jump to rightmost
+  if(tlAutoScroll) wrap.scrollLeft=wrap.scrollWidth;
 }
 
-// timeline click → find nearest node
+// timeline click: move cursor only, no filter lock
 $('timeline').addEventListener('click',function(ev){
-  const scroll=$('tl-scroll');
   const rect=this.getBoundingClientRect();
-  const mx=ev.clientX-rect.left+scroll.scrollLeft, my=ev.clientY-rect.top;
+  const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
   let best=null, bestD=Infinity;
   tlNodes.forEach(n=>{
     const d=Math.hypot(n.x-mx,n.y-my);
     if(d<bestD){bestD=d;best=n;}
   });
-  if(!best||bestD>18)return;
+  if(!best||bestD>18){clearFilter();return;}
   tlSelNode=best;
+  const evEl=document.querySelector(`.ev[data-seq="${best.evSeq}"]`);
+  if(evEl){evEl.scrollIntoView({behavior:'smooth',block:'center'});}
   const turn=allTurns.find(t=>t.events.includes(best.evSeq));
-  if(turn){
-    selectTurn(turn.turn_id);
-    const card=document.querySelector(`.turn-card[data-tid="${turn.turn_id}"]`);
-    if(card)card.scrollIntoView({behavior:'smooth',block:'nearest'});
-  } else {
-    document.querySelectorAll('.ev').forEach(el=>el.classList.toggle('hl',+el.dataset.seq===best.evSeq));
-    drawTimeline();
-  }
+  if(turn){scrollCardIntoView(turn.turn_id);}
   drawTimeline();
 });
 
-// drag-to-scroll on tl-scroll
+// hover tooltip over timeline nodes
+(()=>{
+  const tip=$('tl-tip');
+  const canvas=$('timeline');
+  canvas.addEventListener('mousemove',function(ev){
+    const rect=this.getBoundingClientRect();
+    const mx=ev.clientX-rect.left, my=ev.clientY-rect.top;
+    let best=null, bestD=Infinity;
+    tlNodes.forEach(n=>{
+      const d=Math.hypot(n.x-mx,n.y-my);
+      if(d<bestD){bestD=d;best=n;}
+    });
+    if(!best||bestD>14){tip.style.display='none';return;}
+    const e=best.event;
+    tip.style.display='block';
+    tip.textContent=`[${e.ts.slice(0,12)}] ${e.type}\n${e.label}`;
+    // read dims after display:block so offsetWidth is valid
+    const tw=tip.offsetWidth||200, th=tip.offsetHeight||40;
+    const tx=Math.min(ev.clientX+14, window.innerWidth-tw-8);
+    const ty=Math.max(4,Math.min(ev.clientY-8, window.innerHeight-th-8));
+    tip.style.left=tx+'px'; tip.style.top=ty+'px';
+  });
+  canvas.addEventListener('mouseleave',()=>{tip.style.display='none';});
+})();
+
+// auto-scroll control: user scrolling pauses auto-follow; button resumes
 (()=>{
   const s=$('tl-scroll');
-  s.addEventListener('mousedown',ev=>{
-    tlDrag={active:true,startX:ev.clientX,startScrollLeft:s.scrollLeft};
-    s.style.cursor='grabbing';
-  });
-  window.addEventListener('mousemove',ev=>{
-    if(!tlDrag.active)return;
-    s.scrollLeft=tlDrag.startScrollLeft-(ev.clientX-tlDrag.startX);
-  });
-  window.addEventListener('mouseup',()=>{
-    if(tlDrag.active){tlDrag.active=false;$('tl-scroll').style.cursor='grab';}
-  });
+  const btn=$('tl-latest-btn');
+  let userScrolling=false;
+  s.addEventListener('scroll',()=>{
+    const atRight=s.scrollLeft>=s.scrollWidth-s.clientWidth-30;
+    if(atRight){
+      tlAutoScroll=true; btn.style.display='none';
+    } else {
+      if(tlAutoScroll){tlAutoScroll=false;}
+      btn.style.display='block';
+    }
+  },{passive:true});
 })();
+
+function tlScrollToLatest(){
+  tlAutoScroll=true;
+  $('tl-latest-btn').style.display='none';
+  const s=$('tl-scroll');
+  s.scrollLeft=s.scrollWidth;
+}
+
+// click blank area in event list → clear filter
+$('ep-list').addEventListener('click',function(ev){
+  if(ev.target===this) clearFilter();
+});
+// click blank area in turn-list → clear filter
+$('turn-list').addEventListener('click',function(ev){
+  if(ev.target===this) clearFilter();
+});
+// click blank area in conv view background → clear filter
+$('view-conv').addEventListener('click',function(ev){
+  const interactive=['turn-card','ev','fb-btn','tab'];
+  if(!interactive.some(c=>ev.target.closest('.'+c)||ev.target.closest('#'+c))){
+    clearFilter();
+  }
+});
 
 // Issue#4: arrow key navigation on timeline
 document.addEventListener('keydown',function(e){
@@ -3436,11 +3527,19 @@ def main() -> int:
                 return None
 
             def close_session(c):
+                global _current_turn, _pending_asr
                 try:
                     c.close()
                 except Exception:
                     pass
                 callback.conv = None
+                # 服务端错误导致断连时 response.done 不会到来，强制关闭当前轮次
+                if _current_turn is not None:
+                    _current_turn["end_ts"] = time.strftime("%H:%M:%S")
+                    _current_turn["end_mono"] = time.monotonic()
+                    _current_turn = None
+                # 清掉未消费的 ASR buffer，防止它污染下一个新会话的第一个 turn
+                _pending_asr = ""
 
             conv = None
             kws_gate = None
@@ -3617,7 +3716,20 @@ def main() -> int:
                         pcm16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
                     else:
                         pcm16 = np.zeros(len(mono), dtype=np.int16)   # 范围外:静音占位
-                    conv.append_audio(base64.b64encode(pcm16.tobytes()).decode("ascii"))
+                    try:
+                        conv.append_audio(base64.b64encode(pcm16.tobytes()).decode("ascii"))
+                    except Exception as _ae:
+                        # 服务端主动断开（如 InternalError）后 WebSocket 已关闭，
+                        # append_audio 会抛 WebSocketConnectionClosedException。
+                        # 自动重连，丢弃本帧音频继续。
+                        log(f"⚠ 上行音频失败({type(_ae).__name__})，尝试自动重连…")
+                        close_session(conv)
+                        conv = open_session()
+                        if conv is None:
+                            log("❌ 自动重连失败，等待下次唤醒")
+                        else:
+                            log("🔄 自动重连成功，继续上行")
+                        continue
                     sent_samples += len(mono)
                     if time.monotonic() - rms_t >= 10.0:
                         rms = float(np.mean(rms_acc)) if rms_acc else 0.0

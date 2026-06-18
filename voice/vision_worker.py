@@ -201,9 +201,9 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q) -> None:
             mp_vision.HandLandmarkerOptions(
                 base_options=mp_python.BaseOptions(model_asset_path=hand_model),
                 running_mode=mp_vision.RunningMode.VIDEO, num_hands=1,
-                min_hand_detection_confidence=0.5,   # 初捕获要真(防背景误检泛滥)
-                min_hand_presence_confidence=0.4,    # 跟踪期放宽:远手/运动模糊不丢锁
-                min_tracking_confidence=0.3))        # (standalone PLAY-01 实测调校)
+                min_hand_detection_confidence=0.7,   # 提高捕获门槛：Mac 背景误检率高，0.5 太宽松
+                min_hand_presence_confidence=0.5,    # 跟踪期适度放宽：运动模糊/快手不丢锁
+                min_tracking_confidence=0.4))        # 跟踪置信度同步收紧
     except Exception as _e:
         print(f"[vision_worker] HandLandmarker 加载失败: {_e}", flush=True)
         hand_lm = None  # 手模型缺失也不影响人脸跟随
