@@ -32,14 +32,16 @@ os.environ.setdefault("no_proxy", "localhost,127.0.0.1,::1")
 import numpy as np
 from PIL import Image, ImageDraw
 
-# ── 路径：把 voice/ 加进 sys.path 以复用生产纯函数与可视化 ──
+# ── 路径：把 repo root 和 _archive/voice 加进 sys.path 以复用生产纯函数与可视化 ──
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VOICE_DIR = os.path.join(ROOT, "voice")
-if VOICE_DIR not in sys.path:
-    sys.path.insert(0, VOICE_DIR)
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+_ARCHIVE_VOICE = os.path.join(ROOT, "_archive", "voice")
+if _ARCHIVE_VOICE not in sys.path:
+    sys.path.insert(0, _ARCHIVE_VOICE)
 
 # 生产推理纯函数 + 常量（与线上 vision_worker 完全一致）
-from vision_worker import (  # noqa: E402
+from perception.vision_worker import (  # noqa: E402
     pick_main_face,
     index_dir,
     _classify_gesture,
@@ -55,8 +57,8 @@ from _hand_model_diag import (  # noqa: E402
     PLAY_HAND_V_MAX,
 )
 
-FACE_MODEL_PATH = os.path.join(ROOT, "vision", "models", "face_landmarker.task")
-HAND_MODEL_PATH = os.path.join(ROOT, "vision", "models", "hand_landmarker.task")
+FACE_MODEL_PATH = os.path.join(ROOT, "models", "face_landmarker.task")
+HAND_MODEL_PATH = os.path.join(ROOT, "models", "hand_landmarker.task")
 FIXTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 MANIFEST_PATH = os.path.join(FIXTURES_DIR, "manifest.json")
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
@@ -72,17 +74,6 @@ T0 = time.monotonic()
 
 def ts() -> str:
     return f"[{time.monotonic()-T0:7.2f}s]"
-
-
-# ══════════════════════════════════════════════════════════════════
-#  后端探测：mediapipe 优先，缺失则 OpenCV（人脸-only）
-# ══════════════════════════════════════════════════════════════════
-def detect_backend() -> str:
-    try:
-        import mediapipe  # noqa: F401
-        return "mediapipe"
-    except Exception:
-        return "opencv"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -112,35 +103,25 @@ def create_hand_landmarker():
 
 
 class Detector:
-    """统一封装一个后端 + 模型实例，提供 run_frame(rgb, ts_ms) → det dict。
+    """封装 MediaPipe 模型实例，提供 run_frame(rgb, ts_ms) → det dict。
 
     det = {"face":(u,v,h)|None, "n_faces":int, "face_ms":float,
            "hand":{u,v,size,score,label,fingers,gesture,angle,extended}|None}
     """
 
-    def __init__(self, backend: str):
-        self.backend = backend
-        self._face = None
+    def __init__(self):
+        self._face = create_face_landmarker()
         self._hand = None
-        self._cv_cascade = None
-        if backend == "mediapipe":
-            self._face = create_face_landmarker()
-            try:
-                self._hand = create_hand_landmarker()
-            except Exception as e:
-                print(f"⚠️  HandLandmarker 加载失败（手/手势用例将跳过）: {e}")
-                self._hand = None
-        else:
-            import cv2
-            cp = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            self._cv_cascade = cv2.CascadeClassifier(cp)
+        try:
+            self._hand = create_hand_landmarker()
+        except Exception as e:
+            print(f"⚠️  HandLandmarker 加载失败（手/手势用例将跳过）: {e}")
 
     @property
     def hand_supported(self) -> bool:
-        return self.backend == "mediapipe" and self._hand is not None
+        return self._hand is not None
 
-    # ── MediaPipe ──
-    def _run_mp(self, rgb: np.ndarray, ts_ms: int) -> dict:
+    def run_frame(self, rgb: np.ndarray, ts_ms: int) -> dict:
         import mediapipe as mp
         mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
         out = {"face": None, "n_faces": 0, "face_ms": 0.0, "hand": None}
@@ -168,29 +149,6 @@ class Detector:
                                "fingers": fingers, "gesture": gesture,
                                "angle": angle, "extended": extended, "tip": tip}
         return out
-
-    # ── OpenCV 后备（人脸-only，复刻 vision_worker_cv 的 Haar 部分）──
-    def _run_cv(self, rgb: np.ndarray) -> dict:
-        import cv2
-        out = {"face": None, "n_faces": 0, "face_ms": 0.0, "hand": None}
-        h_px, w_px = rgb.shape[:2]
-        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        t0 = time.monotonic()
-        faces = self._cv_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-        out["face_ms"] = (time.monotonic() - t0) * 1000.0
-        if len(faces) > 0:
-            areas = [fw * fh for (_, _, fw, fh) in faces]
-            best = int(np.argmax(areas))
-            x, y, fw, fh = faces[best]
-            out["face"] = ((x + fw * 0.5) / w_px, (y + fh * 0.5) / h_px, fh / h_px)
-            out["n_faces"] = len(faces)
-        return out
-
-    def run_frame(self, rgb: np.ndarray, ts_ms: int) -> dict:
-        if self.backend == "mediapipe":
-            return self._run_mp(rgb, ts_ms)
-        return self._run_cv(rgb)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -303,9 +261,8 @@ def check_case(det: dict, expect: dict, hand_supported: bool):
 #  模式 1：夹具模式（默认）
 # ══════════════════════════════════════════════════════════════════
 def run_fixtures() -> int:
-    backend = detect_backend()
     print(f"=== 视觉模型测试 · 夹具模式 ===")
-    print(f"后端: {backend}   人脸模型: {FACE_MODEL_PATH}")
+    print(f"后端: mediapipe   人脸模型: {FACE_MODEL_PATH}")
     if not os.path.isfile(MANIFEST_PATH):
         print(f"❌ 找不到夹具清单 {MANIFEST_PATH}")
         print("   先采集夹具: python tests/_vision_capture_fixtures.py")
@@ -320,7 +277,7 @@ def run_fixtures() -> int:
         return 1
 
     try:
-        det_engine = Detector(backend)
+        det_engine = Detector()
     except Exception as e:
         print(f"❌ 模型初始化失败: {e}")
         return 1
@@ -348,7 +305,7 @@ def run_fixtures() -> int:
         for ln in lines:
             print(ln)
 
-        ann = annotate_frame(rgb, det, i, backend, title=fname)
+        ann = annotate_frame(rgb, det, i, "mediapipe", title=fname)
         out_path = os.path.join(OUT_DIR, f"fixture_{i:02d}_{verdict}_{fname}")
         try:
             Image.fromarray(ann).save(out_path, "JPEG", quality=88)
@@ -365,7 +322,7 @@ def run_fixtures() -> int:
     total = len(manifest)
     rate = 100.0 * n_pass / max(total - n_skip, 1)
     print("\n" + "═" * 56)
-    print(f"后端={backend}  用例={total}  ✅通过={n_pass}  ❌失败={n_fail}  ⏭️跳过={n_skip}")
+    print(f"后端=mediapipe  用例={total}  ✅通过={n_pass}  ❌失败={n_fail}  ⏭️跳过={n_skip}")
     print(f"通过率(不含跳过)={rate:.0f}%   标注图: {OUT_DIR}")
     print("═" * 56)
     return 0 if n_fail == 0 else 1
@@ -375,15 +332,14 @@ def run_fixtures() -> int:
 #  模式 2：实时摄像头
 # ══════════════════════════════════════════════════════════════════
 def run_live(max_seconds: float = 20.0, save_every: int = 30) -> int:
-    backend = detect_backend()
-    print(f"=== 视觉模型测试 · 实时模式 ({backend}) ===")
+    print(f"=== 视觉模型测试 · 实时模式 (mediapipe) ===")
     try:
         from reachy_mini import ReachyMini
     except ImportError:
         print("❌ reachy_mini 不可导入，请在机器人环境运行。")
         return 1
     try:
-        det_engine = Detector(backend)
+        det_engine = Detector()
     except Exception as e:
         print(f"❌ 模型初始化失败: {e}")
         return 1
@@ -425,7 +381,7 @@ def run_live(max_seconds: float = 20.0, save_every: int = 30) -> int:
                     print(f"{ts()} 👋 score={hand['score']:.2f} size={hand['size']:.2f} "
                           f"gesture={g} fingers={hand.get('fingers')} {gs}")
                 if frame_idx % save_every == 0:
-                    ann = annotate_frame(rgb, det, frame_idx, backend, title="live")
+                    ann = annotate_frame(rgb, det, frame_idx, "mediapipe", title="live")
                     p = os.path.join(OUT_DIR, f"live_{saved:03d}.jpg")
                     Image.fromarray(ann).save(p, "JPEG", quality=85)
                     saved += 1
@@ -448,10 +404,9 @@ def run_live(max_seconds: float = 20.0, save_every: int = 30) -> int:
 #  模式 3：临时静态图
 # ══════════════════════════════════════════════════════════════════
 def run_adhoc(paths: list) -> int:
-    backend = detect_backend()
-    print(f"=== 视觉模型测试 · 临时图模式 ({backend}) ===")
+    print(f"=== 视觉模型测试 · 临时图模式 (mediapipe) ===")
     try:
-        det_engine = Detector(backend)
+        det_engine = Detector()
     except Exception as e:
         print(f"❌ 模型初始化失败: {e}")
         return 1
@@ -474,7 +429,7 @@ def run_adhoc(paths: list) -> int:
             gp, gs = gate_status(hand)
             print(f"  手: score={hand['score']:.2f} size={hand['size']:.2f} "
                   f"gesture={hand.get('gesture')} fingers={hand.get('fingers')} {gs}")
-        ann = annotate_frame(rgb, det, i, backend, title=os.path.basename(path))
+        ann = annotate_frame(rgb, det, i, "mediapipe", title=os.path.basename(path))
         p = os.path.join(OUT_DIR, f"adhoc_{i:02d}_{os.path.basename(path)}")
         Image.fromarray(ann).save(p, "JPEG", quality=88)
         print(f"  标注图: {p}")

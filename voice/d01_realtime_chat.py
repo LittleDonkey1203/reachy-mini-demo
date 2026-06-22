@@ -50,8 +50,14 @@ take_snapshot 直接读共享帧(≤25ms 新),不再和跟随抢 get_frame。
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
+
+# repo root → sys.path，让 perception/identity/memory 包可导入
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
 
 # 加载 demo 目录的 .env（voice/ 向上一级 = reachy-mini-demo/）
 load_dotenv(Path(__file__).parent.parent / ".env", override=False)
@@ -109,15 +115,13 @@ import sherpa_onnx                       # WAKE-01:唤醒词 KWS(本地、离线
 from reachy_mini import ReachyMini
 
 # MediaPipe 不在主进程导入(TRACK-FIX):检测在 vision_worker 子进程跑,独立 GIL。
-# mediapipe 可用时用 vision_worker.py(手势+指向);否则降级到 vision_worker_cv.py(HSV后备)。
-try:
-    import mediapipe as _mp_probe  # noqa: F401 — 仅探测可用性
-    del _mp_probe
-    from vision_worker import vision_worker as _vision_worker_fn
-    _VISION_BACKEND = "mediapipe"
-except ImportError:
-    from vision_worker_cv import vision_worker as _vision_worker_fn
-    _VISION_BACKEND = "opencv"
+from perception.vision_worker import vision_worker as _vision_worker_fn
+
+from identity.recognizer import IdentityRecognizer, IDENTITY_COOLDOWN_S
+from memory.manager import MemoryManager, QWEN_TOOLS
+
+_id_recognizer: IdentityRecognizer | None = None
+_memory_mgr: MemoryManager | None = None
 
 # 仿真模式摄像头源切换:USE_WEBCAM=1 时 frame_pump_loop 从 Mac 摄像头取帧,
 # 绕过 MuJoCo 虚拟摄像头(空棋盘格场景无人脸,人脸检测永远失败)。
@@ -147,9 +151,11 @@ INSTRUCTIONS = (
     "用户让你看东西时调用 take_snapshot,拿到画面描述后用自己的话自然地告诉用户你看到了什么。"
     "当用户用手指指着某个东西问'这是什么''我指的是什么''这个呢'之类、需要判断他指向哪个物体时,"
     "调用 identify_pointed_object,拿到结果后自然地说出他指的那个东西。"
+    "【输出格式铁律】回复中绝对不要输出任何XML标签、HTML标签或类似<xxx/>的标记,"
+    "它们会被直接朗读出来。动作请只通过工具调用(function call)来触发,不要写在文字回复里。"
 )
 
-SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")  # 快照存放(已 gitignore)
+SNAP_DIR = os.path.join(_REPO, "data", "output")  # 快照存放(已 gitignore)
 
 OUT_SR = 24000   # Realtime 下行采样率
 PLAY_SR = 16000  # Reachy 播放管线 appsrc 固定 16kHz
@@ -166,9 +172,9 @@ IDLE_TAU = 0.5        # 包络时间常数(s)
 TRACK_SWAY_SCALE = 0.4  # 跟随中微动缩放(小幅叠加,不和跟随打架)
 
 # ── 本地视觉跟随(VIS-01 → F-01 融合,参数与教训见 CALIBRATION §9)──
-_VIS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vision", "models")
-VIS_MODEL_PATH = os.path.join(_VIS_DIR, "face_landmarker.task")
-HAND_MODEL_PATH = os.path.join(_VIS_DIR, "hand_landmarker.task")
+_MODELS_DIR = os.path.join(_REPO, "models")
+VIS_MODEL_PATH = os.path.join(_MODELS_DIR, "face_landmarker.task")
+HAND_MODEL_PATH = os.path.join(_MODELS_DIR, "hand_landmarker.task")
 VIS_MAX_FPS = 40.0   # 检测限频(检测在独立进程,不再让主进程分担,放回 40)
 VIS_MISS_N = 5       # 连续 N 帧漏检才算"真丢脸"(单帧漏检不重置滤波,防侧脸闪断)
 DECIMATE = 3         # 1920×1080 → ::3 整数抽样 → 640×360
@@ -237,7 +243,6 @@ NO_INTERACT_S = 15.0       # engaged 无说话互动多久 → 回 armed 待命(
 FSM_HZ = 25.0              # behavior_loop 频率
 
 # ── WAKE-01 唤醒词(详见 CALIBRATION §14;standalone 标定见 tools/wake01_kws_standalone.py)──
-_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KWS_MODEL_DIR = os.path.join(_REPO, "tools", "_kws_models",
                              "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01")
 KWS_KEYWORDS = os.path.join(_REPO, "tools", "_kws_models", "keywords_d01.txt")  # 运行时生成(gitignore)
@@ -600,13 +605,7 @@ TOOLS = [
     {"type": "function", "name": "identify_pointed_object",
      "description": "当用户用手指指向画面中某个物体、问'这是什么''我指的是什么''这个是啥'等需要判断他指向哪个物体时调用。会拍照并理解用户手指指向的目标。",
      "parameters": _NOPARAM},
-    {"type": "function", "name": "remember",
-     "description": "记住用户说的一件事。当用户让你记住什么(如偏好、名字、重要信息)时调用。",
-     "parameters": {"type": "object", "properties": {"content": {"type": "string", "description": "要记住的内容"}}, "required": ["content"]}},
-    {"type": "function", "name": "forget",
-     "description": "忘掉之前记住的一件事。当用户让你忘掉某个记忆时调用。",
-     "parameters": {"type": "object", "properties": {"content": {"type": "string", "description": "要忘掉的关键词或内容"}}, "required": ["content"]}},
-]
+] + QWEN_TOOLS
 
 # 看图 prompt(POINT-01)。两个都做"指向感知":工具路由从音频判断"是否指向"不可靠
 # (实测模型对"你看这是什么"会选通用看图),故通用 prompt 也兜底处理指向。
@@ -857,6 +856,10 @@ class State:
         self.user_frown = 0.0          # blendshape 皱眉系数 0-1
         # M3-c 对话记录(退出时摘要用)
         self.conversation_log = []     # [(role, text), ...]
+        # 身份识别(P0)
+        self.current_person_id: str | None = None
+        self.current_person_name: str | None = None
+        self.identity_injected = False
 
 
 # ───────────────────────── ①对话:回调,收服务端事件(打断/工具分发/计时器喂养)─────────────────────────
@@ -984,28 +987,32 @@ class ChatCallback(OmniRealtimeCallback):
                         st.snapshot_pending += 1
                     log("👉 收到指向请求 → 先原地看图判断(两段式)")
                     self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "judge"})
-                elif name == "remember":
-                    _ma = json.loads(event.get("arguments", "{}"))
-                    _result = do_remember(_ma.get("content", ""))
-                    log(f"📝 记住:{_ma.get('content', '')}")
+                elif name in ("remember_fact", "clear_memory"):
+                    with st.lock:
+                        pid = st.current_person_id
+                    if pid is None:
+                        result = "当前没有识别到用户身份,无法存储记忆。"
+                    else:
+                        args_str = event.get("arguments", "{}")
+                        try:
+                            args_dict = json.loads(args_str)
+                        except (json.JSONDecodeError, TypeError):
+                            args_dict = {}
+                        result = _memory_mgr.handle_tool_call(pid, name, args_dict)
+                        if name == "remember_fact" and args_dict.get("key") == "name":
+                            new_name = args_dict.get("value")
+                            if new_name and _id_recognizer is not None:
+                                _id_recognizer.db.set_name(pid, new_name)
+                                with st.lock:
+                                    st.current_person_name = new_name
                     try:
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"success": True, "say": _result}, ensure_ascii=False),
+                            "output": json.dumps({"result": result}, ensure_ascii=False),
                         })
                     except Exception as e:
-                        log(f"⚠ remember 回 output 失败:{e}")
-                elif name == "forget":
-                    _ma = json.loads(event.get("arguments", "{}"))
-                    _result = do_forget(_ma.get("content", ""))
-                    log(f"📝 忘掉:{_ma.get('content', '')}")
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"success": True, "say": _result}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ forget 回 output 失败:{e}")
+                        log(f"⚠ 记忆工具回 output 失败:{e}")
+                    log(f"🧠 记忆工具 {name}: {result}")
                 else:
                     # 手势:乐观即时回 output → 说话不等动作做完
                     self.motion_q.put({"name": name, "call_id": call_id})
@@ -1262,6 +1269,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
     hit_run_start = None       # 连续命中起点(锁定迟滞用)
     miss_run_start = None      # 连续丢失起点(丢锁迟滞用)
     locked = False
+    _id_last_t = 0.0           # 上次身份识别时刻(限频)
     n_det = 0
     n_hit = 0
     infer_acc: list[float] = []
@@ -1281,6 +1289,29 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
         infer_ms = msg.get("face_ms", 0.0)
         n_det += 1
         infer_acc.append(infer_ms)
+        # 身份识别(P0):有 face_box 且距上次 >2s 时跑一次(不阻塞帧率)
+        face_box = msg.get("face_box")
+        face_kps = msg.get("face_kps")
+        if face_box is not None and (now - _id_last_t) > IDENTITY_COOLDOWN_S:
+            _id_last_t = now
+            with st.lock:
+                _raw_frame = st.latest_frame
+            if _raw_frame is not None:
+                try:
+                    _rgb_small = np.ascontiguousarray(_raw_frame[::DECIMATE, ::DECIMATE, ::-1])
+                    pid, pname, sim, is_new = _id_recognizer.recognize(
+                        _rgb_small, face_box, face_kps)
+                    if pid is not None:
+                        with st.lock:
+                            old_pid = st.current_person_id
+                            st.current_person_id = pid
+                            st.current_person_name = pname
+                            if old_pid != pid:
+                                st.identity_injected = False
+                        tag = "NEW" if is_new else "KNOWN"
+                        log(f"🆔 [{tag}] {pname or pid[:12]} (sim={sim:.2f})")
+                except Exception as e:
+                    log(f"⚠ 身份识别异常:{e}")
         # 手部结果(平时降频/近手提频):发布食指方向(指向)+ 近手读数(逗它)
         hand = msg.get("hand")
         hand_near = False
@@ -2431,6 +2462,8 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                     "switching": st.dbg_switching,
                     "switch_phase": st.dbg_switch_phase,
                     "switch_target": st.dbg_switch_target,
+                    "identity_pid": st.current_person_id,
+                    "identity_name": st.current_person_name,
                 }
             data["log_seq"] = _vis_log_seq
             data["new_logs"] = [t for s, t in _vis_log_buf if s > after]
@@ -3422,6 +3455,11 @@ def main() -> int:
     st.no_variation = no_variation
     st.no_expression = no_expression
     st.no_memory = no_memory
+
+    global _id_recognizer, _memory_mgr
+    _id_recognizer = IdentityRecognizer()
+    _memory_mgr = MemoryManager()
+    log(f"🆔 身份识别就绪 (特征库 {len(_id_recognizer.db.persons)} 人)")
     play_q: "queue.Queue" = queue.Queue()
     motion_q: "queue.Queue" = queue.Queue()
     snap_q: "queue.Queue" = queue.Queue()
@@ -3485,7 +3523,7 @@ def main() -> int:
                     active_instructions += _mem_sec
                     log(f"📝 已加载记忆({len(_mems)} 条记忆" + (", 有画像" if _profile else "") + ")")
             else:
-                active_tools = [t for t in TOOLS if t["name"] not in ("remember", "forget")]
+                active_tools = [t for t in TOOLS if t["name"] not in ("remember_fact", "clear_memory")]
 
             callback = ChatCallback(st, play_q, motion_q, snap_q, mini)
 
@@ -3533,6 +3571,8 @@ def main() -> int:
                 except Exception:
                     pass
                 callback.conv = None
+                with st.lock:
+                    st.identity_injected = False
                 # 服务端错误导致断连时 response.done 不会到来，强制关闭当前轮次
                 if _current_turn is not None:
                     _current_turn["end_ts"] = time.strftime("%H:%M:%S")
@@ -3568,14 +3608,10 @@ def main() -> int:
             if VIS_DEBUG:
                 threading.Thread(target=vis_debug_server, args=(st, VIS_DEBUG_PORT, stop), daemon=True).start()
             # 视觉(TRACK-FIX):检测在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
-            # mediapipe 后端需 .task 模型文件;opencv 后端无需模型文件,直接启用
             vis_frame_q = None
-            _vis_enabled = (
-                (_VISION_BACKEND == "mediapipe" and os.path.exists(VIS_MODEL_PATH)) or
-                (_VISION_BACKEND == "opencv")
-            )
+            _vis_enabled = os.path.exists(VIS_MODEL_PATH)
             if _vis_enabled:
-                log(f"视觉后端: {_VISION_BACKEND}" + (" (sticky OFF)" if no_sticky else ""))
+                log("视觉后端: mediapipe" + (" (sticky OFF)" if no_sticky else ""))
                 if no_sticky:
                     os.environ["VISION_NO_STICKY"] = "1"
                 elif "VISION_NO_STICKY" in os.environ:
@@ -3684,6 +3720,24 @@ def main() -> int:
                             st.greet_now = False
                         _busy = st.in_flight > 0
                     if _do_greet and not _busy:
+                        # 身份+记忆注入:首次识别到人后,在招呼前注入记忆上下文
+                        with st.lock:
+                            _g_pid = st.current_person_id
+                            _g_pname = st.current_person_name
+                            _g_injected = st.identity_injected
+                        if _g_pid and not _g_injected and _memory_mgr is not None:
+                            _mem_prompt = _memory_mgr.get_prompt(_g_pid, person_name=_g_pname)
+                            if _mem_prompt:
+                                try:
+                                    conv.create_item({
+                                        "type": "message", "role": "system",
+                                        "content": [{"type": "input_text", "text": _mem_prompt}],
+                                    })
+                                    log(f"🧠 已注入记忆上下文 ({_g_pname or _g_pid[:12]})")
+                                except Exception as e:
+                                    log(f"⚠ 记忆注入失败:{e}")
+                            with st.lock:
+                                st.identity_injected = True
                         _phrase = GREET_PHRASES[greet_i % len(GREET_PHRASES)]
                         greet_i += 1
                         try:
@@ -3773,6 +3827,9 @@ def main() -> int:
                         else:
                             log("📝 对话太短,跳过摘要")
                 log("已释放 Realtime 连接与 Reachy 媒体资源。")
+                if _memory_mgr is not None:
+                    _memory_mgr.flush()
+                    log("💾 记忆已持久化")
         finally:
             try:
                 mini.set_automatic_body_yaw(True)
@@ -3783,3 +3840,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+    print("hello")

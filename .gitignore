@@ -1,17 +1,21 @@
 # 隐私:体检产物(人脸照片 / 录音 / 测试音频)——不上传
 healthcheck/output/
-# 隐私:take_snapshot 快照(可能含人脸)——不上传
-voice/output/
-# 隐私:视觉调试抓拍(房间/人像)——不上传
-vision/debug/
+# 隐私:快照/视觉抓拍(可能含人脸)——不上传
+data/output/
 # 隐私:视觉模型测试夹具(人脸/手)与标注产物——不上传(脚本/manifest/README 仍入库)
 tests/output/
 tests/fixtures/*.jpg
-# 二进制模型(3.7MB,下载地址见 CALIBRATION.md §9)
-vision/models/
+
+# 统一模型目录(ONNX/MediaPipe/sherpa 等二进制模型)
+models/
+# 运行时数据(人脸特征库/记忆/快照)
+data/
+# 开发归档(旧版/诊断脚本)
+_archive/
 
 # daemon 运行日志(本地排障用)
 tools/daemon_logs/
+log/
 
 # 唤醒词调研产物(KWS 模型 32MB / 测试 venv / 合成音频 / 脚本草稿)——留磁盘不进库
 tools/_kws*
