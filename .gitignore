@@ -4,6 +4,9 @@ healthcheck/output/
 voice/output/
 # 隐私:视觉调试抓拍(房间/人像)——不上传
 vision/debug/
+# 隐私:视觉模型测试夹具(人脸/手)与标注产物——不上传(脚本/manifest/README 仍入库)
+tests/output/
+tests/fixtures/*.jpg
 # 二进制模型(3.7MB,下载地址见 CALIBRATION.md §9)
 vision/models/
 

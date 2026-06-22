@@ -1,0 +1,83 @@
+[
+  {
+    "file": "face_front.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": false,
+      "gesture": null
+    }
+  },
+  {
+    "file": "hand_fist.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "fist"
+    }
+  },
+  {
+    "file": "hand_point.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "point"
+    }
+  },
+  {
+    "file": "hand_two.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "two"
+    }
+  },
+  {
+    "file": "hand_three.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "three"
+    }
+  },
+  {
+    "file": "hand_four.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "four"
+    }
+  },
+  {
+    "file": "hand_five.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "five"
+    }
+  },
+  {
+    "file": "hand_ok.jpg",
+    "expect": {
+      "face": true,
+      "n_faces": 1,
+      "hand": true,
+      "gesture": "ok"
+    }
+  },
+  {
+    "file": "no_target.jpg",
+    "expect": {
+      "face": false,
+      "n_faces": 0,
+      "hand": false,
+      "gesture": null
+    }
+  }
+]
