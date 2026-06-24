@@ -41,7 +41,6 @@ tools/err.txt
 # 本地工具配置
 .claude/
 .codegraph/
-.wolf/
 
 # 开发归档
 _archive/
