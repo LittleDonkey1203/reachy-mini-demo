@@ -179,7 +179,7 @@ class FaceDB:
         info["last_seen_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._save()
 
-    def set_name(self, person_id: str, name: str):
+    def set_name(self, person_id: str, name: Optional[str]):
         if person_id in self.persons:
             self.persons[person_id]["name"] = name
             self._save()

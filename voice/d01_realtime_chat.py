@@ -424,25 +424,32 @@ class ChatCallback(OmniRealtimeCallback):
                             args_dict = {}
                         result = _memory_mgr.handle_tool_call(pid, name, args_dict,
                                                                 actor_pid=pid)
-                        if name == "remember_fact" and args_dict.get("key") == "name":
-                            new_name = args_dict.get("value")
-                            if new_name and _id_recognizer is not None:
-                                _id_recognizer.db.set_name(pid, new_name)
-                                with st.lock:
-                                    st.current_person_name = new_name
-                                if _owner_mgr is not None and not _owner_mgr.has_owner():
-                                    if _owner_mgr.try_claim(pid, new_name):
-                                        log(f"👑 认主成功: {new_name} ({pid})")
+                        if name == "remember_fact":
+                            with st.lock:
+                                st.identity_injected = False
+                            if args_dict.get("key") == "name":
+                                new_name = args_dict.get("value")
+                                if new_name and _id_recognizer is not None:
+                                    _id_recognizer.db.set_name(pid, new_name)
+                                    with st.lock:
+                                        st.current_person_name = new_name
+                                    if _owner_mgr is not None and not _owner_mgr.has_owner():
+                                        if _owner_mgr.try_claim(pid, new_name):
+                                            log(f"👑 认主成功: {new_name} ({pid})")
                         elif name == "clear_memory":
                             if _id_recognizer is not None:
-                                _id_recognizer.db.set_name(pid, "")
+                                _id_recognizer.db.set_name(pid, None)
                             with st.lock:
                                 st.current_person_name = None
-                        elif name == "forget_fact" and "name" in args_dict.get("key", "").lower():
-                            if _id_recognizer is not None:
-                                _id_recognizer.db.set_name(pid, "")
+                                st.identity_injected = False
+                        elif name == "forget_fact":
                             with st.lock:
-                                st.current_person_name = None
+                                st.identity_injected = False
+                            if "name" in args_dict.get("key", "").lower():
+                                if _id_recognizer is not None:
+                                    _id_recognizer.db.set_name(pid, None)
+                                with st.lock:
+                                    st.current_person_name = None
                     try:
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
