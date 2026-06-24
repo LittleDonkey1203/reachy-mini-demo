@@ -212,6 +212,70 @@
       "related_bugs": [],
       "occurrences": 5,
       "last_seen": "2026-06-24T01:39:28.989Z"
+    },
+    {
+      "id": "bug-014",
+      "timestamp": "2026-06-24T02:55:56.705Z",
+      "error_message": "Incorrect value in code",
+      "file": "voice/config.py",
+      "root_cause": "Had \"qwen3.5-omni-flash-realtime-2026-03-15\"",
+      "fix": "Changed to \"qwen3.5-omni-plus-realtime\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T02:55:56.705Z"
+    },
+    {
+      "id": "bug-015",
+      "timestamp": "2026-06-24T02:56:51.483Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/config.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 3→4 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T02:56:51.483Z"
+    },
+    {
+      "id": "bug-016",
+      "timestamp": "2026-06-24T03:16:31.614Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "17 lines replaced/restructured",
+      "fix": "Rewrote 44→25 lines (17 removed) | Also: log(f\"⚠ 记忆注入失败:{e}\"); with st.lock:",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-24T03:16:54.393Z"
+    },
+    {
+      "id": "bug-017",
+      "timestamp": "2026-06-24T03:20:51.460Z",
+      "error_message": "Significant refactor of ",
+      "file": "todo.md",
+      "root_cause": "21 lines replaced/restructured",
+      "fix": "Rewrote 29→10 lines (21 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T03:20:51.460Z"
     }
   ]
 }

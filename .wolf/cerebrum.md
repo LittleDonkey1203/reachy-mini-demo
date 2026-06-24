@@ -49,3 +49,10 @@
 - 模型手势 score >= 0.6 时优先使用, 否则 fallback 到 _classify_gesture 规则
 - 规则覆盖模型不识别的: three, four, ok
 - 模型路径: models/gesture_recognizer.task (~8MB float16)
+
+### 记忆注入过时修复 (2026-06-24)
+- 问题: create_item(system message) 只增不删, 多人切换时旧记忆污染上下文
+- 修复: 用 update_session(instructions=...) 替代, 记忆嵌入 session-level instructions
+- update_session 需传完整参数(output_modalities/voice/audio_format/turn_detection/tools), 非增量更新
+- session.updated 回调用 self.conv is None 区分初始配置 vs 记忆注入更新
+- State 新增 identity_injected_pid 追踪当前已注入记忆的人

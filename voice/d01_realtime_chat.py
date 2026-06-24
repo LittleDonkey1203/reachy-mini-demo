@@ -338,8 +338,11 @@ class ChatCallback(OmniRealtimeCallback):
             if etype == "session.created":
                 log(f"✅ 会话已建立 session_id={event['session']['id']}")
             elif etype == "session.updated":
-                log("✅ 会话配置生效(semantic_vad / 8 动作 + take_snapshot + identify_pointed_object 已注册)")
-                log("▶ 可以对机器人说话了;它说话时可随时插话打断(Ctrl+C 退出)")
+                if self.conv is None:
+                    log("✅ 会话配置生效(semantic_vad / 8 动作 + take_snapshot + identify_pointed_object 已注册)")
+                    log("▶ 可以对机器人说话了;它说话时可随时插话打断(Ctrl+C 退出)")
+                else:
+                    log("✅ 会话 instructions 已更新")
                 st.session_updated.set()
             elif etype == "input_audio_buffer.speech_started":
                 with st.lock:
@@ -427,6 +430,7 @@ class ChatCallback(OmniRealtimeCallback):
                         if name == "remember_fact":
                             with st.lock:
                                 st.identity_injected = False
+                                st.identity_injected_pid = None
                             if args_dict.get("key") == "name":
                                 new_name = args_dict.get("value")
                                 if new_name and _id_recognizer is not None:
@@ -442,9 +446,11 @@ class ChatCallback(OmniRealtimeCallback):
                             with st.lock:
                                 st.current_person_name = None
                                 st.identity_injected = False
+                                st.identity_injected_pid = None
                         elif name == "forget_fact":
                             with st.lock:
                                 st.identity_injected = False
+                                st.identity_injected_pid = None
                             if "name" in args_dict.get("key", "").lower():
                                 if _id_recognizer is not None:
                                     _id_recognizer.db.set_name(pid, None)
@@ -765,6 +771,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event) -> None:
                             st.current_person_name = pname
                             if old_pid != pid:
                                 st.identity_injected = False
+                                st.identity_injected_pid = None
                         tag = "NEW" if is_new else "KNOWN"
                         log(f"🆔 [{tag}] {pname or pid[:12]} (sim={sim:.2f})")
                 except Exception as e:
@@ -1826,6 +1833,7 @@ def main() -> int:
                 callback.conv = None
                 with st.lock:
                     st.identity_injected = False
+                    st.identity_injected_pid = None
                 # 服务端错误导致断连时 response.done 不会到来，强制关闭当前轮次
                 if _st_mod._current_turn is not None:
                     _st_mod._current_turn["end_ts"] = time.strftime("%H:%M:%S")
@@ -1833,6 +1841,31 @@ def main() -> int:
                     _st_mod._current_turn = None
                 # 清掉未消费的 ASR buffer，防止它污染下一个新会话的第一个 turn
                 _st_mod._pending_asr = ""
+
+            def _update_memory_instructions(c, pid, pname):
+                """用 update_session 将记忆嵌入 session instructions,替换旧记忆而非追加。"""
+                mem_prompt = _memory_mgr.get_prompt(pid, person_name=pname) if _memory_mgr else None
+                new_instr = active_instructions + ("\n\n" + mem_prompt if mem_prompt else "")
+                try:
+                    c.update_session(
+                        output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                        voice=VOICE,
+                        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                        enable_input_audio_transcription=True,
+                        enable_turn_detection=True,
+                        turn_detection_type="semantic_vad",
+                        instructions=new_instr,
+                        tools=active_tools,
+                    )
+                    log(f"🧠 记忆已注入 session instructions ({pname or pid[:12]})")
+                    with st.lock:
+                        st.identity_injected = True
+                        st.identity_injected_pid = pid
+                    return True
+                except Exception as e:
+                    log(f"⚠ 记忆 update_session 失败:{e}")
+                    return False
 
             conv = None
             kws_gate = None
@@ -1975,24 +2008,13 @@ def main() -> int:
                             st.greet_now = False
                         _busy = st.in_flight > 0
                     if _do_greet and not _busy:
-                        # 身份+记忆注入:首次识别到人后,在招呼前注入记忆上下文
+                        # 身份+记忆注入:首次识别到人后,用 update_session 嵌入记忆(切人时自动替换旧记忆)
                         with st.lock:
                             _g_pid = st.current_person_id
                             _g_pname = st.current_person_name
                             _g_injected = st.identity_injected
                         if _g_pid and not _g_injected and _memory_mgr is not None:
-                            _mem_prompt = _memory_mgr.get_prompt(_g_pid, person_name=_g_pname)
-                            if _mem_prompt:
-                                try:
-                                    conv.create_item({
-                                        "type": "message", "role": "system",
-                                        "content": [{"type": "input_text", "text": _mem_prompt}],
-                                    })
-                                    log(f"🧠 已注入记忆上下文 ({_g_pname or _g_pid[:12]})")
-                                except Exception as e:
-                                    log(f"⚠ 记忆注入失败:{e}")
-                            with st.lock:
-                                st.identity_injected = True
+                            _update_memory_instructions(conv, _g_pid, _g_pname)
                         _phrase = GREET_PHRASES[greet_i % len(GREET_PHRASES)]
                         greet_i += 1
                         try:
@@ -2009,18 +2031,7 @@ def main() -> int:
                             _late_pname = st.current_person_name
                             _late_injected = st.identity_injected
                         if _late_pid and not _late_injected and _memory_mgr is not None:
-                            _mem_prompt = _memory_mgr.get_prompt(_late_pid, person_name=_late_pname)
-                            if _mem_prompt:
-                                try:
-                                    conv.create_item({
-                                        "type": "message", "role": "system",
-                                        "content": [{"type": "input_text", "text": _mem_prompt}],
-                                    })
-                                    log(f"🧠 已注入记忆上下文 ({_late_pname or _late_pid[:12]})")
-                                except Exception as e:
-                                    log(f"⚠ 记忆注入失败:{e}")
-                            with st.lock:
-                                st.identity_injected = True
+                            _update_memory_instructions(conv, _late_pid, _late_pname)
                     rms_acc.append(float(np.sqrt(np.mean(mono**2))))
                     # M1.5-a 方向门控:只挡"确信范围外"(fresh+confident+|resid|>GATE_DEG),其余一律放行;
                     # 范围外→发静音(服务端听不到→自动不送/不打断/不重置计时,不碰那些代码)。

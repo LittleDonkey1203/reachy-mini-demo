@@ -1,7 +1,7 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-24T02:40:54.423Z
-> Files: 531 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-24T03:30:35.080Z
+> Files: 533 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../.claude/plans/
 
@@ -18,12 +18,12 @@
 - `CLAUDE.md` — OpenWolf (~180 tok)
 - `connect.py` — 连接 Reachy Mini daemon 的统一封装。 (~269 tok)
 - `MACOS_SETUP.md` — macOS (Intel) 部署指南 — 小艺 Reachy Mini Lite (~1670 tok)
-- `PROJECT_STATE.md` — PROJECT_STATE (~834 tok)
+- `PROJECT_STATE.md` — PROJECT_STATE (~866 tok)
 - `pyproject.toml` — Python project configuration (~234 tok)
 - `README.md` — Project documentation (~1024 tok)
 - `start_daemon.sh` — ============================================================ (~634 tok)
 - `start_mac.sh` — ============================================================ (~1618 tok)
-- `todo.md` — Reachy Mini Demo — TODO 清单 (~2063 tok)
+- `todo.md` — Reachy Mini Demo — TODO 清单 (~1898 tok)
 
 ## .claude/
 
@@ -813,6 +813,7 @@
 
 - `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7126 tok)
 - `MULTI_PERSON_INTRO_PLAN.md` — 多人同框介绍朋友 — 方案文档 (~2783 tok)
+- `WAKEWORD_PRIORITY_ANALYSIS.md` — 唤醒词 × 人脸锁定 × DOA 优先级分析 (~2615 tok)
 
 ## identity/
 
@@ -833,6 +834,7 @@
 
 ## voice/
 
-- `config.py` — 配置常量、工具元数据、prompt 模板。 (~2751 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~28202 tok)
+- `config.py` — 配置常量、工具元数据、prompt 模板。 (~2772 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~28332 tok)
 - `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~14668 tok)
+- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2784 tok)

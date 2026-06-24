@@ -275,4 +275,5 @@ class State:
         self.current_person_id: str | None = None
         self.current_person_name: str | None = None
         self.identity_injected = False
+        self.identity_injected_pid: str | None = None
         self.vis_ready = False

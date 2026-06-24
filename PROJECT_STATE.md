@@ -28,6 +28,7 @@
 - **Face DB 碎片化修复**: match() 增加质心匹配, update_embedding() 放宽多样性, 新增 auto_merge() 启动自动合并重复人脸
 - **手势识别升级**: GestureRecognizer 替换纯规则 _classify_gesture, 模型优先 + 规则 fallback(three/four/ok)
 - **记忆权限 + 认主机制**: OwnerManager 首次交互自动绑定 owner; auto_merge 双命名保护; 非 owner 只能删除自己的记忆
+- **记忆注入过时修复**: 用 `update_session(instructions=...)` 替代 `create_item(system message)`,切人时 session instructions 整体替换,旧记忆自动消失
 
 ## 当前架构状态
 
@@ -63,7 +64,7 @@ identity/
 4. **Face DB 碎片化**: ~~同一人因角度/光照变化被注册为多个 ID~~ ✅ 已修复: match() 质心匹配 + update_embedding() 放宽 + auto_merge() 启动合并
 5. **多人同框介绍**: 用户指着他人说"这是我朋友XX" → robot 给对应人脸关联名字/关系(方案调研中, 见 docs/MULTI_PERSON_INTRO_PLAN.md)
 6. **end_session 乱码**: 模型偶尔把 function_call_output 中的元指令当文字朗读(已简化 output 内容)
-7. **记忆注入过时**: 切人后旧记忆 system message 仍在 context 中污染回答(方案: 改用 update_session instructions, 见 todo.md #14)
+7. **记忆注入过时**: ~~切人后旧记忆 system message 仍在 context 中污染回答~~ ✅ 已修复: 改用 update_session instructions 替换,切人时旧记忆自动消失
 
 ## 下一步建议
 

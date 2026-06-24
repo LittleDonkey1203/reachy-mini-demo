@@ -156,3 +156,36 @@
 | 10:39 | Session end: 7 writes across 3 files (.gitignore, d01_realtime_chat.py, recognizer.py) | 5 reads | ~40969 tok |
 | 10:40 | Session end: 7 writes across 3 files (.gitignore, d01_realtime_chat.py, recognizer.py) | 5 reads | ~40969 tok |
 | 10:40 | Edited .gitignore | 4→3 lines | ~8 |
+| 10:41 | Session end: 8 writes across 3 files (.gitignore, d01_realtime_chat.py, recognizer.py) | 5 reads | ~40978 tok |
+| 10:43 | Session end: 8 writes across 3 files (.gitignore, d01_realtime_chat.py, recognizer.py) | 5 reads | ~40978 tok |
+| 10:55 | Edited voice/config.py | "qwen3.5-omni-flash-realti" → "qwen3.5-omni-plus-realtim" | ~11 |
+| 10:56 | Session end: 9 writes across 4 files (.gitignore, d01_realtime_chat.py, recognizer.py, config.py) | 5 reads | ~40989 tok |
+| 10:56 | Edited voice/config.py | 3→4 lines | ~62 |
+| 10:57 | Edited voice/config.py | 5→2 lines | ~4 |
+| 10:57 | Session end: 11 writes across 4 files (.gitignore, d01_realtime_chat.py, recognizer.py, config.py) | 6 reads | ~41088 tok |
+| 10:58 | Session end: 11 writes across 4 files (.gitignore, d01_realtime_chat.py, recognizer.py, config.py) | 7 reads | ~41088 tok |
+| 11:01 | Session end: 11 writes across 4 files (.gitignore, d01_realtime_chat.py, recognizer.py, config.py) | 9 reads | ~43151 tok |
+
+## Session: 2026-06-24 11:03
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 11:14 | Edited voice/state.py | 2→3 lines | ~36 |
+| 11:14 | Created docs/WAKEWORD_PRIORITY_ANALYSIS.md | — | ~2789 |
+| 11:14 | Edited voice/d01_realtime_chat.py | 4→7 lines | ~103 |
+| 11:15 | Edited voice/d01_realtime_chat.py | 3→3 lines | ~38 |
+| 11:15 | Edited voice/d01_realtime_chat.py | 4→4 lines | ~54 |
+| 11:15 | Edited voice/d01_realtime_chat.py | modified _update_memory_instructions() | ~403 |
+| 11:16 | Edited voice/d01_realtime_chat.py | reduced (-19 lines) | ~432 |
+| 11:16 | Edited voice/d01_realtime_chat.py | 6→3 lines | ~70 |
+| 11:17 | Edited voice/d01_realtime_chat.py | 3→4 lines | ~63 |
+| 11:17 | Edited voice/d01_realtime_chat.py | 6→8 lines | ~128 |
+| 11:17 | Edited voice/d01_realtime_chat.py | 3→3 lines | ~49 |
+| 11:18 | Edited voice/d01_realtime_chat.py | 4→4 lines | ~66 |
+| 11:18 | Edited voice/d01_realtime_chat.py | 2→3 lines | ~51 |
+| 11:19 | Edited PROJECT_STATE.md | 1→2 lines | ~56 |
+| 11:20 | Edited PROJECT_STATE.md | inline fix | ~30 |
+| 11:20 | Edited todo.md | _update_instructions_with_memory() → _update_memory_instructions() | ~135 |
+| 11:22 | Session end: 16 writes across 5 files (state.py, WAKEWORD_PRIORITY_ANALYSIS.md, d01_realtime_chat.py, PROJECT_STATE.md, todo.md) | 10 reads | ~47817 tok |
+| 11:23 | Session end: 16 writes across 5 files (state.py, WAKEWORD_PRIORITY_ANALYSIS.md, d01_realtime_chat.py, PROJECT_STATE.md, todo.md) | 10 reads | ~47817 tok |
+| 11:30 | Edited voice/d01_realtime_chat.py | 7→8 lines | ~127 |

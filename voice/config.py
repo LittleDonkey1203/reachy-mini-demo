@@ -13,8 +13,9 @@ import os
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── 模型 / API ──
-MODEL = "qwen3.5-omni-flash-realtime-2026-03-15"
-VISION_MODEL = "qwen3.5-omni-plus"
+MODEL = os.environ.get("REALTIME_MODEL", "qwen3.5-omni-plus-realtime")
+VISION_MODEL = os.environ.get("VISION_MODEL", "qwen3.5-omni-plus")
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen-turbo")
 VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 VOICE = "Ethan"
 INSTRUCTIONS = (
@@ -216,9 +217,6 @@ THINK_BLEND_TAU = 0.5
 EXPR_SMILE_ANT = 0.20
 EXPR_FROWN_ANT = -0.15
 EXPR_BLEND_TAU = 0.8
-
-# ── M3 记忆 ──
-SUMMARY_MODEL = "qwen-turbo"
 
 # ── 工具定义 ──
 _NOPARAM = {"type": "object", "properties": {}}

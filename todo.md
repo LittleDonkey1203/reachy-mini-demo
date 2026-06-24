@@ -257,35 +257,16 @@ python tests/vision_model_test.py --skip-face             # 只测手部+手势
 
 # 13. 当我说”这个人叫xxx”同时有指向手势的时候，记忆也应该更新这个人的信息
 
-## 14. 记忆注入过时 — 切人后旧记忆污染上下文 ❌
+## 14. 记忆注入过时 — 切人后旧记忆污染上下文 ✅
 
-**问题**：当多人交替出现时，记忆注入使用 `conv.create_item(system message)` 只增不删，导致 Qwen session context 中同时存在多个人的记忆信息，模型受旧记忆污染。
+**已修复**: 用 `update_session(instructions=...)` 替代 `create_item(system message)`
 
-**复现路径**：
-1. 用户A 说”我叫大大” → robot 注入 A 的记忆 system message
-2. Robot 转头看到用户B，B 说”我叫陛下” → 注入 B 的记忆 system message
-3. Robot 转回用户A → 再注入 A 的记忆 system message
-4. 此时 context 中有 [A记忆] [B记忆] [A记忆]，模型可能回答陛下相关内容
-
-**根因**：`conv.create_item` 只能添加 conversation item，无法删除旧的。
-
-**修复方案：用 `update_session(instructions=...)` 替代 `create_item`**
-
-Qwen Realtime SDK 的 `update_session()` 可以 mid-session 调用，`instructions` 通过 kwargs 传入。
-将记忆嵌入 session-level instructions 而非独立 system message：
-
-1. 不再用 `conv.create_item({“role”:”system”})` 注入记忆
-2. 改为 `conv.update_session(instructions=INSTRUCTIONS + “\n\n” + memory_prompt)`
-3. 人切换时再次 `update_session` → instructions 被整体替换，旧记忆自动消失
-
-**改动文件**：
-- `voice/d01_realtime_chat.py`：新增 `_update_instructions_with_memory()` helper，替换 line 1972-1976 和 2000-2004 的 `create_item`
-- `voice/state.py`：新增 `identity_injected_pid: str | None = None` 追踪已注入哪个人
-
-**风险**：
-- 需确认 `update_session` mid-session 调用是否中断当前 response
-- 需确认是否触发 `session.updated` 事件导致重复等待
-- `update_session` 需要重传所有参数(voice/audio_format 等)，需缓存 session 配置
+**改动**:
+- `voice/d01_realtime_chat.py`: 新增 `_update_memory_instructions()` helper,调用 `conv.update_session` 将记忆嵌入 session instructions
+- 两处记忆注入(greet-time + late injection)从 `conv.create_item(system)` 改为 `_update_memory_instructions()`
+- 切人时 session instructions 整体替换,旧记忆自动消失(不再只增不删)
+- `voice/state.py`: 新增 `identity_injected_pid` 追踪当前已注入哪个人的记忆
+- `session.updated` 回调区分初始配置 vs 记忆更新(不再重复打印冗长日志)
 
 ## 15. 记忆权限 + 认主机制 ✅
 
