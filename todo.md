@@ -370,3 +370,20 @@ python tests/vision_model_test.py --skip-face             # 只测手部+手势
 **改动**：
 - `voice/debug_server.py`: 新增 `_init_pil_fonts()` + `_put_cjk_text()` helper
 - 身份标签渲染从 cv2.putText 改为 _put_cjk_text，支持 CJK 字符
+---
+
+## 23. 记忆索引重名冲突 — person_id 唯一性问题 ❌
+
+**问题**：当前 memory 以 person_id 为主键，但不同人可能被分配到相同或相似的 id，导致记忆索引错误、取到别人的记忆。
+
+**现状**：
+- `identity/recognizer.py` 中 person_id 由 ArcFace embedding 生成（hash）
+- `memory/manager.py` 以 person_id 为 key 存取 `data/memories/<pid>.json`
+- `remember_fact(key="name")` 更新 face_db 中的 display name，但 pid 本身不含 name 信息
+- 如果两个人的 embedding 碰撞或被误合并，记忆会串
+
+**方案方向**：
+- [ ] 索引主键改为复合键（如 name + embedding hash），确保唯一性
+- [ ] 或在 pid 生成时引入更多区分度（embedding 维度、时间戳等）
+- [ ] 排查 auto_merge 是否在双命名保护下仍有误合并风险
+- [ ] 考虑加 pid 冲突检测：新人入库时校验是否与已有 pid 重复
