@@ -170,6 +170,38 @@
 | F13.10 merge_memories | `memory/manager.py:merge_memories` L165-174 | 人脸合并时迁移 facts(keep 优先不覆盖) |
 | F13.11 owner 权限校验 | `memory/manager.py:clear_all/forget_fact` | actor_pid + OwnerManager.can_delete_memory 校验 |
 | F13.12 非 owner 只删自己 | `memory/manager.py:handle_tool_call` | actor_pid=当前人, 非 owner 删他人 → 拒绝 |
+| F13.13 分人对话摘要 | `d01:_save_conversation_summary` + `memory/manager.py:save_conversation_summary` | close_session 时后台线程用 qwen-turbo 摘要当前人对话，存入 conversation_summaries(保留最近3条) |
+| F13.14 conversation_log 分桶 | `state.py:State.conversation_log` | `dict[str, list]` 按 pid 分桶，`"_unknown"` 暂存未识别人 |
+| F13.15 摘要注入 session | `memory/manager.py:get_prompt` | 最近一条摘要拼入 "你们上次聊到：…"，update_session 注入 |
+| F13.16 上下文过长自动摘要 | `d01` user transcript append 后 | 估算 token(字数×1.5) > CONV_SUMMARY_THRESHOLD(2000) 自动触发后台摘要+清桶 |
+| F13.17 退出时遍历摘要 | `d01:main()` 退出块 | 遍历所有剩余 pid 桶，逐个调 _save_conversation_summary |
+
+### F21 — 音频闸门(切人身份保护)
+
+| 子特性 | 代码位置 | 说明 |
+|--------|----------|------|
+| F21.1 闸门标记 | `state.py:State.audio_gate_closed/buffer/closed_at` | 闸门关闭时缓存音频帧(b64)，不送模型 |
+| F21.2 闸门触发条件 | `d01` 二次唤醒切人块 | 仅在切人+DOA声源偏移>SWITCH_AWAY_DEG时关闸，避免常规重连误触发 |
+| F21.3 身份确认开闸 | `d01:_update_memory_instructions` | 记忆注入后 flush 缓存帧 + 开闸 |
+| F21.4 超时兜底 | `d01` append_audio 处 | AUDIO_GATE_TIMEOUT_S(5s) 后强制开闸，防永久卡死 |
+| F21.5 Dashboard 闸门状态 | `debug_server.py` state dict | audio_gate 字段 + 记忆行颜色指示(橙=闸门关) |
+
+### F22 — Dashboard 上下文调试
+
+| 子特性 | 代码位置 | 说明 |
+|--------|----------|------|
+| F22.1 payload modal 增强 | `debug_server.py:openModal` JS | 事件 payload 下方追加 Session Instructions + Memory Prompt + Conversation Log |
+| F22.2 debug 状态字段 | `state.py:dbg_memory_prompt/dbg_session_instructions` | _update_memory_instructions 时保存注入内容供 dashboard 读取 |
+| F22.3 state 端点扩展 | `debug_server.py` /state | 返回 session_instructions、memory_prompt、conversation_log(每人最近20条) |
+
+### F23 — 多人脸 DOA 说话人选择
+
+| 子特性 | 代码位置 | 说明 |
+|--------|----------|------|
+| F23.1 all_faces 输出 | `perception/vision_worker.py` result dict | YuNet/MediaPipe 检测到的所有脸 [{u,v,h,box,kps},...] 传到主进程 |
+| F23.2 _select_face_by_doa | `d01:_select_face_by_doa` | DOA resid→摄像头坐标→匹配最近人脸，返回 all_faces 索引 |
+| F23.3 DOA 覆盖身份识别 | `d01:vision_result_loop` 身份识别块 | 多人脸+DOA confident 时用 DOA 选出的脸做 ArcFace 识别，单人脸 fallback FaceSelector |
+| F23.4 多人脸框渲染 | `debug_server.py:_build_frame` | 选中=蓝色粗框+DOA标签, 非选中=灰色细框 |
 
 ### F20 — 主人认定(认主)
 

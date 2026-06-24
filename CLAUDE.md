@@ -11,6 +11,7 @@ This project uses OpenWolf for context management. Read and follow .wolf/OPENWOL
 2. Agent 不应该依赖上下文窗口记忆，而应该把记忆写入文件系统。Memory = Files
 3. 阅读项目代码时优先用codegraph、graphify之类的工具而不是grep
 4. 当用户和agent在讨论方案时，永远期待agent能回答更好的方案是...
+5. todo就是todo，定期归档一下已完成的todo，尽量只留待办，不要让todo文档越来越长
 
 
 ## Persistent Project State
@@ -32,4 +33,4 @@ This project uses OpenWolf for context management. Read and follow .wolf/OPENWOL
 
 不要仅依赖当前对话上下文。PROJECT_STATE.md 是项目真实状态来源, 文件状态优先于对话状态。
 
-如果实现了项目新特性，则需要更新docs/FEATURE_INVENTORY.md，介绍特性如何使用（开发者自己的readme）
+如果实现了项目新特性，则需要更新docs/FEATURE_INVENTORY.md，介绍特性如何使用

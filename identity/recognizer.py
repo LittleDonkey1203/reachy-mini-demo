@@ -13,6 +13,7 @@
 
 import json
 import os
+import threading
 import time
 import uuid
 from typing import Optional
@@ -104,6 +105,7 @@ class FaceDB:
     def __init__(self, db_path: str = _DB_PATH):
         self.db_path = db_path
         self.persons: dict = {}
+        self._save_lock = threading.Lock()
         self._load()
 
     def _load(self):
@@ -114,10 +116,11 @@ class FaceDB:
             self.persons = {}
 
     def _save(self):
-        tmp = self.db_path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.persons, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.db_path)
+        with self._save_lock:
+            tmp = self.db_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.persons, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self.db_path)
 
     def match(self, embedding: np.ndarray) -> tuple[Optional[str], float]:
         """匹配最相似的人。返回 (person_id, similarity) 或 (None, 0)。
@@ -188,6 +191,15 @@ class FaceDB:
         info = self.persons.get(person_id)
         return info.get("name") if info else None
 
+    def find_by_name(self, name: str) -> Optional[str]:
+        """按名字查找 person_id，模糊匹配（包含即命中）。"""
+        name_lower = name.lower()
+        for pid, info in self.persons.items():
+            pname = info.get("name")
+            if pname and name_lower in pname.lower():
+                return pid
+        return None
+
     def get_info(self, person_id: str) -> Optional[dict]:
         return self.persons.get(person_id)
 
@@ -207,6 +219,37 @@ class FaceDB:
         if person_id in self.persons:
             del self.persons[person_id]
             self._save()
+
+    def backup_person(self, person_id: str) -> Optional[str]:
+        """备份某人的 face_db 数据到 data/backups/。返回备份路径。"""
+        info = self.persons.get(person_id)
+        if info is None:
+            return None
+        backup_dir = os.path.join(os.path.dirname(self.db_path), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        path = os.path.join(backup_dir, f"{ts}_{person_id}_face.json")
+        import copy
+        with open(path, "w") as f:
+            json.dump({"person_id": person_id, **copy.deepcopy(info)},
+                      f, indent=2, ensure_ascii=False)
+        return path
+
+    def verify_identity(self, embedding, expected_pid: str,
+                        threshold: float = 0.80) -> tuple[bool, float]:
+        """高阈值身份验证：检查 embedding 与 expected_pid 的最佳相似度。"""
+        info = self.persons.get(expected_pid)
+        if info is None:
+            return False, 0.0
+        stored = info.get("embeddings", [])
+        if not stored:
+            return False, 0.0
+        emb = np.array(embedding, dtype=np.float32)
+        best_sim = max(
+            float(np.dot(emb, np.array(s, dtype=np.float32)))
+            for s in stored
+        )
+        return best_sim >= threshold, best_sim
 
     def reset(self):
         self.persons = {}

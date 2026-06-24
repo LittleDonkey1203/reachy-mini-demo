@@ -18,6 +18,7 @@
 import json
 import os
 import time
+from datetime import datetime
 from typing import Optional
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,15 +47,36 @@ QWEN_TOOLS = [
         "type": "function",
         "name": "clear_memory",
         "description": (
-            "清除关于当前用户的所有记忆。仅当用户明确要求'忘掉我''清除我的记忆''删除我的信息'时调用。"
-            "调用前必须口头向用户确认：'你确定要我忘掉关于你的所有信息吗？'，用户确认后才调用。"
+            "当用户表达想要清除/忘掉记忆的意图时调用。系统将自动启动安全验证流程(身份验证→权限检查→二次确认)。"
+            "你只需要判断用户想删除谁的记忆：不传 target_name 表示删自己的；传名字表示删别人的(需主人权限)。"
+            "调用后系统会引导后续步骤，你不需要自行确认。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_name": {
+                    "type": "string",
+                    "description": "要清除记忆的目标人名。不传则清除当前用户自己的记忆。",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "confirm_clear",
+        "description": (
+            "仅在系统要求你进行二次确认、且用户已口头明确回答后调用。"
+            "用户说'是/确认/删吧/好的'等肯定回答→confirmed=true；"
+            "用户说'不/算了/取消'等否定回答→confirmed=false。"
+            "不要自行判断是否该调用此工具，只在系统指示后使用。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "confirmed": {
                     "type": "boolean",
-                    "description": "用户是否已口头确认要清除",
+                    "description": "用户是否明确确认要清除",
                 },
             },
             "required": ["confirmed"],
@@ -81,12 +103,14 @@ QWEN_TOOLS = [
 class MemoryManager:
     """管理每个人的记忆：会话内 dict + 磁盘 JSON 持久化。"""
 
-    def __init__(self, memories_dir: str = _MEMORIES_DIR, owner_mgr=None):
+    def __init__(self, memories_dir: str = _MEMORIES_DIR, owner_mgr=None,
+                 face_db=None):
         self.memories_dir = memories_dir
         os.makedirs(self.memories_dir, exist_ok=True)
         self._session: dict[str, dict[str, str]] = {}
         self._dirty: set[str] = set()
         self._owner = owner_mgr
+        self._face_db = face_db
 
     def _path(self, person_id: str) -> str:
         safe_id = person_id.replace("/", "_").replace("..", "_")
@@ -128,7 +152,7 @@ class MemoryManager:
 
     def clear_all(self, person_id: str, confirmed: bool = False,
                   actor_pid: str = None) -> str:
-        """清除某人所有记忆。需要 confirmed=True。actor_pid 用于权限校验。"""
+        """清除某人所有记忆(facts + 人脸)。需要 confirmed=True。actor_pid 用于权限校验。"""
         if not confirmed:
             return "请先向用户确认是否要清除所有记忆。"
         if actor_pid and self._owner and not self._owner.can_delete_memory(actor_pid, person_id):
@@ -187,8 +211,10 @@ class MemoryManager:
 
     def get_prompt(self, person_id: str, person_name: str = None) -> Optional[str]:
         """生成注入 Qwen session 的记忆 prompt。无记忆则返回 None。"""
-        facts = self.get_facts(person_id)
-        if not facts and not person_name:
+        data = self.load_memory(person_id)
+        facts = data.get("facts", {})
+        summaries = data.get("conversation_summaries", [])
+        if not facts and not person_name and not summaries:
             return None
         parts = []
         display_name = facts.get("name") or person_name
@@ -202,8 +228,20 @@ class MemoryManager:
                 items.append(f"{k}: {v}")
             if items:
                 parts.append("你记得关于ta的信息：" + "；".join(items) + "。")
+        if summaries:
+            latest = summaries[-1]["text"]
+            parts.append(f"你们上次聊到：{latest}")
         parts.append("自然地运用这些记忆，但不要主动背诵。")
         return "".join(parts)
+
+    def save_conversation_summary(self, person_id: str, summary: str):
+        """保存对话摘要，保留最近 3 条。"""
+        data = self.load_memory(person_id)
+        summaries = data.get("conversation_summaries", [])
+        summaries.append({"text": summary, "at": datetime.now().isoformat()})
+        data["conversation_summaries"] = summaries[-3:]
+        self._session[person_id] = data
+        self._persist(person_id)
 
     def _persist(self, person_id: str):
         """写入磁盘。"""
@@ -216,6 +254,19 @@ class MemoryManager:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
         self._dirty.discard(person_id)
+
+    def backup_person(self, person_id: str) -> Optional[str]:
+        """备份某人的记忆文件到 data/backups/。返回备份路径。"""
+        src = self._path(person_id)
+        if not os.path.exists(src):
+            return None
+        backup_dir = os.path.join(os.path.dirname(self.memories_dir), "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        dst = os.path.join(backup_dir, f"{ts}_{person_id}_memory.json")
+        import shutil
+        shutil.copy2(src, dst)
+        return dst
 
     def flush(self):
         """持久化所有脏数据。"""
@@ -250,23 +301,21 @@ class MemoryManager:
                 continue
         return result
 
-    def handle_tool_call(self, person_id: str, tool_name: str, args: dict,
-                         actor_pid: str = None) -> str:
-        """处理 Qwen function call。返回 function_call_output 内容。"""
+    def handle_tool_call(self, person_id: str, tool_name: str, args: dict) -> str:
+        """处理 Qwen function call。person_id 既是操作者也是默认目标。
+        注意: clear_memory 和 confirm_clear 由 d01 工作流直接处理，不经过此方法。
+        """
         if tool_name == "remember_fact":
             key = args.get("key", "")
             value = args.get("value", "")
             if not key or not value:
                 return "缺少 key 或 value 参数。"
             return self.save_fact(person_id, key, value)
-        elif tool_name == "clear_memory":
-            confirmed = args.get("confirmed", False)
-            return self.clear_all(person_id, confirmed, actor_pid=actor_pid)
         elif tool_name == "forget_fact":
             key = args.get("key", "")
             if not key:
                 return "缺少 key 参数。"
-            return self.forget_fact(person_id, key, actor_pid=actor_pid)
+            return self.forget_fact(person_id, key, actor_pid=person_id)
         return f"未知的记忆工具: {tool_name}"
 
 

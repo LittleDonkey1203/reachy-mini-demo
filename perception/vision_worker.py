@@ -322,7 +322,7 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
         n += 1
         H, W = rgb.shape[:2]
         out = {"kind": "det", "t": t_grab, "face": None, "n_faces": 0, "face_ms": 0.0,
-               "face_box": None, "face_kps": None, "hand": None}
+               "face_box": None, "face_kps": None, "all_faces": None, "hand": None}
         try:
             # ── 人脸检测 ──
             t0 = time.monotonic()
@@ -336,6 +336,20 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
                 out["face_ms"] = (time.monotonic() - t0) * 1000.0
                 out["face"] = face_sel.select_yunet(faces_raw, W, H)
                 out["n_faces"] = len(faces_raw) if faces_raw is not None else 0
+                # all_faces: 所有检测到的脸(供主进程 DOA 选人)
+                if faces_raw is not None and len(faces_raw) > 0:
+                    _all = []
+                    for _af in faces_raw:
+                        _ax, _ay, _aw, _ah = _af[0], _af[1], _af[2], _af[3]
+                        _all.append({
+                            "u": float((_ax + _aw / 2) / W),
+                            "v": float((_ay + _ah / 2) / H),
+                            "h": float(_ah / H),
+                            "box": (int(_ax), int(_ay), int(_aw), int(_ah)),
+                            "kps": [(float(_af[4 + i * 2]), float(_af[5 + i * 2]))
+                                    for i in range(5)],
+                        })
+                    out["all_faces"] = _all
                 if out["face"] is not None and face_sel.selected_face is not None:
                     f = face_sel.selected_face
                     out["face_box"] = (int(f[0]), int(f[1]), int(f[2]), int(f[3]))
@@ -350,6 +364,7 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
                 # MediaPipe 路径:用旧 select 逻辑
                 if fres.face_landmarks:
                     mp_faces = []
+                    _all_mp = []
                     for lms in fres.face_landmarks:
                         xs = [p.x for p in lms]
                         ys = [p.y for p in lms]
@@ -357,9 +372,19 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
                         fu = (min(xs) + max(xs)) / 2.0
                         fv = (min(ys) + max(ys)) / 2.0
                         mp_faces.append((fu, fv, fh))
+                        pxs = [p.x * W for p in lms]
+                        pys = [p.y * H for p in lms]
+                        bx, by = min(pxs), min(pys)
+                        bw, bh = max(pxs) - bx, max(pys) - by
+                        _all_mp.append({
+                            "u": float(fu), "v": float(fv), "h": float(fh),
+                            "box": (int(bx), int(by), int(bw), int(bh)),
+                            "kps": None,
+                        })
                     best = max(mp_faces, key=lambda f: f[2])
                     out["face"] = best
                     out["n_faces"] = len(fres.face_landmarks)
+                    out["all_faces"] = _all_mp
                 else:
                     out["face"] = None
                     out["n_faces"] = 0

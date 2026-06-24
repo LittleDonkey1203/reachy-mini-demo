@@ -114,6 +114,13 @@ SND_SPEED_DPS = 90.0
 SND_TARGET_LIMIT = 110.0
 BODY_LIMIT_DEG = 90.0
 NECK_REL_LIMIT = 23.0
+BODY_FOLLOW_THRESHOLD = 0.7   # 头偏到颈限的 70% 时身体开始跟
+BODY_FOLLOW_SPEED_DPS = 45.0  # 跟随态身体转速(°/s)
+
+# ── 安全删除工作流 ──
+CLEAR_VERIFY_COUNT = 3        # 连续高阈值匹配次数 (×IDENTITY_COOLDOWN_S ≈ 6s)
+CLEAR_VERIFY_SIM = 0.80       # 验证阶段身份匹配阈值 (远高于 COSINE_THRESHOLD=0.35)
+CLEAR_TIMEOUT_S = 30.0        # 验证/确认各阶段超时(s)
 
 # ── 行为状态机 ──
 ST_ARMED = "ARMED"
@@ -143,6 +150,9 @@ KWS_FORMS = ["x iǎo y ī", "x iǎo y ìn", "x iǎo y ì"]
 KWS_SINGLE_THR = 0.17
 KWS_DEBOUNCE_S = 0.3
 KWS_REFRACTORY_S = 2.0
+WAKE_BLANK_S = 0.6           # KWS 命中后向 Qwen 发静音的时长(屏蔽"小艺"音频泄漏)
+AUDIO_GATE_TIMEOUT_S = 5.0   # 音频闸门超时(s)——身份未确认时最多拦截音频的时间
+CONV_SUMMARY_THRESHOLD = 2000  # 估算 token 数超过此值自动触发中途摘要
 CONNECT_TIMEOUT_S = 3.0
 ARMED_BREATH_F = 0.18
 ARMED_BREATH_PITCH = 2.5

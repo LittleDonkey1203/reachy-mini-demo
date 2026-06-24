@@ -8,6 +8,11 @@
 
 <!-- How the user likes things done. Code style, tools, patterns, communication. -->
 
+- 不要新增 tab/按钮来展示调试信息，优先复用已有的 UI 元素（如 Conversation 面板的 payload modal）
+- 闸门/门控机制不能过于敏感：只在明确的切人+声源大幅变化时才生效，避免常规场景误触发
+- Dashboard 调试功能要能看到"模型看到什么" — session instructions、memory prompt、conversation log 必须可视化
+- 遵循 CLAUDE.md 规则：每次改动后必须更新 wolf 文件（cerebrum/memory/anatomy/buglog）
+
 ## Key Learnings
 
 - **Project:** shadow-yunwu-claudecode-aibasicalgodevdept-20260529
@@ -17,6 +22,13 @@
 
 <!-- Mistakes made and corrected. Each entry prevents the same mistake recurring. -->
 <!-- Format: [YYYY-MM-DD] Description of what went wrong and what to do instead. -->
+
+- [2026-06-24] **clear_memory confirmed 参数不能删**: 用户明确要求保留 confirmed 守卫("如果用户确认了才可以删")。不要因为"简化流程"移除安全确认参数。
+- [2026-06-24] **记忆 = 人脸 + 事实**: clear_memory 必须同时清除 face_db 中的 person entry(`clear_person(pid)`) 和 memory facts。不能只清 facts 而留人脸。
+- [2026-06-24] **state.json 字段必须完整**: 前端 JS 引用 `s.is_owner` 时，后端 state dict 必须同步添加该字段，否则前端永远显示空。添加 Dashboard 功能后检查数据通路: State class → _build_frame/state dict → JS 渲染。
+- [2026-06-24] **不要新增 tab 展示调试信息**: 用户明确要求复用已有的 Conversation 面板 payload modal，不要加新的 tab 或按钮。
+- [2026-06-24] **音频闸门不能每次 close_session 都触发**: 只在二次唤醒切人且 DOA 声源方向大幅变化(>SWITCH_AWAY_DEG)时关闸，避免常规断连重连时误拦截音频。
+- [2026-06-24] **必须遵循 CLAUDE.md 更新 wolf 文件**: 每次代码改动后必须更新 memory.md(行为日志)、cerebrum.md(学习)、anatomy.md(文件描述)。用户会检查。
 
 ## Decision Log
 
@@ -56,3 +68,57 @@
 - update_session 需传完整参数(output_modalities/voice/audio_format/turn_detection/tools), 非增量更新
 - session.updated 回调用 self.conv is None 区分初始配置 vs 记忆注入更新
 - State 新增 identity_injected_pid 追踪当前已注入记忆的人
+
+### 唤醒优先级修复 (2026-06-24)
+- 问题: `_is_A` 门控用 DOA 方向判断"是否 A 自己又喊", B 站在 ±55° 内(常见)被误判为 A
+- 修复: 替换为 `a_active = in_flight > 0 or speaking or user_speaking`
+- 语义: A 正在说话/robot 在答 A → 屏蔽 B; A 沉默 → 放行 B 的唤醒
+- State 新增 `user_speaking`, 在 speech_started/stopped 事件维护
+- close_session 重置 user_speaking=False 防止跨会话泄漏
+
+### TRACKING 身体跟随 (2026-06-24)
+- 问题: TRACKING 态 body_yaw_deg 完全不更新, 人走到侧面 >23° 头卡住
+- 修复: 视觉积分块中检测 neck_off > NECK_REL_LIMIT×0.7 时以 45°/s 转体
+- BODY_FOLLOW_THRESHOLD=0.7, BODY_FOLLOW_SPEED_DPS=45.0 (config.py)
+- 转体后重新 clamp track_yaw 到新的颈限范围, 头可继续追
+
+### 人脸误识别稳定性 (2026-06-24)
+- 问题: 低 sim 匹配(0.45-0.51)立即触发切人+记忆注入, 实际面前人没换
+- 修复: 当已跟踪 A 时, B 要 "接管" 需: sim>=0.65 立即; sim<0.65 连续 2 次确认
+- ID_SWITCH_HIGH_SIM=0.65, ID_SWITCH_CONFIRM_N=2
+- _id_switch_candidate / _id_switch_count 做连续匹配计数
+
+### clear_memory 完整清除 + Dashboard 身份信息 (2026-06-24)
+- clear_memory 清除链路: confirmed 守卫 → 权限校验(owner) → 清 facts → 清 face_db(clear_person) → 重置 State(pid/name/is_owner/injected)
+- Dashboard "身份" 行: 显示 person_name + "✓记忆"(已注入) + "👑"(owner)
+- 数据通路: State.current_is_owner → state dict `"is_owner"` → JS `s.is_owner`
+- 内存概念: 记忆 = 人脸(identity/recognizer face_db) + 事实(memory/manager facts), 两者必须同步清除
+
+### 安全删除工作流 (2026-06-24)
+- 问题: clear_memory 敏感操作完全依赖大模型 confirmed=true, 无后端校验
+- 方案: 两个 Tool(`clear_memory` 意图分类 + `confirm_clear` 最终确认) + 后端状态机 `st.clear_workflow`
+- 工作流: VERIFYING(5s高阈值匹配) → PERMISSION(权限校验) → CONFIRMING(二次口头确认) → BACKUP → EXECUTE
+- CLEAR_VERIFY_SIM=0.80: 远高于普通匹配阈值(0.35), 要求正面清晰人脸
+- CLEAR_VERIFY_COUNT=3: 连续 3 次匹配(×2s间隔≈6s)
+- clear_lock=True: 验证/确认期间阻止唤醒切换(防他人插嘴)
+- 备份: 删除前自动备份到 `data/backups/`(face + memory), 支持手动回滚
+- vision_result_loop 通过 cb_ref[0] 引用 ChatCallback 注入系统消息
+- close_session 重置 clear_workflow/clear_lock 防跨会话泄漏
+
+### 分人对话摘要 + 音频闸门 (2026-06-24)
+- conversation_log 从 `list[tuple]` 改为 `dict[str, list]`，key=pid，按人分桶
+- close_session 时提取当前人的对话桶，后台线程用 SUMMARY_MODEL(qwen-turbo) 做摘要
+- MemoryManager 新增 `conversation_summaries` 字段(保留最近 3 条)，get_prompt 注入上次摘要
+- 音频闸门仅在二次唤醒切人+DOA 声源偏移>SWITCH_AWAY_DEG 时触发，不是每次 close_session
+- 闸门关闭期间音频缓存为 b64 字符串，身份确认后 flush 全部缓存帧
+- 上下文过长自动摘要: 每次 user transcript append 后估算 token(中文字数×1.5)，超过 CONV_SUMMARY_THRESHOLD(2000) 自动触发后台摘要+清桶
+- 摘要完成后如果仍在和该人对话，设 identity_injected=False 触发下一帧重新注入
+- Dashboard: 事件 payload modal 增加 Session Instructions + Memory Prompt + Conversation Log 显示
+
+### 多人脸 DOA 说话人选择 (2026-06-24)
+- vision_worker 输出 all_faces: 所有 YuNet/MediaPipe 检测到的脸 [{u,v,h,box,kps}]
+- _select_face_by_doa: DOA resid + body_yaw + track_yaw → 预期 u 坐标 → 匹配最近人脸
+- 公式: doa_in_camera = (body_yaw + resid) - track_yaw; expected_u = 0.5 - doa_in_camera / FOV_X_DEG
+- DOA 选出的脸优先用于 ArcFace 身份识别(替代 FaceSelector 选择)
+- 仅在 all_faces > 1 且 doa_confident 时生效，单人脸或无 DOA 时 fallback FaceSelector
+- debug overlay: 选中=蓝色粗框+DOA标签, 非选中=灰色细框+序号

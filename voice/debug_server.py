@@ -36,12 +36,59 @@ from voice.state import (
 )
 
 
+# ── PIL 中文文字渲染(OpenCV putText 不支持中文) ──
+_PIL_FONT = None
+_PIL_FONT_SMALL = None
+
+def _init_pil_fonts():
+    global _PIL_FONT, _PIL_FONT_SMALL
+    if _PIL_FONT is not None:
+        return
+    try:
+        from PIL import ImageFont
+        _candidates = [
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+        for p in _candidates:
+            if os.path.exists(p):
+                _PIL_FONT = ImageFont.truetype(p, 16)
+                _PIL_FONT_SMALL = ImageFont.truetype(p, 13)
+                return
+        _PIL_FONT = ImageFont.load_default()
+        _PIL_FONT_SMALL = _PIL_FONT
+    except Exception:
+        _PIL_FONT = None
+        _PIL_FONT_SMALL = None
+
+
+def _put_cjk_text(bgr, text: str, pos: tuple, color=(255, 255, 255), font=None):
+    """在 BGR numpy 图上绘制可能含中文的文字。fallback 到 cv2.putText。"""
+    import cv2 as _cv2
+    has_cjk = any(ord(c) > 127 for c in text)
+    if not has_cjk or _PIL_FONT is None:
+        _cv2.putText(bgr, text, pos, _cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1)
+        return
+    try:
+        from PIL import Image, ImageDraw
+        pil_img = Image.fromarray(_cv2.cvtColor(bgr, _cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_img)
+        draw.text(pos, text, font=font or _PIL_FONT, fill=(color[2], color[1], color[0]))
+        bgr[:] = _cv2.cvtColor(np.array(pil_img), _cv2.COLOR_RGB2BGR)
+    except Exception:
+        _cv2.putText(bgr, text, pos, _cv2.FONT_HERSHEY_SIMPLEX, 0.50, color, 1)
+
+
 def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
     """VIS_DEBUG=1 时启动 MJPEG HTTP 服务，浏览器打开 http://localhost:{port} 查看实时标注帧。
     画面 = 视觉子进程实际看到的降采样帧（DECIMATE×），叠加：
       蓝框=人脸(u,v,h)  绿框=有效手(score≥阈值)  黄框=低置信度手(可能误检)
       左上角=状态机/头部目标/face_locked  右上角=帧时间戳"""
     import cv2 as _cv2
+    _init_pil_fonts()
     import http.server
     import socketserver
 
@@ -64,6 +111,9 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             sw_phase = st.dbg_switch_phase
             sw_target = st.dbg_switch_target
             speaking = time.monotonic() < st.playback_end_estimate + 0.1
+            person_id = st.current_person_id
+            person_name = st.current_person_name
+            identity_injected = st.identity_injected
 
         if rgb is None:
             blank = np.zeros((360, 640, 3), dtype=np.uint8)
@@ -75,10 +125,36 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
         bgr = _cv2.cvtColor(rgb, _cv2.COLOR_RGB2BGR)
         H, W = bgr.shape[:2]
 
-        # ── 人脸框（蓝色）──
-        if det and det.get("face") is not None:
+        # ── 人脸框（多人脸: 选中=蓝, 非选中=灰; 单脸=蓝）──
+        _all_faces = det.get("all_faces") if det else None
+        _doa_sel = det.get("doa_selected_idx") if det else None
+        if _all_faces and len(_all_faces) > 1:
+            for _fi, _af in enumerate(_all_faces):
+                _is_sel = (_doa_sel is not None and _fi == _doa_sel)
+                _afu, _afv, _afh = _af["u"], _af["v"], _af["h"]
+                _afw = _afh * 0.85
+                _ax0 = int((_afu - _afw / 2) * W)
+                _ay0 = int((_afv - _afh / 2) * H)
+                _ax1 = int((_afu + _afw / 2) * W)
+                _ay1 = int((_afv + _afh / 2) * H)
+                _color = (255, 80, 0) if _is_sel else (120, 120, 120)
+                _thick = 2 if _is_sel else 1
+                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _color, _thick)
+                _ftag = f"DOA" if _is_sel else f"#{_fi}"
+                _flbl = f"{_ftag} u={_afu:.2f} h={_afh:.2f}"
+                _cv2.rectangle(bgr, (_ax0, _ay0 - 18), (_ax0 + len(_flbl) * 9, _ay0), _color, -1)
+                _cv2.putText(bgr, _flbl, (_ax0 + 2, _ay0 - 4),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+                if _is_sel and (person_name or person_id):
+                    id_label = person_name or (person_id[:12] if person_id else "")
+                    mem_s = "MEM" if identity_injected else ""
+                    id_str = f"{id_label} {mem_s}".strip()
+                    _cjk_w = sum(18 if ord(c) > 127 else 10 for c in id_str) + 4
+                    _cv2.rectangle(bgr, (_ax0, _ay1), (_ax0 + _cjk_w, _ay1 + 22), (200, 60, 0), -1)
+                    _put_cjk_text(bgr, id_str, (_ax0 + 2, _ay1 + 2), (255, 255, 255))
+        elif det and det.get("face") is not None:
             fu, fv, fh = det["face"]
-            fw = fh * 0.85  # 估算宽高比
+            fw = fh * 0.85
             fx0 = int((fu - fw / 2) * W)
             fy0 = int((fv - fh / 2) * H)
             fx1 = int((fu + fw / 2) * W)
@@ -88,6 +164,13 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             _cv2.rectangle(bgr, (fx0, fy0 - 18), (fx0 + len(label) * 9, fy0), (255, 80, 0), -1)
             _cv2.putText(bgr, label, (fx0 + 2, fy0 - 4),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+            if person_name or person_id:
+                id_label = person_name or (person_id[:12] if person_id else "")
+                mem_s = "MEM" if identity_injected else ""
+                id_str = f"{id_label} {mem_s}".strip()
+                _cjk_w = sum(18 if ord(c) > 127 else 10 for c in id_str) + 4
+                _cv2.rectangle(bgr, (fx0, fy1), (fx0 + _cjk_w, fy1 + 22), (200, 60, 0), -1)
+                _put_cjk_text(bgr, id_str, (fx0 + 2, fy1 + 2), (255, 255, 255))
 
         # ── 手部框（绿=有效 / 黄=低置信 / 橙=底部过滤）──
         if det and det.get("hand") is not None:
@@ -267,10 +350,12 @@ canvas{display:block;margin:0 auto}
 .sr:last-child{border:none}
 .sl{color:var(--muted);white-space:nowrap;font-size:12px}
 .sv{font:11px var(--mono);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#lw{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
+#lw{grid-column:1/3;background:var(--card);border:1px solid var(--bdr);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;position:relative}
 #lh{padding:5px 12px;border-bottom:1px solid var(--bdr);flex-shrink:0;display:flex;align-items:center;gap:8px}
 #lh span{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
 #lb{flex:1;overflow-y:auto;padding:4px 12px;font:11px/1.75 var(--mono);min-height:0}
+#log-bottom-btn{display:none;position:absolute;right:16px;bottom:12px;width:28px;height:28px;border-radius:50%;background:#3b82f6;color:#fff;border:none;cursor:pointer;font-size:14px;line-height:28px;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.3);z-index:10;opacity:.85;transition:opacity .15s}
+#log-bottom-btn:hover{opacity:1}
 .ll{white-space:pre-wrap;word-break:break-all}
 .lk{color:var(--green)}.lw2{color:var(--orange)}.le{color:var(--red)}.ld{color:#6366f1}.lm{color:#4b5563}
 /* ── Conversation view ── */
@@ -362,11 +447,14 @@ canvas{display:block;margin:0 auto}
       <div class="sr"><span class="sl">方向门控</span><span class="sv" id="sg"></span></div>
       <div class="sr"><span class="sl">切换</span><span class="sv" id="sw"></span></div>
       <div class="sr"><span class="sl">头/身偏航</span><span class="sv" id="sy"></span></div>
+      <div class="sr"><span class="sl">身份</span><span class="sv" id="si"></span></div>
+      <div class="sr"><span class="sl">记忆</span><span class="sv" id="sm" style="font-size:10px;max-width:280px;word-break:break-all;white-space:normal"></span></div>
     </div>
   </div>
   <div id="lw">
     <div id="lh"><span>实时日志</span><span id="lc" style="margin-left:auto;color:#374151"></span></div>
     <div id="lb"></div>
+    <button id="log-bottom-btn" onclick="logScrollToBottom()">&#8595;</button>
   </div>
 </div>
 
@@ -468,6 +556,12 @@ function refreshCamera(s){
   sv('sw',s.switching?s.switch_phase+' → '+s.switch_target.toFixed(0)+'\xb0':'—',s.switching?'#f97316':'#374151');
   const hv=(s.track_yaw||0).toFixed(1),bv=(s.body_yaw_deg||0).toFixed(1);
   sv('sy','头 '+(hv>=0?'+':'')+hv+'\xb0  身 '+(bv>=0?'+':'')+bv+'\xb0');
+  const pn=s.identity_name||s.identity_pid||'—';
+  const memS=s.identity_injected?' ✓记忆':'';
+  const ownS=s.is_owner?' 👑':'';
+  const clrS=s.clear_phase==='verifying'?' 🔒验证中':s.clear_phase==='confirming'?' 🔒确认中':'';
+  sv('si',pn+memS+ownS+clrS,s.clear_phase?'#ef4444':s.identity_name?'#22d3a0':'#374151');
+  sv('sm',s.memory_prompt||'—',s.audio_gate?'#f97316':'#6b7280');
   drawRadar(s);
 }
 let logSeq=0;const lb=$('lb'),MAX=400;
@@ -479,13 +573,24 @@ function lcls(t){
   return 'lm';
 }
 function addLog(lines){
-  const bot=lb.scrollTop+lb.clientHeight>=lb.scrollHeight-40;
   const f=document.createDocumentFragment();
   lines.forEach(t=>{const d=document.createElement('div');d.className='ll '+lcls(t);d.textContent=t;f.appendChild(d)});
   lb.appendChild(f);
   while(lb.children.length>MAX)lb.removeChild(lb.firstChild);
-  if(bot)lb.scrollTop=lb.scrollHeight;
+  if(logAutoScroll)lb.scrollTop=lb.scrollHeight;
   $('lc').textContent=lb.children.length+' lines';
+}
+
+let logAutoScroll=true;
+const logBtn=$('log-bottom-btn');
+lb.addEventListener('scroll',()=>{
+  const atBot=lb.scrollTop+lb.clientHeight>=lb.scrollHeight-40;
+  if(atBot){logAutoScroll=true;logBtn.style.display='none';}
+  else{logAutoScroll=false;logBtn.style.display='block';}
+},{passive:true});
+function logScrollToBottom(){
+  logAutoScroll=true;logBtn.style.display='none';
+  lb.scrollTop=lb.scrollHeight;
 }
 
 // ── Conversation view ──
@@ -860,9 +965,46 @@ function scrollToTlNode(node){
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function openModal(e){
   $('pb-title').textContent=e.type;
-  $('pb-body').textContent=JSON.stringify(e.payload,null,2);
+  // 找到该事件所属的 turn，获取 dt_seq 快照点
+  let _modalDtSeq=Infinity;
+  for(const t of allTurns){
+    if(t.events&&t.events.includes(e.seq)&&t.dt_seq!=null){_modalDtSeq=t.dt_seq;break;}
+  }
+  // 构建内容：事件 payload + session context
+  let html='<div style="margin-bottom:12px"><div style="color:#9ca3af;font-size:10px;margin-bottom:4px">Event Payload</div>';
+  html+='<pre style="color:#d1d5db;margin:0">'+esc(JSON.stringify(e.payload,null,2))+'</pre></div>';
+  // Session Instructions
+  if(_lastSessionInstr){
+    html+='<div style="margin-bottom:12px;border-top:1px solid #374151;padding-top:8px">';
+    html+='<div style="color:#22d3a0;font-size:10px;margin-bottom:4px">Session Instructions (模型看到的指令)</div>';
+    html+='<pre style="color:#9ca3af;margin:0;white-space:pre-wrap">'+esc(_lastSessionInstr)+'</pre></div>';
+  }
+  // Memory Prompt
+  if(_lastMemPrompt){
+    html+='<div style="margin-bottom:12px;border-top:1px solid #374151;padding-top:8px">';
+    html+='<div style="color:#f59e0b;font-size:10px;margin-bottom:4px">Memory Prompt (注入的记忆)</div>';
+    html+='<pre style="color:#f59e0b;margin:0;white-space:pre-wrap">'+esc(_lastMemPrompt)+'</pre></div>';
+  }
+  // Conversation Log — 只显示到该轮为止的对话
+  if(_lastDisplayTranscript&&_lastDisplayTranscript.length){
+    const filtered=_lastDisplayTranscript.filter(x=>x.seq<=_modalDtSeq);
+    if(filtered.length){
+      html+='<div style="border-top:1px solid #374151;padding-top:8px">';
+      html+='<div style="color:#60a5fa;font-size:10px;margin-bottom:4px">Conversation Log (该轮之前的对话 '+filtered.length+'/'+_lastDisplayTranscript.length+')</div>';
+      for(const e of filtered){
+        const c=e.role==='user'?'#60a5fa':'#34d399';
+        const icon=e.role==='user'?'🎤':'🔊';
+        const who=e.name||e.pid||'';
+        const tag=who?'<span style="color:#9ca3af;font-size:9px">['+esc(who)+']</span> ':'';
+        html+='<div style="color:'+c+';padding-left:8px;margin-top:2px"><span style="color:#6b7280;font-size:9px">'+esc(e.ts)+'</span> '+icon+' '+tag+esc(e.text.slice(0,150))+'</div>';
+      }
+      html+='</div>';
+    }
+  }
+  $('pb-body').innerHTML=html;
   $('payload-modal').classList.add('open');
 }
+let _lastSessionInstr=null,_lastMemPrompt=null,_lastConvLog=null,_lastDisplayTranscript=null;
 function closeModal(){$('payload-modal').classList.remove('open')}
 $('payload-modal').onclick=e=>{if(e.target===$('payload-modal'))closeModal()}
 
@@ -924,6 +1066,11 @@ async function poll(){
       if(s.conv_turns)allTurns=s.conv_turns;
       if(s.feedback)allFeedback=s.feedback;
       if(s.feedback_dir)feedbackDir=s.feedback_dir;
+      // context debug data
+      if(s.session_instructions!=null)_lastSessionInstr=s.session_instructions;
+      if(s.memory_prompt!=null)_lastMemPrompt=s.memory_prompt;
+      if(s.conversation_log!=null)_lastConvLog=s.conversation_log;
+      if(s.display_transcript!=null)_lastDisplayTranscript=s.display_transcript;
       if(document.getElementById('view-conv').classList.contains('active')){
         refreshTurnList();renderEventList();drawTimeline();
       }
@@ -1010,6 +1157,12 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                     "switch_target": st.dbg_switch_target,
                     "identity_pid": st.current_person_id,
                     "identity_name": st.current_person_name,
+                    "identity_injected": st.identity_injected,
+                    "is_owner": st.current_is_owner,
+                    "memory_prompt": st.dbg_memory_prompt,
+                    "audio_gate": st.audio_gate_closed,
+                    "clear_phase": (st.clear_workflow or {}).get("phase"),
+                    "user_speaking": st.user_speaking,
                 }
             data["log_seq"] = _vis_log_seq
             data["new_logs"] = [t for s, t in _vis_log_buf if s > after]
@@ -1020,6 +1173,11 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
             data["feedback"] = _feedback_notes[-50:]
             data["feedback_dir"] = SNAP_DIR
             data["instructions"] = INSTRUCTIONS  # 前端首次拿到后可缓存
+            # Context debug 面板数据
+            with st.lock:
+                data["session_instructions"] = st.dbg_session_instructions
+                data["conversation_log"] = {k: v[-20:] for k, v in st.conversation_log.items()}
+                data["display_transcript"] = st.display_transcript[-50:]
             body = json.dumps(data, ensure_ascii=False, cls=_NumpyEncoder).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1032,8 +1190,34 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
             path = self.path.split("?", 1)[0]
             if path == "/feedback":
                 self._feedback()
+            elif path == "/debug/mock-identity":
+                self._mock_identity()
             else:
                 self.send_error(405)
+
+        def _mock_identity(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                pid = body.get("pid", "mock_person_" + str(int(time.time())))
+                name = body.get("name", "测试用户")
+                with st.lock:
+                    old_pid = st.current_person_id
+                    old_name = st.current_person_name
+                    st.current_person_id = pid
+                    st.current_person_name = name
+                    st.identity_injected = False
+                    st.identity_injected_pid = None
+                resp = json.dumps({"ok": True, "old_pid": old_pid, "old_name": old_name,
+                                   "new_pid": pid, "new_name": name}, ensure_ascii=False)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp.encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(str(e).encode("utf-8"))
 
         def _feedback(self):
             global _feedback_seq

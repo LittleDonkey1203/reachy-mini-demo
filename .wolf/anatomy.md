@@ -1,11 +1,11 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-24T03:30:35.080Z
-> Files: 533 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-24T11:58:26.567Z
+> Files: 537 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../.claude/plans/
 
-- `generic-wiggling-sketch.md` — 本轮计划: Face DB 碎片化修复 + 记忆注入优化 + 手势识别升级 (~2648 tok)
+- `generic-wiggling-sketch.md` — 分人对话摘要 + 注入 (Per-Person Conversation Summary) (~2582 tok)
 
 ## ./
 
@@ -18,16 +18,23 @@
 - `CLAUDE.md` — OpenWolf (~180 tok)
 - `connect.py` — 连接 Reachy Mini daemon 的统一封装。 (~269 tok)
 - `MACOS_SETUP.md` — macOS (Intel) 部署指南 — 小艺 Reachy Mini Lite (~1670 tok)
-- `PROJECT_STATE.md` — PROJECT_STATE (~866 tok)
+- `PROJECT_STATE.md` — PROJECT_STATE (~1106 tok)
 - `pyproject.toml` — Python project configuration (~234 tok)
 - `README.md` — Project documentation (~1024 tok)
 - `start_daemon.sh` — ============================================================ (~634 tok)
 - `start_mac.sh` — ============================================================ (~1618 tok)
-- `todo.md` — Reachy Mini Demo — TODO 清单 (~1898 tok)
+- `test_realtime_model.py` — 最小化 Realtime 模型连通性测试。 (~1202 tok)
+- `todo.md` — Reachy Mini Demo — TODO 清单 (~2569 tok)
 
 ## .claude/
 
 - `settings.json` (~441 tok)
+
+## .claude/agents/
+
+- `architect.md` — 架构师 Agent (~261 tok)
+- `executor.md` — 执行者 Agent (~370 tok)
+- `lead.md` — 技术负责人 Agent (~426 tok)
 
 ## .claude/rules/
 
@@ -811,22 +818,22 @@
 
 ## docs/
 
-- `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7126 tok)
+- `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7632 tok)
 - `MULTI_PERSON_INTRO_PLAN.md` — 多人同框介绍朋友 — 方案文档 (~2783 tok)
 - `WAKEWORD_PRIORITY_ANALYSIS.md` — 唤醒词 × 人脸锁定 × DOA 优先级分析 (~2615 tok)
 
 ## identity/
 
 - `owner.py` — 主人认定模块 — 首次深度交互自动绑定 + 转让。 (~789 tok)
-- `recognizer.py` — 身份识别模块 — YuNet 人脸检测 + arcface 特征提取 + 特征库匹配。 (~5778 tok)
+- `recognizer.py` — 身份识别模块 — YuNet 人脸检测 + arcface 特征提取 + 特征库匹配。 (~6259 tok)
 
 ## memory/
 
-- `manager.py` — 个人记忆管理 — 会话内短期 + LWW 持久化。 (~3330 tok)
+- `manager.py` — 个人记忆管理 — 会话内短期 + LWW 持久化 + 对话摘要(conversation_summaries)。 (~4200 tok)
 
 ## perception/
 
-- `vision_worker.py` — -*- coding: utf-8 -*- (~5232 tok)
+- `vision_worker.py` — 视觉子进程: Face(YuNet/MediaPipe)+Hand(GestureRecognizer), 输出 all_faces 全脸列表。 (~5600 tok)
 
 ## tests/
 
@@ -834,7 +841,7 @@
 
 ## voice/
 
-- `config.py` — 配置常量、工具元数据、prompt 模板。 (~2772 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~28332 tok)
-- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~14668 tok)
-- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2784 tok)
+- `config.py` — 配置常量、工具元数据、prompt 模板。含 AUDIO_GATE_TIMEOUT_S / CONV_SUMMARY_THRESHOLD。 (~3050 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~33891 tok)
+- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17488 tok)
+- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2949 tok)

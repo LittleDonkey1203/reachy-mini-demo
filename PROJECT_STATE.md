@@ -29,6 +29,12 @@
 - **手势识别升级**: GestureRecognizer 替换纯规则 _classify_gesture, 模型优先 + 规则 fallback(three/four/ok)
 - **记忆权限 + 认主机制**: OwnerManager 首次交互自动绑定 owner; auto_merge 双命名保护; 非 owner 只能删除自己的记忆
 - **记忆注入过时修复**: 用 `update_session(instructions=...)` 替代 `create_item(system message)`,切人时 session instructions 整体替换,旧记忆自动消失
+- **分人对话摘要 + 音频闸门**: conversation_log 改为 per-pid dict; close_session 时异步做对话摘要存入 MemoryManager; get_prompt 注入上次对话摘要; 切人+DOA大幅偏移时关闭音频闸门等身份确认; 上下文过长自动触发中途摘要(CONV_SUMMARY_THRESHOLD); Dashboard 显示当前注入的记忆内容
+- **多人脸 DOA 说话人选择**: vision_worker 输出 all_faces(所有检测到的脸); d01 中 _select_face_by_doa 根据 DOA 声源方向选出说话人的脸做身份识别; Dashboard 多人脸框渲染(选中=蓝, 非选中=灰)
+- **唤醒优先级修复**: 替换 `_is_A` DOA 门控为 `a_active`(A 说话/robot 回应时屏蔽 B;A 沉默时响应 B)
+- **TRACKING 身体跟随**: 视觉积分中头偏到颈限 70% 时自动转体,把人脸保持在中心
+- **人脸误识别稳定性**: 身份切换增加迟滞(sim>=0.65 立即切;sim<0.65 需连续 2 次确认)
+- **安全删除工作流**: clear_memory 改为多步安全流程: 意图分类→高阈值身份验证(sim>=0.80, 6s)→权限校验→二次口头确认→备份→删除; clear_lock 阻止确认期间他人唤醒; data/backups/ 自动备份支持回滚
 
 ## 当前架构状态
 
@@ -62,13 +68,14 @@ identity/
 2. **YuNet 无 blendshapes**: 切换后 smile/frown 恒为 0.0, 表情回应(M3-b)失效; 可后续用 insightface 2D106 landmark 估算
 3. **手势识别**: ~~纯规则 _classify_gesture 对 fist/three 误检率高, 待 GestureRecognizer 替换~~ ✅ 已用 GestureRecognizer 替换(模型优先 + 规则 fallback)
 4. **Face DB 碎片化**: ~~同一人因角度/光照变化被注册为多个 ID~~ ✅ 已修复: match() 质心匹配 + update_embedding() 放宽 + auto_merge() 启动合并
+   - ⚠️ **auto_merge 未同步 MemoryManager**: 启动时 FaceDB 合并碎片人脸后未调用 `merge_memories()` → 被合并的 drop_pid 的 `data/memories/<drop_pid>.json` 残留, keep_pid 缺少 drop_pid 的 facts
 5. **多人同框介绍**: 用户指着他人说"这是我朋友XX" → robot 给对应人脸关联名字/关系(方案调研中, 见 docs/MULTI_PERSON_INTRO_PLAN.md)
 6. **end_session 乱码**: 模型偶尔把 function_call_output 中的元指令当文字朗读(已简化 output 内容)
-7. **记忆注入过时**: ~~切人后旧记忆 system message 仍在 context 中污染回答~~ ✅ 已修复: 改用 update_session instructions 替换,切人时旧记忆自动消失
+7. **记忆注入过时**: ~~切人后旧记忆 system message 仍在 context 中污染回答~~ ✅ 已修复: `_update_memory_instructions()` 用 `update_session(instructions=...)` 整体替换, 切人/更新 fact 时旧记忆自动消失
 
 ## 下一步建议
 
-1. **写测试(P0)**: 按 FEATURE_INVENTORY.md 优先级, 先写跟踪核心(T4) + 状态机(T15) + 打断(T1) 的单元/集成测试
-2. **重构拆分**: 在测试覆盖后, 从 d01 拆出 behavior.py / head_control.py / vision_bridge.py / wake.py
+1. **重构拆分**: 在测试覆盖后, 从 d01 拆出 behavior.py / head_control.py / vision_bridge.py / wake.py
+2. **记忆格式重构**: 当前 `facts` 是 `{key: value}` 平铺字典, key 命名死板(name/job/hobby 等硬编码风格); 需改为自然语言分类存储, 如: 喜好类("喜欢猫""爱吃火锅")、客观事实类("今天下雨""现在是晚上")、个人信息类("叫小明""是程序员")等, 让模型能更自然地存取和表达记忆
 3. 真机测试验证检出率
 4. 继续 todo.md 中未完成项(#1 DOA / #7 身份优化 / #12 手势识别)

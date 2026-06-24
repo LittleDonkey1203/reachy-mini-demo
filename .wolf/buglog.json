@@ -276,6 +276,422 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-24T03:20:51.460Z"
+    },
+    {
+      "id": "bug-018",
+      "timestamp": "2026-06-24T03:49:37.316Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 7→10 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T03:49:37.316Z"
+    },
+    {
+      "id": "bug-019",
+      "timestamp": "2026-06-24T03:56:38.972Z",
+      "error_message": "Significant refactor of ",
+      "file": "todo.md",
+      "root_cause": "11 lines replaced/restructured",
+      "fix": "Rewrote 15→9 lines (11 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T03:56:38.972Z"
+    },
+    {
+      "id": "bug-020",
+      "timestamp": "2026-06-24T04:07:32.049Z",
+      "error_message": "Significant refactor of ",
+      "file": "memory/manager.py",
+      "root_cause": "5 lines replaced/restructured",
+      "fix": "Rewrote 18→12 lines (5 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T04:07:32.049Z"
+    },
+    {
+      "id": "bug-021",
+      "timestamp": "2026-06-24T04:09:00.679Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "3 lines replaced/restructured",
+      "fix": "Rewrote 7→4 lines (3 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T04:09:00.679Z"
+    },
+    {
+      "id": "bug-022",
+      "timestamp": "2026-06-24T06:14:18.546Z",
+      "error_message": "Significant refactor of ",
+      "file": "memory/manager.py",
+      "root_cause": "3 lines replaced/restructured",
+      "fix": "Rewrote 12→18 lines (3 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:14:18.546Z"
+    },
+    {
+      "id": "bug-023",
+      "timestamp": "2026-06-24T06:21:28.246Z",
+      "error_message": "Incorrect value in code",
+      "file": "voice/debug_server.py",
+      "root_cause": "Had \"user_speaking\"",
+      "fix": "Changed to \"is_owner\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:21:28.246Z"
+    },
+    {
+      "id": "bug-024",
+      "timestamp": "2026-06-24T06:29:40.358Z",
+      "error_message": "Significant refactor of ",
+      "file": "memory/manager.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 18→24 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:29:40.358Z"
+    },
+    {
+      "id": "bug-025",
+      "timestamp": "2026-06-24T06:29:59.600Z",
+      "error_message": "Wrong return value",
+      "file": "memory/manager.py",
+      "root_cause": "Was returning: self.clear_all(person_id, confirmed, actor_pid=act",
+      "fix": "Now returns: f\"没有找到叫「{target_name}」的人。\"",
+      "tags": [
+        "auto-detected",
+        "return-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:29:59.600Z"
+    },
+    {
+      "id": "bug-026",
+      "timestamp": "2026-06-24T06:31:58.301Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 11→17 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:31:58.301Z"
+    },
+    {
+      "id": "bug-027",
+      "timestamp": "2026-06-24T06:58:51.241Z",
+      "error_message": "Incorrect value in code",
+      "file": "../../../../.claude/plans/generic-wiggling-sketch.md",
+      "root_cause": "Had `FaceDB.verify_identity(embedding, expected_pid, t",
+      "fix": "Changed to `FaceDB.verify_identity(embedding, expected_pid, t",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T06:58:51.241Z"
+    },
+    {
+      "id": "bug-028",
+      "timestamp": "2026-06-24T07:03:02.482Z",
+      "error_message": "Significant refactor of ",
+      "file": "memory/manager.py",
+      "root_cause": "6 lines replaced/restructured",
+      "fix": "Rewrote 24→39 lines (6 removed) | Also: \"\"\"处理 Qwen function call。person_id 既是操作者也是默认目标。\"\"\"; elif tool_name == \"clear_memory\":",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-24T07:04:06.320Z"
+    },
+    {
+      "id": "bug-029",
+      "timestamp": "2026-06-24T07:06:33.101Z",
+      "error_message": "Wrong reference: create_item should be _update_memory_instructions",
+      "file": "PROJECT_STATE.md",
+      "root_cause": "Used \"create_item\" instead of \"_update_memory_instructions\"",
+      "fix": "Changed create_item → _update_memory_instructions",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:06:33.101Z"
+    },
+    {
+      "id": "bug-030",
+      "timestamp": "2026-06-24T07:08:49.404Z",
+      "error_message": "Wrong reference: None should be cb_ref",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "Used \"None\" instead of \"cb_ref\"",
+      "fix": "Changed None → cb_ref",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:08:49.404Z"
+    },
+    {
+      "id": "bug-031",
+      "timestamp": "2026-06-24T07:13:36.615Z",
+      "error_message": "Incorrect value in code",
+      "file": "voice/debug_server.py",
+      "root_cause": "Had \"user_speaking\"",
+      "fix": "Changed to \"clear_phase\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:13:36.615Z"
+    },
+    {
+      "id": "bug-032",
+      "timestamp": "2026-06-24T07:31:28.263Z",
+      "error_message": "Wrong reference: div should be button",
+      "file": "voice/debug_server.py",
+      "root_cause": "Used \"div\" instead of \"button\"",
+      "fix": "Changed div → button",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:31:28.263Z"
+    },
+    {
+      "id": "bug-033",
+      "timestamp": "2026-06-24T07:31:41.991Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/debug_server.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 9→20 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:31:41.991Z"
+    },
+    {
+      "id": "bug-034",
+      "timestamp": "2026-06-24T07:42:39.863Z",
+      "error_message": "Wrong reference: OmniRealtimeConversation should be OmniRealtimeCallback",
+      "file": "test_realtime_model.py",
+      "root_cause": "Used \"OmniRealtimeConversation\" instead of \"OmniRealtimeCallback\"",
+      "fix": "Changed OmniRealtimeConversation → OmniRealtimeCallback",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T07:42:39.863Z"
+    },
+    {
+      "id": "bug-035",
+      "timestamp": "2026-06-24T08:48:08.518Z",
+      "error_message": "Significant refactor of ",
+      "file": "../../../../.claude/plans/generic-wiggling-sketch.md",
+      "root_cause": "10 lines replaced/restructured",
+      "fix": "Rewrote 14→90 lines (10 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T08:48:08.518Z"
+    },
+    {
+      "id": "bug-036",
+      "timestamp": "2026-06-24T09:13:41.936Z",
+      "error_message": "Significant refactor of ",
+      "file": "../../../../.claude/plans/generic-wiggling-sketch.md",
+      "root_cause": "26 lines replaced/restructured",
+      "fix": "Rewrote 43→89 lines (26 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T09:13:41.936Z"
+    },
+    {
+      "id": "bug-037",
+      "timestamp": "2026-06-24T09:21:23.510Z",
+      "error_message": "Significant refactor of ",
+      "file": "memory/manager.py",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 19→24 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T09:21:23.510Z"
+    },
+    {
+      "id": "bug-038",
+      "timestamp": "2026-06-24T09:25:31.167Z",
+      "error_message": "Significant refactor of ",
+      "file": "PROJECT_STATE.md",
+      "root_cause": "2 lines replaced/restructured",
+      "fix": "Rewrote 6→7 lines (2 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T09:25:31.167Z"
+    },
+    {
+      "id": "bug-039",
+      "timestamp": "2026-06-24T09:45:17.548Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/debug_server.py",
+      "root_cause": "16 lines replaced/restructured",
+      "fix": "Rewrote 28→4 lines (16 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T09:45:17.548Z"
+    },
+    {
+      "id": "bug-040",
+      "timestamp": "2026-06-24T09:46:48.622Z",
+      "error_message": "Null/undefined access in ",
+      "file": "voice/debug_server.py",
+      "root_cause": "Property access on potentially null/undefined value",
+      "fix": "Added null safety (optional chaining or null check)",
+      "tags": [
+        "auto-detected",
+        "null-safety",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T09:46:48.622Z"
+    },
+    {
+      "id": "bug-041",
+      "timestamp": "2026-06-24T10:00:25.912Z",
+      "error_message": "Wrong reference: hand should be all_faces",
+      "file": "perception/vision_worker.py",
+      "root_cause": "Used \"hand\" instead of \"all_faces\"",
+      "fix": "Changed hand → all_faces",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T10:00:25.912Z"
+    },
+    {
+      "id": "bug-042",
+      "timestamp": "2026-06-24T10:05:47.742Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/debug_server.py",
+      "root_cause": "4 lines replaced/restructured",
+      "fix": "Rewrote 21→46 lines (4 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T10:05:47.742Z"
+    },
+    {
+      "id": "bug-043",
+      "timestamp": "2026-06-24T11:01:35.654Z",
+      "error_message": "Null/undefined access in ",
+      "file": "voice/debug_server.py",
+      "root_cause": "Property access on potentially null/undefined value",
+      "fix": "Added null safety (optional chaining or null check)",
+      "tags": [
+        "auto-detected",
+        "null-safety",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-24T11:01:35.654Z"
     }
   ]
 }
