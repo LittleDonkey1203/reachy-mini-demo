@@ -973,33 +973,41 @@ function openModal(e){
   // 构建内容：事件 payload + session context
   let html='<div style="margin-bottom:12px"><div style="color:#9ca3af;font-size:10px;margin-bottom:4px">Event Payload</div>';
   html+='<pre style="color:#d1d5db;margin:0">'+esc(JSON.stringify(e.payload,null,2))+'</pre></div>';
-  // Session Instructions
-  if(_lastSessionInstr){
-    html+='<div style="margin-bottom:12px;border-top:1px solid #374151;padding-top:8px">';
-    html+='<div style="color:#22d3a0;font-size:10px;margin-bottom:4px">Session Instructions (模型看到的指令)</div>';
-    html+='<pre style="color:#9ca3af;margin:0;white-space:pre-wrap">'+esc(_lastSessionInstr)+'</pre></div>';
-  }
-  // Memory Prompt
-  if(_lastMemPrompt){
-    html+='<div style="margin-bottom:12px;border-top:1px solid #374151;padding-top:8px">';
-    html+='<div style="color:#f59e0b;font-size:10px;margin-bottom:4px">Memory Prompt (注入的记忆)</div>';
-    html+='<pre style="color:#f59e0b;margin:0;white-space:pre-wrap">'+esc(_lastMemPrompt)+'</pre></div>';
-  }
-  // Conversation Log — 只显示到该轮为止的对话
-  if(_lastDisplayTranscript&&_lastDisplayTranscript.length){
-    const filtered=_lastDisplayTranscript.filter(x=>x.seq<=_modalDtSeq);
-    if(filtered.length){
-      html+='<div style="border-top:1px solid #374151;padding-top:8px">';
-      html+='<div style="color:#60a5fa;font-size:10px;margin-bottom:4px">Conversation Log (该轮之前的对话 '+filtered.length+'/'+_lastDisplayTranscript.length+')</div>';
-      for(const e of filtered){
-        const c=e.role==='user'?'#60a5fa':'#34d399';
-        const icon=e.role==='user'?'🎤':'🔊';
-        const who=e.role==='user'?(e.name||e.pid||''):'小艺';
-        const tag=who?'<span style="color:#9ca3af;font-size:9px">['+esc(who)+']</span> ':'';
-        html+='<div style="color:'+c+';padding-left:8px;margin-top:2px"><span style="color:#6b7280;font-size:9px">'+esc(e.ts)+'</span> '+icon+' '+tag+esc(e.text.slice(0,150))+'</div>';
-      }
-      html+='</div>';
+  // ── 模型视角：完整上下文重建 ──
+  if(_lastSessionInstr||(_lastDisplayTranscript&&_lastDisplayTranscript.length)){
+    html+='<div style="border-top:1px solid #374151;padding-top:8px">';
+    html+='<div style="color:#a78bfa;font-size:10px;margin-bottom:6px;font-weight:bold">Model Context (模型视角完整上下文)</div>';
+    // [System] instructions
+    if(_lastSessionInstr){
+      html+='<div style="margin-bottom:6px;padding:6px 8px;background:#1e1b2e;border-radius:4px;border-left:3px solid #a78bfa">';
+      html+='<div style="color:#a78bfa;font-size:9px;margin-bottom:2px">[System]</div>';
+      html+='<pre style="color:#c4b5fd;margin:0;white-space:pre-wrap;font-size:11px">'+esc(_lastSessionInstr)+'</pre></div>';
     }
+    // 对话历史
+    if(_lastDisplayTranscript&&_lastDisplayTranscript.length){
+      const filtered=_lastDisplayTranscript.filter(x=>x.seq<=_modalDtSeq);
+      for(const e of filtered){
+        if(e.role==='user'){
+          const who=e.name||e.pid||'?';
+          html+='<div style="margin-bottom:4px;padding:4px 8px;background:#172033;border-radius:4px;border-left:3px solid #60a5fa">';
+          html+='<div style="color:#60a5fa;font-size:9px">[User] <span style="color:#6b7280">'+esc(e.ts)+' '+esc(who)+'</span></div>';
+          html+='<div style="color:#93c5fd;font-size:11px">'+esc(e.text)+'</div></div>';
+        }else if(e.role==='tool_call'){
+          html+='<div style="margin-bottom:4px;padding:4px 8px;background:#1a1a1a;border-radius:4px;border-left:3px solid #f59e0b">';
+          html+='<div style="color:#f59e0b;font-size:9px">[ToolCall] <span style="color:#6b7280">'+esc(e.ts)+'</span></div>';
+          html+='<div style="color:#fbbf24;font-size:11px;font-family:monospace">'+esc(e.text)+'</div></div>';
+        }else{
+          html+='<div style="margin-bottom:4px;padding:4px 8px;background:#0f2922;border-radius:4px;border-left:3px solid #34d399">';
+          html+='<div style="color:#34d399;font-size:9px">[Assistant] <span style="color:#6b7280">'+esc(e.ts)+'</span></div>';
+          html+='<div style="color:#6ee7b7;font-size:11px">'+esc(e.text)+'</div></div>';
+        }
+      }
+    }
+    // 工具定义摘要
+    html+='<div style="margin-top:6px;padding:4px 8px;background:#1a1a2e;border-radius:4px;border-left:3px solid #6b7280">';
+    html+='<div style="color:#6b7280;font-size:9px">[Tools]</div>';
+    html+='<div style="color:#9ca3af;font-size:10px">nod, shake_head, look_left/right/up/down, wiggle_antennas, tilt_head, end_session, take_snapshot, identify_pointed_object, remember_fact, forget_fact, clear_memory, confirm_clear</div></div>';
+    html+='</div>';
   }
   $('pb-body').innerHTML=html;
   $('payload-modal').classList.add('open');
@@ -1177,7 +1185,7 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
             with st.lock:
                 data["session_instructions"] = st.dbg_session_instructions
                 data["conversation_log"] = {k: v[-20:] for k, v in st.conversation_log.items()}
-                data["display_transcript"] = st.display_transcript[-50:]
+                data["display_transcript"] = st.display_transcript[-100:]
             body = json.dumps(data, ensure_ascii=False, cls=_NumpyEncoder).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")

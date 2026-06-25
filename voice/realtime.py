@@ -149,7 +149,7 @@ class ChatCallback(OmniRealtimeCallback):
                             if self.dialog:
                                 threading.Thread(target=self.dialog.save_summary,
                                                  args=(_log_pid, _snap), daemon=True).start()
-                            log(f"📝 上下文过长，自动触发摘要({_log_pid[:12]}, ~{int(_est_tok)} tok)")
+                            log(f"📝 上下文过长，自动触发 consolidation({_log_pid[:12]}, ~{int(_est_tok)} tok)")
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
@@ -157,6 +157,8 @@ class ChatCallback(OmniRealtimeCallback):
                     st.resp_audio_count = 0
                     st.fc_seen_this_resp = False
                     st.last_interaction_at = now
+                    st.resp_snapshot_pid = st.current_person_id
+                    st.resp_snapshot_name = st.current_person_name
                     _dt_seq = st.display_transcript_seq
                 if _st_mod._current_turn is not None:
                     _st_mod._current_turn["dt_seq"] = _dt_seq
@@ -164,9 +166,19 @@ class ChatCallback(OmniRealtimeCallback):
             elif etype == "response.function_call_arguments.done":
                 name = event.get("name", "")
                 call_id = event.get("call_id", "")
+                _fc_args = event.get("arguments", "")
                 with st.lock:
                     st.fc_seen_this_resp = True
                     st.fc_gen = st.play_gen
+                    st.display_transcript_seq += 1
+                    st.display_transcript.append({
+                        "seq": st.display_transcript_seq,
+                        "ts": time.strftime("%H:%M:%S"),
+                        "role": "tool_call",
+                        "text": f"{name}({_fc_args})",
+                        "pid": st.resp_snapshot_pid or st.current_person_id or "_unknown",
+                        "name": st.resp_snapshot_name or st.current_person_name,
+                    })
                 log(f"🤖 模型调用工具: {name}")
                 if name == "take_snapshot":
                     with st.lock:
@@ -199,7 +211,7 @@ class ChatCallback(OmniRealtimeCallback):
                     self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "judge"})
                 elif name in ("remember_fact", "forget_fact"):
                     with st.lock:
-                        pid = st.current_person_id
+                        pid = st.resp_snapshot_pid or st.current_person_id
                     if pid is None:
                         result = "当前没有识别到用户身份,无法存储记忆。"
                     else:
@@ -209,24 +221,24 @@ class ChatCallback(OmniRealtimeCallback):
                         except (json.JSONDecodeError, TypeError):
                             args_dict = {}
                         result = self.memory_mgr.handle_tool_call(pid, name, args_dict)
+                        with st.lock:
+                            st.identity_injected = False
+                            st.identity_injected_pid = None
                         if name == "remember_fact":
-                            with st.lock:
-                                st.identity_injected = False
-                                st.identity_injected_pid = None
-                            if args_dict.get("key") == "name":
-                                new_name = args_dict.get("value")
-                                if new_name and self.id_recognizer is not None:
+                            new_name = args_dict.get("name")
+                            if new_name:
+                                self.memory_mgr.set_name(pid, new_name)
+                                if self.id_recognizer is not None:
                                     self.id_recognizer.db.set_name(pid, new_name)
-                                    with st.lock:
-                                        st.current_person_name = new_name
-                                    if self.owner_mgr is not None and not self.owner_mgr.has_owner():
-                                        if self.owner_mgr.try_claim(pid, new_name):
-                                            log(f"👑 认主成功: {new_name} ({pid})")
+                                with st.lock:
+                                    st.current_person_name = new_name
+                                if self.owner_mgr is not None and not self.owner_mgr.has_owner():
+                                    if self.owner_mgr.try_claim(pid, new_name):
+                                        log(f"👑 认主成功: {new_name} ({pid})")
                         elif name == "forget_fact":
-                            with st.lock:
-                                st.identity_injected = False
-                                st.identity_injected_pid = None
-                            if "name" in args_dict.get("key", "").lower():
+                            keyword = args_dict.get("keyword", "")
+                            if "名" in keyword or "name" in keyword.lower():
+                                self.memory_mgr.set_name(pid, None)
                                 if self.id_recognizer is not None:
                                     self.id_recognizer.db.set_name(pid, None)
                                 with st.lock:
@@ -295,8 +307,8 @@ class ChatCallback(OmniRealtimeCallback):
                     _atext = _ACTION_TAG_RE.sub("", _atext).strip()
                 if _atext:
                     with st.lock:
-                        _log_pid = st.current_person_id or "_unknown"
-                        _log_name = st.current_person_name
+                        _log_pid = st.resp_snapshot_pid or st.current_person_id or "_unknown"
+                        _log_name = st.resp_snapshot_name or st.current_person_name
                         st.display_transcript_seq += 1
                         st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "assistant", "text": _atext, "pid": _log_pid, "name": _log_name})
                         if len(st.display_transcript) > 100:
@@ -320,6 +332,9 @@ class ChatCallback(OmniRealtimeCallback):
                 fire_rc = False
                 with st.lock:
                     st.in_flight = max(0, st.in_flight - 1)
+                    st.resp_snapshot_pid = None
+                    st.resp_snapshot_name = None
+                    st.last_interaction_at = now
                     if (
                         st.fc_seen_this_resp
                         and st.resp_audio_count == 0
@@ -401,7 +416,7 @@ class RealtimeDialog:
         return None
 
     def close_session(self):
-        """断开 WS、清身份状态、触发摘要。"""
+        """断开 WS、清身份状态、触发 consolidation（遍历所有人的 conv_log）。"""
         st = self.st
         c = self.conv
         if c is not None:
@@ -412,10 +427,8 @@ class RealtimeDialog:
         self.callback.conv = None
         self.conv = None
         with st.lock:
-            _close_pid = st.current_person_id
-            _close_log = list(st.conversation_log.get(_close_pid, [])) if _close_pid else []
-            if _close_pid:
-                st.conversation_log.pop(_close_pid, None)
+            _all_logs = dict(st.conversation_log)
+            st.conversation_log.clear()
             st.identity_injected = False
             st.identity_injected_pid = None
             st.current_person_id = None
@@ -425,9 +438,11 @@ class RealtimeDialog:
             if st.clear_workflow is not None:
                 st.clear_workflow = None
                 st.clear_lock = False
-        if _close_log and len(_close_log) >= 2 and self.memory_mgr and not self.no_memory:
-            threading.Thread(target=self.save_summary,
-                             args=(_close_pid, _close_log), daemon=True).start()
+        if self.memory_mgr and not self.no_memory:
+            for _pid, _log in _all_logs.items():
+                if _pid != "_unknown" and len(_log) >= 2:
+                    threading.Thread(target=self.save_summary,
+                                     args=(_pid, _log), daemon=True).start()
         if _st_mod._current_turn is not None:
             _st_mod._current_turn["end_ts"] = time.strftime("%H:%M:%S")
             _st_mod._current_turn["end_mono"] = time.monotonic()
@@ -479,27 +494,56 @@ class RealtimeDialog:
             return False
 
     def save_summary(self, pid: str, conv_log: list):
-        """后台线程：用廉价模型做对话摘要，存入 MemoryManager。"""
+        """后台线程：会话后 consolidation — 一次 LLM 调用同时生成 entity memory + episodic memory。"""
         try:
             text = "\n".join(f"{'用户' if r == 'user' else '小艺'}: {t}"
                              for r, t in conv_log if t and t.strip())
             if len(text) < 20:
                 return
+            current_facts = self.memory_mgr.get_facts(pid)
+            current_name = self.memory_mgr.get_name(pid)
+            facts_str = json.dumps(current_facts, ensure_ascii=False) if current_facts else "[]"
+            prompt = (
+                "你是记忆管理助手。仔细阅读对话，提取关于用户的所有个人信息。\n\n"
+                f"当前用户名字：{current_name or '未知'}\n"
+                f"已有记忆：{facts_str}\n\n"
+                f"对话内容：\n{text[-4000:]}\n\n"
+                "任务：\n"
+                "1. facts = 合并已有记忆 + 对话中发现的新信息。每条是中文短句。\n"
+                "   - 重点提取：爱好、喜好、职业、年龄、习惯、观点、提到的人/事物\n"
+                "   - 用户说'我喜欢X/我爱X/我常X' → 加入 facts\n"
+                "   - 如果新信息与旧 fact 矛盾，保留新的、去掉旧的\n"
+                "   - 不要把名字放进 facts（名字在独立字段管理）\n"
+                "   - 不要写 '名字是XXX' '叫XXX' 这样的 fact\n"
+                "2. episode = 这次对话的结构化事件\n"
+                "   - topic: 具体说聊了什么，不要太笼统\n"
+                "   - highlights: 关键信息点（每条是完整短句）\n\n"
+                "只输出JSON：\n"
+                '{"name":"用户名字(对话中提到则更新,否则保留原名,未知则null)",'
+                '"facts":["短句1","短句2"],'
+                '"episode":{"topic":"具体话题","highlights":["要点1"],"mood":"engaged/casual/emotional/tense"}}'
+            )
             resp = self.oai.chat.completions.create(
                 model=SUMMARY_MODEL,
                 messages=[
-                    {"role": "system",
-                     "content": "用一两句话概括这段对话的要点，不超过100字。只输出摘要文本。"},
-                    {"role": "user", "content": text[-3000:]},
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": "请根据上述信息生成记忆JSON。"},
                 ],
                 temperature=0.3,
             )
-            summary = resp.choices[0].message.content.strip()
-            if summary:
-                self.memory_mgr.save_conversation_summary(pid, summary)
-                log(f"📝 对话摘要已保存 ({pid[:12]}): {summary[:50]}")
-                with self.st.lock:
-                    if self.st.current_person_id == pid:
-                        self.st.identity_injected = False
+            raw = resp.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            result = json.loads(raw)
+            new_facts = result.get("facts", current_facts)
+            new_name = result.get("name")
+            episode = result.get("episode")
+            self.memory_mgr.consolidate_facts(pid, new_facts, new_name)
+            if episode:
+                self.memory_mgr.save_episode(pid, episode)
+            log(f"📝 记忆 consolidation 完成 ({pid[:12]}): {len(new_facts)} facts, episode={episode.get('topic', '')[:30] if episode else 'none'}")
+            with self.st.lock:
+                if self.st.current_person_id == pid:
+                    self.st.identity_injected = False
         except Exception as e:
-            log(f"⚠ 对话摘要失败({pid[:12]}):{e}")
+            log(f"⚠ 记忆 consolidation 失败({pid[:12]}):{e}")

@@ -339,11 +339,9 @@ class IdentityRecognizer:
         self._last_id = None
         self._last_t = 0.0
         self._pending_new: dict[str, list[np.ndarray]] = {}
-        self._merged_map: dict[str, str] = {}
-        merged = self.db.auto_merge()
-        if merged:
-            self._merged_map.update(merged)
-            print(f"[identity] 启动合并: {len(merged)} 对重复人脸已合并")
+        self.startup_merged: dict[str, str] = self.db.auto_merge()
+        if self.startup_merged:
+            print(f"[identity] 启动合并: {len(self.startup_merged)} 对重复人脸已合并")
 
     def _face_key(self, box: tuple[int, int, int, int]) -> str:
         cx, cy = box[0] + box[2] // 2, box[1] + box[3] // 2

@@ -280,6 +280,8 @@ class State:
         self.current_is_owner: bool = False
         self.identity_injected = False
         self.identity_injected_pid: str | None = None
+        self.resp_snapshot_pid: str | None = None
+        self.resp_snapshot_name: str | None = None
         self.vis_ready = False
         self.clear_workflow: dict | None = None
         self.clear_lock: bool = False

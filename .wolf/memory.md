@@ -63,3 +63,93 @@
 | 15:49 | Session end: 6 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 5 reads | ~52801 tok |
 | 15:53 | Session end: 6 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 6 reads | ~52801 tok |
 | 15:57 | Session end: 6 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 6 reads | ~52849 tok |
+| 16:12 | Session end: 6 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 6 reads | ~52849 tok |
+| 16:14 | Edited voice/d01_realtime_chat.py | modified _detect_new_speaker() | ~165 |
+| 16:14 | Edited voice/d01_realtime_chat.py | modified log() | ~485 |
+| 16:15 | Session end: 8 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 6 reads | ~53641 tok |
+| 16:35 | Edited voice/d01_realtime_chat.py | modified _detect_new_speaker() | ~164 |
+| 16:35 | Edited voice/d01_realtime_chat.py | modified log() | ~574 |
+| 16:36 | Session end: 10 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 7 reads | ~54345 tok |
+| 16:38 | Edited voice/d01_realtime_chat.py | added 2 condition(s) | ~600 |
+| 16:38 | Session end: 11 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 7 reads | ~54945 tok |
+| 16:44 | Edited voice/d01_realtime_chat.py | 15→17 lines | ~278 |
+| 16:45 | Edited voice/d01_realtime_chat.py | 17→16 lines | ~268 |
+| 16:45 | Edited voice/d01_realtime_chat.py | 1→2 lines | ~20 |
+| 16:46 | Edited voice/d01_realtime_chat.py | inline fix | ~27 |
+| 16:46 | Session end: 15 writes across 4 files (todo.md, realtime.py, debug_server.py, d01_realtime_chat.py) | 7 reads | ~55652 tok |
+| 16:59 | Created ../../../../.claude/plans/rustling-booping-biscuit.md | — | ~1828 |
+
+## Session: 2026-06-25 16:59
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 17:50 | Created ../../../../.claude/plans/rustling-booping-biscuit.md | — | ~1382 |
+| 17:55 | Created ../../../../.claude/plans/rustling-booping-biscuit.md | — | ~1544 |
+| 18:18 | Session end: 2 writes across 1 files (rustling-booping-biscuit.md) | 2 reads | ~28002 tok |
+| 18:20 | Created ../../../../.claude/plans/rustling-booping-biscuit.md | — | ~2265 |
+| 18:24 | Edited identity/recognizer.py | modified __init__() | ~117 |
+| 18:25 | Edited voice/d01_realtime_chat.py | modified items() | ~130 |
+| 18:27 | Created memory/manager.py | — | ~5321 |
+| 18:28 | Edited memory/manager.py | added 1 import(s) | ~37 |
+| 18:28 | Edited memory/manager.py | 2→2 lines | ~24 |
+
+## Session: 2026-06-25 18:31
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 18:34 | Edited voice/realtime.py | modified has_owner() | ~431 |
+| 18:34 | Edited voice/realtime.py | modified save_summary() | ~696 |
+| 18:35 | Edited voice/realtime.py | "📝 上下文过长，自动触发摘要({_log_pid" → "📝 上下文过长，自动触发 consolidati" | ~30 |
+| 18:35 | Edited voice/realtime.py | "断开 WS、清身份状态、触发摘要。" → "断开 WS、清身份状态、触发 consolidat" | ~13 |
+| 18:35 | Edited voice/d01_realtime_chat.py | inline fix | ~15 |
+| 18:36 | Created PROJECT_STATE.md | — | ~688 |
+| 18:37 | Edited docs/FEATURE_INVENTORY.md | 21→21 lines | ~518 |
+| 18:39 | Session end: 7 writes across 4 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md) | 4 reads | ~42503 tok |
+| 20:28 | Edited memory/manager.py | inline fix | ~18 |
+| 20:29 | Session end: 8 writes across 5 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md, manager.py) | 5 reads | ~47855 tok |
+| 20:32 | Session end: 8 writes across 5 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md, manager.py) | 5 reads | ~47855 tok |
+| 20:35 | Session end: 8 writes across 5 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md, manager.py) | 5 reads | ~47855 tok |
+| 20:37 | Edited voice/d01_realtime_chat.py | 5→5 lines | ~71 |
+| 20:37 | Session end: 9 writes across 5 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md, manager.py) | 5 reads | ~47930 tok |
+| 20:50 | Session end: 9 writes across 5 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, FEATURE_INVENTORY.md, manager.py) | 6 reads | ~47930 tok |
+| 21:02 | Edited voice/d01_realtime_chat.py | 8→11 lines | ~198 |
+| 21:04 | Edited voice/config.py | expanded (+7 lines) | ~140 |
+| 21:05 | Edited voice/realtime.py | modified close_session() | ~312 |
+
+## Session: 2026-06-25 21:06
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 21:09 | Edited voice/realtime.py | 16→20 lines | ~273 |
+| 21:10 | Edited voice/d01_realtime_chat.py | 5→7 lines | ~104 |
+| 21:11 | Edited voice/d01_realtime_chat.py | added 1 condition(s) | ~510 |
+
+## Session: 2026-06-25 (continued — context resumed)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 21:20 | Fix #22: close_session 遍历所有 pid | voice/realtime.py | 多人 conv_log 不再丢失 | ~400 |
+| 21:22 | Fix #23: consolidation prompt 增强 | voice/realtime.py | 明确提取新 facts + 排除 name + 扩 4000 字符 | ~350 |
+| 21:24 | Fix #24: 身份切换加冷却 + 提高确认次数 | voice/d01_realtime_chat.py | CONFIRM_N=3, COOLDOWN=6s | ~300 |
+| 21:12 | Edited PROJECT_STATE.md | 1→6 lines | ~79 |
+| 21:12 | Session end: 4 writes across 3 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md) | 3 reads | ~33687 tok |
+| 21:16 | Session end: 4 writes across 3 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md) | 4 reads | ~51256 tok |
+| 21:22 | Session end: 4 writes across 3 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md) | 4 reads | ~51256 tok |
+| 21:26 | Edited voice/realtime.py | 11→13 lines | ~182 |
+| 21:26 | Edited voice/realtime.py | 11→11 lines | ~232 |
+| 21:26 | Edited voice/realtime.py | modified in() | ~49 |
+| 21:27 | Edited voice/state.py | 2→4 lines | ~56 |
+| 21:28 | Edited voice/realtime.py | 3→5 lines | ~61 |
+| 21:29 | Edited voice/debug_server.py | modified if() | ~624 |
+| 21:29 | Edited voice/realtime.py | expanded (+10 lines) | ~255 |
+| 21:30 | Edited voice/debug_server.py | added 1 condition(s) | ~356 |
+| 21:30 | Edited voice/debug_server.py | 50 → 100 | ~21 |
+| 21:35 | Fix #20: response.created 身份快照 | voice/realtime.py, voice/state.py | 回复期间 pid 不再跟着人脸线程跳 | ~400 |
+| 21:40 | Fix #25: Dashboard 上下文重建视图 | voice/debug_server.py, voice/realtime.py | modal 里展示 [System]+[User]+[ToolCall]+[Assistant]+[Tools] 完整模型视角 | ~500 |
+| 21:31 | Edited PROJECT_STATE.md | 1→3 lines | ~124 |
+| 21:32 | Edited memory/manager.py | 3→3 lines | ~39 |
+| 21:32 | Session end: 15 writes across 6 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, state.py, debug_server.py) | 6 reads | ~61951 tok |
+| 21:34 | Session end: 15 writes across 6 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, state.py, debug_server.py) | 6 reads | ~61951 tok |
+| 21:40 | Edited voice/d01_realtime_chat.py | 6→6 lines | ~86 |
+| 21:40 | Edited voice/realtime.py | 4→5 lines | ~68 |
+| 21:41 | Session end: 17 writes across 6 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, state.py, debug_server.py) | 7 reads | ~62273 tok |

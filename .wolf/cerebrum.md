@@ -20,7 +20,9 @@
 - **视觉后端:** YuNet 默认(100%检出率), MediaPipe 可选(--face-mp), ArcFace 身份识别
 - **语音协议:** Qwen-Omni-Realtime WebSocket, update_session 做记忆注入(整体替换), 非 create_item(只增不删)
 - **状态机:** 9 态 FSM, TRACKING 态是核心对话状态, 方向门控只在此状态生效
-- **记忆存储:** per-person JSON facts (`data/memories/<pid>.json`), 对话摘要(conversation_summaries)
+- **记忆存储:** 认知记忆架构(Entity Memory + Episodic Memory + Working Memory 注入)
+- **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `list[str]` 中文短句
+- **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+draft facts 生成最终 entity memory + episodic memory
 - **清华镜像:** UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ 所有 pip/uv 安装必用
 
 ## Do-Not-Repeat
@@ -117,13 +119,25 @@
 
 ### 分人对话摘要 + 音频闸门 (2026-06-24)
 - conversation_log 从 `list[tuple]` 改为 `dict[str, list]`，key=pid，按人分桶
-- close_session 时提取当前人的对话桶，后台线程用 SUMMARY_MODEL(qwen-turbo) 做摘要
-- MemoryManager 新增 `conversation_summaries` 字段(保留最近 3 条)，get_prompt 注入上次摘要
+- close_session 时提取当前人的对话桶，后台线程做 consolidation
 - 音频闸门仅在二次唤醒切人+DOA 声源偏移>SWITCH_AWAY_DEG 时触发，不是每次 close_session
 - 闸门关闭期间音频缓存为 b64 字符串，身份确认后 flush 全部缓存帧
-- 上下文过长自动摘要: 每次 user transcript append 后估算 token(中文字数×1.5)，超过 CONV_SUMMARY_THRESHOLD(2000) 自动触发后台摘要+清桶
-- 摘要完成后如果仍在和该人对话，设 identity_injected=False 触发下一帧重新注入
+- 上下文过长自动 consolidation: 每次 user transcript append 后估算 token(中文字数×1.5)，超过 CONV_SUMMARY_THRESHOLD(2000) 自动触发后台 consolidation+清桶
+- consolidation 完成后如果仍在和该人对话，设 identity_injected=False 触发下一帧重新注入
 - Dashboard: 事件 payload modal 增加 Session Instructions + Memory Prompt + Conversation Log 显示
+
+### 认知记忆架构重构 (2026-06-25)
+- 问题: facts 用 `{key: value}` dict，注入像机器码; conversation_summaries 是摘要不是事件; 记忆只靠实时 function call 无会话后复盘
+- facts 格式: `list[str]` 中文短句 + `replaces` 关键词替换 + `keyword` 模糊删除(优于 dict 4 种方案)
+- Entity Memory ≠ Semantic Memory: Entity 是直接提取的事实("喜欢猫"), Semantic 是从 episodes 抽象的知识("持续探索 AGI")(未实现)
+- Episodic Memory: 结构化事件(topic/highlights/mood), 不是摘要。存"发生了什么"
+- Session Consolidation: 会话后一次 LLM 调用同时生成 entity memory(consolidated facts) + episodic memory
+  - 输入: 全量对话 transcript + 当前 facts(含 draft notes) + 当前 name
+  - LLM 做合并/去重/去过时, 输出干净的 facts list + 结构化 episode
+  - 兜底机制: 即使模型会话中漏调 remember_fact, consolidation 从全量对话捕获
+- remember_fact 保留作为 draft notes: 会话中实时记录, 实时存盘, identity_injected=False 触发重注入
+- 旧数据自动迁移: load_memory 检测 facts 是 dict → _migrate_legacy_facts 翻译映射表
+- auto_merge → merge_memories: FaceDB.auto_merge 返回 {drop: keep}, d01 初始化遍历调用 merge_memories
 
 ### 方向门控白名单化 (2026-06-25)
 - 问题: 黑名单门控(逐个豁免状态)导致唤醒时 DOA 残留关门 → 纯静音 → 服务端断连
