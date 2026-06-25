@@ -154,27 +154,27 @@
 | F12.12 _cross_sim | `identity/recognizer.py:FaceDB._cross_sim` L215-228 | 两人间所有 embedding 对的最大 cosine |
 | F12.13 _face_key 网格 80px | `identity/recognizer.py:IdentityRecognizer._face_key` L304-305 | 80px 量化格防止边界碎片化 |
 
-### F13 — 记忆管理
+### F13 — 认知记忆管理(Cognitive Memory Architecture)
 
 | 子特性 | 代码位置 | 说明 |
 |--------|----------|------|
-| F13.1 per-person LWW facts | `memory/manager.py:MemoryManager` | dict{key: value} + history + JSON 持久化 |
-| F13.2 remember_fact 工具 | `config:QWEN_TOOLS[0]` + `ChatCallback.on_event` L406-431 | 模型主动调用存信息 |
-| F13.3 clear_memory 工具 | `config:QWEN_TOOLS[1]` + `memory/manager.py:clear_all` | 需用户口头确认 |
-| F13.4 forget_fact 工具 | `config:QWEN_TOOLS[2]` + `memory/manager.py:forget_fact` | 模糊匹配 key 删单条 |
-| F13.5 记忆注入 Qwen session | `d01:main()` L1952-1969 | 首次识别 → get_prompt → create_item(system) |
-| F13.6 延迟注入 | `d01:main()` L1980-1997 | 唤醒时识别未出 → 后续补注入 |
-| F13.7 退出摘要 | `d01:summarize_conversation` L248-278 | qwen-turbo 摘要 → save_profile |
-| F13.8 启动加载记忆 | `d01:main()` L1741-1756 | profile + memories → 拼入 INSTRUCTIONS |
-| F13.9 `--no-memory` | `d01:main()` L1667 | 关记忆系统, 剥离 remember_fact/clear_memory 工具 |
-| F13.10 merge_memories | `memory/manager.py:merge_memories` L165-174 | 人脸合并时迁移 facts(keep 优先不覆盖) |
+| F13.1 Entity Memory (facts) | `memory/manager.py:MemoryManager` | `list[str]` 中文短句 + history + JSON 持久化 |
+| F13.2 remember_fact 工具 | `memory/manager.py:QWEN_TOOLS[0]` + `realtime.py:on_event` | `fact`(中文短句) + `replaces`(关键词替换) + `name`(自报姓名) |
+| F13.3 clear_memory 工具 | `memory/manager.py:QWEN_TOOLS[1]` + `memory/safety.py` | 安全删除工作流(多步验证+备份) |
+| F13.4 forget_fact 工具 | `memory/manager.py:QWEN_TOOLS[3]` + `realtime.py:on_event` | `keyword` 模糊匹配删除 |
+| F13.5 Working Memory 注入 | `memory/manager.py:get_prompt` + `realtime.py:update_memory` | Entity + Episodic 组装 → update_session instructions |
+| F13.6 延迟注入 | `d01:main()` | 唤醒时识别未出 → 后续补注入 |
+| F13.7 Session Consolidation | `realtime.py:save_summary` | 会话后 LLM 复盘: 全量对话 + draft facts → 最终 entity memory + episodic memory |
+| F13.8 Episodic Memory | `memory/manager.py:save_episode` | 结构化事件(topic/highlights/mood), 保留最近 10 条 |
+| F13.9 `--no-memory` | `d01:main()` | 关记忆系统, 剥离 remember_fact/clear_memory 工具 |
+| F13.10 merge_memories | `memory/manager.py:merge_memories` | 人脸合并时迁移 facts(去重) + episodes(合并排序) |
 | F13.11 owner 权限校验 | `memory/manager.py:clear_all/forget_fact` | actor_pid + OwnerManager.can_delete_memory 校验 |
-| F13.12 非 owner 只删自己 | `memory/manager.py:handle_tool_call` | actor_pid=当前人, 非 owner 删他人 → 拒绝 |
-| F13.13 分人对话摘要 | `d01:_save_conversation_summary` + `memory/manager.py:save_conversation_summary` | close_session 时后台线程用 qwen-turbo 摘要当前人对话，存入 conversation_summaries(保留最近3条) |
+| F13.12 consolidate_facts | `memory/manager.py:consolidate_facts` | LLM 复盘后整体替换 facts 列表 |
+| F13.13 auto_merge 同步 | `d01:main()` 初始化 + `identity/recognizer.py:startup_merged` | FaceDB 合并碎片后自动调用 merge_memories 同步记忆 |
 | F13.14 conversation_log 分桶 | `state.py:State.conversation_log` | `dict[str, list]` 按 pid 分桶，`"_unknown"` 暂存未识别人 |
-| F13.15 摘要注入 session | `memory/manager.py:get_prompt` | 最近一条摘要拼入 "你们上次聊到：…"，update_session 注入 |
-| F13.16 上下文过长自动摘要 | `d01` user transcript append 后 | 估算 token(字数×1.5) > CONV_SUMMARY_THRESHOLD(2000) 自动触发后台摘要+清桶 |
-| F13.17 退出时遍历摘要 | `d01:main()` 退出块 | 遍历所有剩余 pid 桶，逐个调 _save_conversation_summary |
+| F13.15 上下文过长自动 consolidation | `realtime.py:on_event` user transcript | 估算 token > CONV_SUMMARY_THRESHOLD 自动触发后台 consolidation + 清桶 |
+| F13.16 退出时遍历 consolidation | `d01:main()` 退出块 | 遍历所有剩余 pid 桶，逐个调 save_summary (consolidation) |
+| F13.17 旧数据自动迁移 | `memory/manager.py:load_memory` | 检测旧 dict facts 格式 → 自动转换为 list[str] + episodes |
 
 ### F21 — 音频闸门(切人身份保护)
 

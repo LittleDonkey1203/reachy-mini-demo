@@ -406,8 +406,10 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
     _id_last_t = 0.0           # 上次身份识别时刻(限频)
     _id_switch_candidate = None  # 待确认的新人 pid(防止低 sim 抖动切换)
     _id_switch_count = 0         # 连续匹配新人的次数
+    _id_switch_last_t = 0.0      # 上次切人时刻(切换冷却)
     ID_SWITCH_HIGH_SIM = 0.65    # sim 高于此值立即切换(可信)
-    ID_SWITCH_CONFIRM_N = 2      # sim 低于 HIGH_SIM 时需连续 N 次才切换
+    ID_SWITCH_CONFIRM_N = 3      # sim 低于 HIGH_SIM 时需连续 N 次才切换
+    ID_SWITCH_COOLDOWN_S = 6.0   # 切人后冷却时间，防止来回弹
     n_det = 0
     n_hit = 0
     infer_acc: list[float] = []
@@ -459,7 +461,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                         _rgb_small, face_box, face_kps)
                     if pid is not None:
                         if _memory_mgr is not None:
-                            mem_name = _memory_mgr.get_facts(pid).get("name")
+                            mem_name = _memory_mgr.get_name(pid)
                             if mem_name:
                                 pname = mem_name
                         # 身份稳定性:防止低 sim 抖动切换
@@ -470,6 +472,8 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                             accept = True
                             _id_switch_candidate = None
                             _id_switch_count = 0
+                        elif (now - _id_switch_last_t) < ID_SWITCH_COOLDOWN_S:
+                            pass
                         elif sim >= ID_SWITCH_HIGH_SIM:
                             accept = True
                             _id_switch_candidate = None
@@ -492,6 +496,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                 if old_pid != pid:
                                     st.identity_injected = False
                                     st.identity_injected_pid = None
+                                    _id_switch_last_t = now
                             tag = "NEW" if is_new else "KNOWN"
                             log(f"🆔 [{tag}] {pname or pid[:12]} (sim={sim:.2f})")
                     # ── 安全删除工作流: 身份验证 ──
@@ -1407,6 +1412,22 @@ def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> Non
         time.sleep(dt)
 
 
+# ─────────── 说话人切换判断(可替换为声纹等方案) ───────────
+def _detect_new_speaker(st: State):
+    """音频信号判断唤醒词是否来自不同说话人(非当前跟踪者)。
+    返回 (is_new, info)。当前实现: DOA 方向; 后续可替换为声纹比对。
+    - DOA 确信 + 偏离 > SWITCH_AWAY_DEG → True(确定是新人)
+    - DOA 确信 + 偏离小 → False(确定是同一个人)
+    - DOA 不可用/不确信 → None(无法判断,交给调用者决定)"""
+    with st.lock:
+        sr, sat, sconf = st.doa_resid_stable, st.doa_at, st.doa_confident
+    fresh = sr is not None and (time.monotonic() - sat) < DOA_GATE_FRESH_S
+    info = {"resid": sr, "confident": sconf, "fresh": fresh}
+    if not fresh or not sconf:
+        return None, info
+    return abs(sr) > SWITCH_AWAY_DEG, info
+
+
 # ───────────────────────── 主流程 ─────────────────────────
 def main() -> int:
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
@@ -1452,6 +1473,10 @@ def main() -> int:
     _id_recognizer = IdentityRecognizer()
     _memory_mgr = MemoryManager(owner_mgr=_owner_mgr,
                                  face_db=_id_recognizer.db)
+    if _id_recognizer.startup_merged:
+        for drop_pid, keep_pid in _id_recognizer.startup_merged.items():
+            _memory_mgr.merge_memories(keep_pid, drop_pid)
+        log(f"🧠 记忆合并完成: {len(_id_recognizer.startup_merged)} 对")
     log(f"🆔 身份识别就绪 (特征库 {len(_id_recognizer.db.persons)} 人)")
     play_q: "queue.Queue" = queue.Queue()
     motion_q: "queue.Queue" = queue.Queue()
@@ -1584,6 +1609,7 @@ def main() -> int:
             rms_t = time.monotonic()
             t_run0 = time.monotonic()
             greet_i = 0   # 唤醒招呼轮换索引
+            greet_sent_at = 0.0
             prev_gate_open = True   # M1.5-a 门控状态(只在切换时打日志)
             last_switch = -1e9      # M1.5-b 上次切换时刻(冷却)
             try:
@@ -1639,17 +1665,16 @@ def main() -> int:
                         else:
                             time.sleep(0.01)
                         continue
-                    # M1.5-b 二次唤醒切换:engaged 收到"小艺" → 立即切换转向新人。
-                    # behavior 负责转向(写 st.state),main 这里只置 flag + 丢弃A重开会话(给B干净对话)。
+                    # M1.5-b 二次唤醒切换:
+                    # TODO: _detect_new_speaker 成熟后恢复过滤,当前一律允许切换
                     if wake and not no_switch and (time.monotonic() - last_switch) > SWITCH_COOLDOWN_S:
                         if st.clear_lock:
                             pass   # 安全删除确认期间不允许切换
                         else:
-                            nowk = time.monotonic()
+                            last_switch = time.monotonic()
                             with st.lock:
                                 _sr, _sat, _sconf = st.doa_resid_stable, st.doa_at, st.doa_confident
-                            _sfresh = _sr is not None and (nowk - _sat) < DOA_GATE_FRESH_S
-                            last_switch = nowk
+                            _sfresh = _sr is not None and (time.monotonic() - _sat) < DOA_GATE_FRESH_S
                             with st.lock:
                                 st.switch_request = {"resid": _sr, "confident": _sconf, "fresh": _sfresh}
                             if vis_frame_q is not None:
@@ -1661,7 +1686,6 @@ def main() -> int:
                                      else f"粗方向 resid {_sr:+.0f}°" if (_sfresh and _sr is not None)
                                      else "无方向")
                             log(f"🔀 二次唤醒 → 切换转向新人({_hint});丢弃A、重开会话")
-                            # 音频闸门：仅在声源方向大幅变化时关闸（避免同位置误触发）
                             if _sfresh and _sconf and _sr is not None and abs(_sr) > SWITCH_AWAY_DEG:
                                 with st.lock:
                                     st.audio_gate_closed = True
@@ -1680,7 +1704,7 @@ def main() -> int:
                         if _do_greet:
                             st.greet_now = False
                         _busy = st.in_flight > 0
-                    if _do_greet and not _busy:
+                    if _do_greet and not _busy and (time.monotonic() - greet_sent_at) > 1.0:
                         # 身份+记忆注入:首次识别到人后,用 update_session 嵌入记忆(切人时自动替换旧记忆)
                         with st.lock:
                             _g_pid = st.current_person_id
@@ -1695,15 +1719,19 @@ def main() -> int:
                             log(f"👋 唤醒应答:招呼「{_phrase}」")
                         except Exception as e:
                             log(f"⚠ 唤醒招呼发送失败:{e}")
+                        greet_sent_at = time.monotonic()
                     elif _do_greet and _busy:
                         log("👋 唤醒应答跳过(模型已在回应后续话,不双答)")
                     # 延迟记忆注入:唤醒时身份识别可能还没出结果,识别到后补注入
+                    # 注意:模型正在回复时(in_flight>0)不注入,否则 update_session 只影响下一轮,
+                    # 当前回复仍用旧记忆,导致记忆串人
                     if not no_memory and conv is not None:
                         with st.lock:
                             _late_pid = st.current_person_id
                             _late_pname = st.current_person_name
                             _late_injected = st.identity_injected
-                        if _late_pid and not _late_injected and _memory_mgr is not None:
+                            _late_busy = st.in_flight > 0
+                        if _late_pid and not _late_injected and not _late_busy and _memory_mgr is not None:
                             dialog.update_memory(_late_pid, _late_pname)
                     rms_acc.append(float(np.sqrt(np.mean(mono**2))))
                     # M1.5-a 方向门控:仅 TRACKING(面前有人在对话)时屏蔽其他方向的声音;
@@ -1793,7 +1821,7 @@ def main() -> int:
                     mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.5, body_yaw=0.0)
                 except Exception:
                     pass
-                # M3-c 退出时被动摘要:分人做对话摘要
+                # M3-c 退出时被动 consolidation:分人做记忆复盘
                 if not no_memory and _memory_mgr:
                     with st.lock:
                         _remaining = dict(st.conversation_log)

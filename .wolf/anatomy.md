@@ -1,7 +1,11 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T07:48:56.374Z
-> Files: 53 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T13:32:05.905Z
+> Files: 54 tracked | Anatomy hits: 0 | Misses: 0
+
+## ../../../../.claude/plans/
+
+- `rustling-booping-biscuit.md` — 小艺认知记忆架构重构 (~2123 tok)
 
 ## ./
 
@@ -11,7 +15,7 @@
 - `CLAUDE.md` — OpenWolf (~180 tok)
 - `connect.py` — 连接 Reachy Mini daemon 的统一封装 (~269 tok)
 - `MACOS_SETUP.md` — macOS (Intel) 部署指南 (~1670 tok)
-- `PROJECT_STATE.md` — PROJECT_STATE (~399 tok)
+- `PROJECT_STATE.md` — PROJECT_STATE (~813 tok)
 - `pyproject.toml` — Python project configuration (~234 tok)
 - `README.md` — Project documentation (~1024 tok)
 - `start_daemon.sh` — daemon 启动脚本 (~634 tok)
@@ -63,18 +67,18 @@
 
 ## docs/
 
-- `FEATURE_INVENTORY.md` — 特性清单 & 测试方案 (~7632 tok)
+- `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7674 tok)
 - `MULTI_PERSON_INTRO_PLAN.md` — 多人同框介绍朋友方案 (~2783 tok)
 - `WAKEWORD_PRIORITY_ANALYSIS.md` — 唤醒词 × 人脸锁定 × DOA 优先级分析 (~2615 tok)
 
 ## identity/
 
 - `owner.py` — 主人认定模块(首次交互自动绑定+转让) (~789 tok)
-- `recognizer.py` — YuNet+ArcFace 身份识别+特征库匹配+auto_merge (~6259 tok)
+- `recognizer.py` — 身份识别模块 — YuNet 人脸检测 + arcface 特征提取 + 特征库匹配。 (~6249 tok)
 
 ## memory/
 
-- `manager.py` — 个人记忆管理(短期+LWW持久化+对话摘要) (~4200 tok)
+- `manager.py` — 认知记忆管理 — Entity Memory + Episodic Memory + Working Memory 注入。 (~5341 tok)
 - `safety.py` — 记忆安全删除工作流(身份验证+二次确认) (~1023 tok)
 
 ## perception/
@@ -88,9 +92,9 @@
 
 ## voice/
 
-- `config.py` — 配置常量、工具元数据、prompt 模板 (~3050 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~24688 tok)
-- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17494 tok)
+- `config.py` — 配置常量、工具元数据、prompt 模板。 (~3003 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25065 tok)
+- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17765 tok)
 - `kws.py` — WAKE-01 唤醒词门控(sherpa-onnx) (~991 tok)
-- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~6689 tok)
-- `state.py` — 共享状态容器、日志、OneEuroFilter (~2949 tok)
+- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7377 tok)
+- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2978 tok)

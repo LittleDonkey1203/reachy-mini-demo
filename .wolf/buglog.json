@@ -115,6 +115,134 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-06-25T15:40:46.213460"
+    },
+    {
+      "id": "bug-008",
+      "timestamp": "2026-06-25T10:28:53.860Z",
+      "error_message": "Incorrect value in code",
+      "file": "memory/manager.py",
+      "root_cause": "Had \"你们上次聊过：{topic}。\"",
+      "fix": "Changed to \"你们上次聊过：{topic.rstrip('",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T10:28:53.860Z"
+    },
+    {
+      "id": "bug-009",
+      "timestamp": "2026-06-25T10:34:52.131Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/realtime.py",
+      "root_cause": "9 lines replaced/restructured",
+      "fix": "Rewrote 25→50 lines (9 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T10:34:52.131Z"
+    },
+    {
+      "id": "bug-010",
+      "timestamp": "2026-06-25T10:35:11.465Z",
+      "error_message": "Incorrect value in code",
+      "file": "voice/realtime.py",
+      "root_cause": "Had \"📝 上下文过长，自动触发摘要({_log_pid[:12]}, ~{int(_est_tok)}",
+      "fix": "Changed to \"📝 上下文过长，自动触发 consolidation({_log_pid[:12]}, ~{in",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-25T10:35:22.231Z"
+    },
+    {
+      "id": "bug-011",
+      "timestamp": "2026-06-25T12:28:38.205Z",
+      "error_message": "Incorrect value in code",
+      "file": "memory/manager.py",
+      "root_cause": "Had ')}\"",
+      "fix": "Changed to ')}。\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T12:28:38.205Z"
+    },
+    {
+      "id": "bug-012",
+      "timestamp": "2026-06-25T13:09:01.464Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/realtime.py",
+      "root_cause": "13 lines replaced/restructured",
+      "fix": "Rewrote 16→20 lines (13 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T13:09:01.464Z"
+    },
+    {
+      "id": "bug-013",
+      "timestamp": "2026-06-25T13:26:54.958Z",
+      "error_message": "Wrong reference: current_person_id should be resp_snapshot_pid",
+      "file": "voice/realtime.py",
+      "root_cause": "Used \"current_person_id\" instead of \"resp_snapshot_pid\"",
+      "fix": "Changed current_person_id → resp_snapshot_pid",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T13:26:54.958Z"
+    },
+    {
+      "id": "bug-014",
+      "timestamp": "2026-06-25T13:29:20.108Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/debug_server.py",
+      "root_cause": "17 lines replaced/restructured",
+      "fix": "Rewrote 28→32 lines (17 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T13:29:20.108Z"
+    },
+    {
+      "id": "bug-015",
+      "timestamp": "2026-06-25T13:32:05.928Z",
+      "error_message": "Incorrect value in code",
+      "file": "memory/manager.py",
+      "root_cause": "Had \"自然地运用这些记忆，但不要主动背诵。\"",
+      "fix": "Changed to \"这些记忆仅作为背景知识，只在用户主动提起相关话题时才使用，绝不要主动提起或背诵。\"",
+      "tags": [
+        "auto-detected",
+        "wrong-value",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T13:32:05.928Z"
     }
   ]
 }
