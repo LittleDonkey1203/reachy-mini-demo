@@ -820,7 +820,7 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
             action = st.action_active
             locked = st.face_locked                 # Bug1 修:用迟滞锁定判定,不用瞬时 face_fresh
             last_interact = st.last_interaction_at
-            speaking = now < st.playback_end_estimate
+            speaking = now < st.playback_end_estimate or st.in_flight > 0
         if action:
             phase_t = now  # 手势期间状态计时冻结(手势结束后从当前态继续)
             continue

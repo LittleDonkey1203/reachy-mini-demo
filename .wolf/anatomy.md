@@ -1,6 +1,6 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T13:32:05.905Z
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T13:40:55.546Z
 > Files: 54 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../.claude/plans/
@@ -93,8 +93,8 @@
 ## voice/
 
 - `config.py` — 配置常量、工具元数据、prompt 模板。 (~3003 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25065 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25071 tok)
 - `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17765 tok)
 - `kws.py` — WAKE-01 唤醒词门控(sherpa-onnx) (~991 tok)
-- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7377 tok)
+- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7391 tok)
 - `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2978 tok)

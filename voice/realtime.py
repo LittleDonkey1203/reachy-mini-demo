@@ -334,6 +334,7 @@ class ChatCallback(OmniRealtimeCallback):
                     st.in_flight = max(0, st.in_flight - 1)
                     st.resp_snapshot_pid = None
                     st.resp_snapshot_name = None
+                    st.last_interaction_at = now
                     if (
                         st.fc_seen_this_resp
                         and st.resp_audio_count == 0
