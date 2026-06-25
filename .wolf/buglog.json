@@ -692,6 +692,70 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-24T11:01:35.654Z"
+    },
+    {
+      "id": "bug-044",
+      "timestamp": "2026-06-25T02:55:02.032Z",
+      "error_message": "Significant refactor of ",
+      "file": "../../../../.claude/plans/flickering-brewing-puppy.md",
+      "root_cause": "8 lines replaced/restructured",
+      "fix": "Rewrote 14→58 lines (8 removed)",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "md"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T02:55:02.032Z"
+    },
+    {
+      "id": "bug-045",
+      "timestamp": "2026-06-25T04:02:31.957Z",
+      "error_message": "Significant refactor of ",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "10 lines replaced/restructured",
+      "fix": "Rewrote 31→21 lines (10 removed) | Also: # ── transcript 泄漏标签 → 物理动作兜底 ──; _TAG_TO_ACTION = { | Also: # ── 安全删除工作流 handlers ──; def _handle_clear_memory_intent(st: State, args: d | Also: class KwsGate:; \"\"\"WAKE-01 唤醒门:本地 sherpa-onnx KeywordSpotter(单字\"小艺 | Also: callback = ChatCallback(st, play_q, motion_q, snap; def _save_conversation_summary(pid: str, conv_log:",
+      "tags": [
+        "auto-detected",
+        "refactor",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 5,
+      "last_seen": "2026-06-25T04:09:46.815Z"
+    },
+    {
+      "id": "bug-046",
+      "timestamp": "2026-06-25T04:10:37.629Z",
+      "error_message": "Wrong reference: callback should be dialog",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "Used \"callback\" instead of \"dialog\"",
+      "fix": "Changed callback → dialog",
+      "tags": [
+        "auto-detected",
+        "wrong-reference",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 5,
+      "last_seen": "2026-06-25T04:12:29.921Z"
+    },
+    {
+      "id": "bug-047",
+      "timestamp": "2026-06-25T06:15:47.791Z",
+      "error_message": "Wrong operator: == should be !=",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "Used \"==\" instead of \"!=\"",
+      "fix": "Changed operator == → !=",
+      "tags": [
+        "auto-detected",
+        "operator-fix",
+        "py"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-25T06:15:47.791Z"
     }
   ]
 }

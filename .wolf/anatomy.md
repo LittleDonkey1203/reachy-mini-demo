@@ -1,11 +1,13 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-24T11:58:26.567Z
-> Files: 537 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T06:15:47.766Z
+> Files: 543 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../.claude/plans/
 
+- `flickering-brewing-puppy.md` — d01_realtime_chat.py 瘦身重构方案（领域驱动） (~1501 tok)
 - `generic-wiggling-sketch.md` — 分人对话摘要 + 注入 (Per-Person Conversation Summary) (~2582 tok)
+- `rustling-booping-biscuit.md` — 小艺记忆系统重构：认知架构 + auto_merge 修复 (~1527 tok)
 
 ## ./
 
@@ -830,9 +832,11 @@
 ## memory/
 
 - `manager.py` — 个人记忆管理 — 会话内短期 + LWW 持久化 + 对话摘要(conversation_summaries)。 (~4200 tok)
+- `safety.py` — 记忆安全删除工作流 — 删除前的身份验证 + 二次确认。 (~1023 tok)
 
 ## perception/
 
+- `fusion.py` — 声源-视觉感知融合 — 多模态匹配。 (~289 tok)
 - `vision_worker.py` — 视觉子进程: Face(YuNet/MediaPipe)+Hand(GestureRecognizer), 输出 all_faces 全脸列表。 (~5600 tok)
 
 ## tests/
@@ -842,6 +846,8 @@
 ## voice/
 
 - `config.py` — 配置常量、工具元数据、prompt 模板。含 AUDIO_GATE_TIMEOUT_S / CONV_SUMMARY_THRESHOLD。 (~3050 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~33891 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~24458 tok)
 - `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17488 tok)
+- `kws.py` — WAKE-01 唤醒词门控 — 本地 sherpa-onnx KeywordSpotter。 (~991 tok)
+- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~6613 tok)
 - `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2949 tok)

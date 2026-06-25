@@ -496,3 +496,58 @@
 | 19:58 | Session end: 18 writes across 4 files (state.py, d01_realtime_chat.py, debug_server.py, todo.md) | 4 reads | ~59477 tok |
 | 19:59 | Session end: 18 writes across 4 files (state.py, d01_realtime_chat.py, debug_server.py, todo.md) | 4 reads | ~59477 tok |
 | 20:00 | Session end: 18 writes across 4 files (state.py, d01_realtime_chat.py, debug_server.py, todo.md) | 4 reads | ~59508 tok |
+| 20:02 | Session end: 18 writes across 4 files (state.py, d01_realtime_chat.py, debug_server.py, todo.md) | 4 reads | ~59508 tok |
+
+## Session: 2026-06-25 09:46
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+
+## Session: 2026-06-25 10:21
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 10:29 | Created ../../../../.claude/plans/flickering-brewing-puppy.md | — | ~852 |
+| 10:31 | Session end: 1 writes across 1 files (flickering-brewing-puppy.md) | 12 reads | ~52368 tok |
+| 10:35 | Session end: 1 writes across 1 files (flickering-brewing-puppy.md) | 12 reads | ~52368 tok |
+| 10:43 | Created ../../../../.claude/plans/rustling-booping-biscuit.md | — | ~1629 |
+| 10:45 | Edited ../../../../.claude/plans/flickering-brewing-puppy.md | modified _handle_clear() | ~1095 |
+| 10:55 | Edited ../../../../.claude/plans/flickering-brewing-puppy.md | modified __init__() | ~564 |
+| 10:55 | Edited ../../../../.claude/plans/flickering-brewing-puppy.md | 12→12 lines | ~115 |
+| 10:55 | Edited ../../../../.claude/plans/flickering-brewing-puppy.md | 36→36 lines | ~228 |
+| 10:56 | Edited ../../../../.claude/plans/flickering-brewing-puppy.md | modified _handle_clear() | ~226 |
+| 11:56 | Created voice/kws.py | — | ~991 |
+| 11:58 | Created perception/fusion.py | — | ~289 |
+| 11:58 | Created memory/safety.py | — | ~1023 |
+| 12:01 | Created voice/realtime.py | — | ~6613 |
+| 12:02 | Edited voice/d01_realtime_chat.py | reduced (-10 lines) | ~104 |
+| 12:03 | Edited voice/d01_realtime_chat.py | 46→44 lines | ~663 |
+| 12:03 | Edited voice/d01_realtime_chat.py | added 4 import(s) | ~66 |
+| 12:05 | Edited voice/d01_realtime_chat.py | removed 394 lines | ~174 |
+| 12:07 | Edited voice/d01_realtime_chat.py | removed 134 lines | ~20 |
+| 12:08 | Edited voice/d01_realtime_chat.py | removed 73 lines | ~23 |
+| 12:09 | Edited voice/d01_realtime_chat.py | removed 162 lines | ~453 |
+| 12:10 | Edited voice/d01_realtime_chat.py | 2→2 lines | ~20 |
+| 12:10 | Edited voice/d01_realtime_chat.py | inline fix | ~7 |
+| 12:11 | Edited voice/d01_realtime_chat.py | inline fix | ~8 |
+| 12:11 | Edited voice/d01_realtime_chat.py | inline fix | ~15 |
+| 12:11 | Edited voice/d01_realtime_chat.py | inline fix | ~11 |
+| 12:11 | Edited voice/d01_realtime_chat.py | inline fix | ~13 |
+| 12:12 | Edited voice/d01_realtime_chat.py | inline fix | ~12 |
+| 12:12 | Edited voice/d01_realtime_chat.py | inline fix | ~12 |
+| 12:12 | Edited voice/d01_realtime_chat.py | inline fix | ~10 |
+| 12:13 | Edited voice/d01_realtime_chat.py | inline fix | ~23 |
+| 12:16 | Session end: 28 writes across 7 files (flickering-brewing-puppy.md, rustling-booping-biscuit.md, kws.py, fusion.py, safety.py) | 12 reads | ~57614 tok |
+| 12:16 | Session end: 28 writes across 7 files (flickering-brewing-puppy.md, rustling-booping-biscuit.md, kws.py, fusion.py, safety.py) | 12 reads | ~57614 tok |
+| 14:06 | Edited voice/d01_realtime_chat.py | added 1 import(s) | ~7 |
+| 14:08 | Session end: 29 writes across 7 files (flickering-brewing-puppy.md, rustling-booping-biscuit.md, kws.py, fusion.py, safety.py) | 12 reads | ~57625 tok |
+| 14:13 | Edited voice/d01_realtime_chat.py | inline fix | ~34 |
+| 14:13 | Session end: 30 writes across 7 files (flickering-brewing-puppy.md, rustling-booping-biscuit.md, kws.py, fusion.py, safety.py) | 12 reads | ~57666 tok |
+| 14:15 | Edited voice/d01_realtime_chat.py | 8→8 lines | ~149 |
+
+## Session: 2026-06-25 14:17
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 14:17 | 门控逻辑白名单化: state==ST_ENGAGING → state!=ST_TRACKING | voice/d01_realtime_chat.py | 仅TRACKING关门,其他状态放行 | ~200 |
+| 14:18 | 更新 cerebrum.md: 门控白名单决策 + Do-Not-Repeat | .wolf/cerebrum.md | 新增决策日志+错误避免 | ~100 |

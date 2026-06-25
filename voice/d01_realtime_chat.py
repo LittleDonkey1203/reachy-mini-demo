@@ -79,24 +79,15 @@ import sys
 import threading
 import time
 import random
-import uuid
 from collections import deque
 from datetime import datetime, timezone
 
 import numpy as np
 from PIL import Image
-from scipy.signal import resample_poly
 import pytweening
 
 import dashscope
-from dashscope.audio.qwen_omni import (
-    AudioFormat,
-    MultiModality,
-    OmniRealtimeCallback,
-    OmniRealtimeConversation,
-)
 from openai import OpenAI
-import sherpa_onnx                       # WAKE-01:唤醒词 KWS(本地、离线)
 from reachy_mini import ReachyMini
 
 # MediaPipe 不在主进程导入(TRACK-FIX):检测在 vision_worker 子进程跑,独立 GIL。
@@ -128,13 +119,12 @@ from voice.config import (                          # ← 配置常量集中管�
     FACE_FRESH_S, LOCK_WIN, LOCK_ON_RATE, LOCK_OFF_RATE,
     ENGAGE_TIMEOUT_S, ENGAGE_SCAN_RANGE, ENGAGE_SCAN_TIME_S,
     SEARCH_TIMEOUT_S, NO_INTERACT_S, FSM_HZ,
-    KWS_MODEL_DIR, KWS_KEYWORDS, KWS_FORMS, KWS_SINGLE_THR, KWS_DEBOUNCE_S,
-    KWS_REFRACTORY_S, CONNECT_TIMEOUT_S,
+    KWS_SINGLE_THR, CONNECT_TIMEOUT_S,
     ARMED_BREATH_F, ARMED_BREATH_PITCH, CUE,
     SPREAD_BAD, WIDE_SCAN_RANGE, WIDE_SCAN_HZ, WIDE_SCAN_TIME_S,
     DOA_WAKE_FRESH_S, SEEK_PITCH_UP, SEEK_PITCH_AMP, SEEK_PITCH_HZ,
     SEEK_NEARBY_DEG, SEEK_NEARBY_TIME_S, SEEK_SUPPRESS_DEG,
-    GREET_PHRASES, BYE_PHRASES, EXIT_MIN_S, EXIT_MAX_S,
+    GREET_PHRASES, EXIT_MIN_S, EXIT_MAX_S,
     POINT_FRESH_S, POINT_YAW_GAIN, POINT_PITCH_GAIN,
     POINT_TURN_TIMEOUT_S, POINT_SETTLE_S, POINT_HOLD_MAX_S,
     PLAY_SIZE_ON, PLAY_SIZE_OFF, PLAY_SCORE_MIN, PLAY_HAND_V_MAX,
@@ -147,10 +137,9 @@ from voice.config import (                          # ← 配置常量集中管�
     THINK_ROLL_AMP, THINK_ROLL_F, THINK_PITCH, THINK_ANT_AMP, THINK_ANT_F,
     THINK_BLEND_TAU,
     EXPR_SMILE_ANT, EXPR_FROWN_ANT, EXPR_BLEND_TAU,
-    SUMMARY_MODEL,
-    AUDIO_GATE_TIMEOUT_S, CONV_SUMMARY_THRESHOLD,
+    AUDIO_GATE_TIMEOUT_S,
     _NOPARAM, BASE_TOOLS, SNAP_PROMPTS, _DIR_MAP,
-    greet_prompt, parse_judge,
+    greet_prompt,
 )
 from voice.state import (                           # ← 共享状态 + 日志 + 录制
     State, OneEuroFilter, log,
@@ -186,29 +175,12 @@ from voice.actions import (
     act_nod, act_shake, _look, act_wiggle, act_tilt, ACTIONS,
 )
 from voice.audio import doa_sensor_loop, _fresh_sound, player_loop
+from voice.realtime import RealtimeDialog
+from voice.kws import KwsGate
+from memory.safety import inject_clear_msg
+from perception.fusion import select_face_by_doa
 
-# ── transcript 泄漏标签 → 物理动作兜底 ──
-_TAG_TO_ACTION = {
-    "nod": "nod", "点头": "nod", "nodding": "nod",
-    "shake": "shake_head", "shake_head": "shake_head", "摇头": "shake_head",
-    "wiggle": "wiggle_antennas", "摆天线": "wiggle_antennas", "wave": "wiggle_antennas",
-    "tilt": "tilt_head", "歪头": "tilt_head", "tilt_head": "tilt_head",
-    "smile": "wiggle_antennas", "微笑": "wiggle_antennas",
-    "look_left": "look_left", "look_right": "look_right",
-    "look_up": "look_up", "look_down": "look_down",
-}
-_ACTION_TAG_RE = re.compile(
-    r"</?(?:" + "|".join(re.escape(k) for k in _TAG_TO_ACTION) + r")[^>]*>"
-    r"|[（(](?:" + "|".join(re.escape(k) for k in _TAG_TO_ACTION) + r")[)）]"
-    r"|\*(?:" + "|".join(re.escape(k) for k in _TAG_TO_ACTION) + r")\*",
-    re.IGNORECASE,
-)
-def _extract_tag_action(match_str: str) -> str | None:
-    s = match_str.strip("<>/()（）* \t").lower()
-    return _TAG_TO_ACTION.get(s)
-
-
-# ───────────────────────── M3-c 记忆:读写 + 退出摘要 ─────────────────────────
+# ───────────────────────── M3-c 记忆:读写(旧单用户启动数据,仅 main 用)─────────────────────────
 def _ensure_data_dir():
     os.makedirs(_DATA_DIR, exist_ok=True)
 
@@ -219,11 +191,6 @@ def load_profile() -> dict | None:
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
-def save_profile(profile: dict):
-    _ensure_data_dir()
-    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
-        json.dump(profile, f, ensure_ascii=False, indent=2)
-
 def load_memories() -> list:
     try:
         with open(MEMORY_PATH, "r", encoding="utf-8") as f:
@@ -232,352 +199,6 @@ def load_memories() -> list:
     except (FileNotFoundError, json.JSONDecodeError):
         return []
 
-def save_memories(items: list):
-    _ensure_data_dir()
-    with open(MEMORY_PATH, "w", encoding="utf-8") as f:
-        json.dump({"items": items}, f, ensure_ascii=False, indent=2)
-
-def do_remember(content: str) -> str:
-    items = load_memories()
-    items.append({
-        "id": str(uuid.uuid4())[:8],
-        "content": content,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    save_memories(items)
-    return f"已记住:{content}"
-
-def do_forget(keyword: str) -> str:
-    items = load_memories()
-    remaining = [it for it in items if keyword.lower() not in it["content"].lower()]
-    removed = len(items) - len(remaining)
-    if removed > 0:
-        save_memories(remaining)
-        return f"已忘掉 {removed} 条包含「{keyword}」的记忆。"
-    return f"没找到包含「{keyword}」的记忆。"
-
-def summarize_conversation(oai_client, conversation_log: list) -> dict | None:
-    if not conversation_log or len(conversation_log) < 2:
-        return None
-    try:
-        text = "\n".join(f"{'用户' if r == 'user' else '小艺'}: {t}"
-                         for r, t in conversation_log if t and t.strip())
-        if len(text) < 20:
-            return None
-        resp = oai_client.chat.completions.create(
-            model=SUMMARY_MODEL,
-            messages=[
-                {"role": "system",
-                 "content": "你是对话摘要助手。根据以下对话,输出一个JSON对象(不要代码块标记):"
-                 '{"summary":"一两句话概括本次对话","preferences":["用户偏好(若有)"],'
-                 '"topics":["讨论话题"]}'},
-                {"role": "user", "content": text[-3000:]},
-            ],
-            temperature=0.3,
-        )
-        raw = resp.choices[0].message.content.strip()
-        d = parse_judge(raw)
-        if d:
-            d["updated_at"] = datetime.now(timezone.utc).isoformat()
-            existing = load_profile() or {}
-            if "preferences" in existing and "preferences" in d:
-                merged = list(set(existing.get("preferences", []) + d.get("preferences", [])))
-                d["preferences"] = merged[-10:]
-            return d
-    except Exception as e:
-        log(f"⚠ 对话摘要失败:{e}")
-    return None
-
-
-# ───────────────────────── ①对话:回调,收服务端事件(打断/工具分发/计时器喂养)─────────────────────────
-class ChatCallback(OmniRealtimeCallback):
-    def __init__(self, st: State, play_q: "queue.Queue", motion_q: "queue.Queue",
-                 snap_q: "queue.Queue", mini: ReachyMini):
-        self.st = st
-        self.play_q = play_q
-        self.motion_q = motion_q
-        self.snap_q = snap_q
-        self.mini = mini
-        self.conv: OmniRealtimeConversation | None = None
-        self.exit_i = 0   # EXIT-01 告别语轮换索引
-
-    def on_open(self) -> None:
-        log("✅ WebSocket 已连接 dashscope.aliyuncs.com")
-
-    def on_close(self, close_status_code, close_msg) -> None:
-        log(f"🔌 连接关闭:code={close_status_code} msg={close_msg}")
-
-    def _do_barge_in(self, in_flight: bool) -> None:
-        """打断:作废队列 → flush 管线残余 → 必要时取消在途回复。动作/跟随不中断。"""
-        st = self.st
-        with st.lock:
-            st.play_gen += 1
-            st.drop_audio = True
-            st.playback_end_estimate = time.monotonic()
-        while True:
-            try:
-                self.play_q.get_nowait()
-            except queue.Empty:
-                break
-        try:
-            self.mini.media.audio.clear_player()
-        except Exception as e:
-            log(f"⚠ clear_player 失败:{type(e).__name__}: {e}")
-        if in_flight and self.conv is not None:
-            self.conv.cancel_response()
-        # M3-b 打断微反应:短促后仰+天线收缩
-        if not st.no_expression:
-            with st.lock:
-                st.wake_cue = "barge"
-                st.wake_cue_t = time.monotonic()
-        log("⛔ 打断:已停止播放" + (",并取消在途回复" if in_flight else ""))
-
-    def on_event(self, event) -> None:  # SDK 实际传入已解析的 dict
-        st = self.st
-        try:
-            etype = event.get("type", "")
-            _record_event(etype, event)   # 对话可视化录制（不影响现有逻辑）
-            now = time.monotonic()
-            if etype == "session.created":
-                log(f"✅ 会话已建立 session_id={event['session']['id']}")
-            elif etype == "session.updated":
-                if self.conv is None:
-                    log("✅ 会话配置生效(semantic_vad / 8 动作 + take_snapshot + identify_pointed_object 已注册)")
-                    log("▶ 可以对机器人说话了;它说话时可随时插话打断(Ctrl+C 退出)")
-                else:
-                    log("✅ 会话 instructions 已更新")
-                st.session_updated.set()
-            elif etype == "input_audio_buffer.speech_started":
-                with st.lock:
-                    st.last_interaction_at = now  # 用户开口 → 喂 RETURNING 计时器
-                    st.user_speaking = True
-                    playing = (now < st.playback_end_estimate) or (not self.play_q.empty())
-                    in_flight = st.in_flight > 0
-                log("🎤 检测到你开始说话…")
-                if playing or in_flight:
-                    self._do_barge_in(in_flight)
-            elif etype == "input_audio_buffer.speech_stopped":
-                with st.lock:
-                    st.thinking = True     # M3-b:模型开始处理,头开始歪
-                    st.user_speaking = False
-                log("🤫 检测到你说完了,等模型回应…")
-            elif etype == "conversation.item.input_audio_transcription.completed":
-                _transcript = (event.get("transcript") or "").strip()
-                log(f"📝 听到的是:「{_transcript}」")
-                if _transcript:
-                    with st.lock:
-                        _log_pid = st.current_person_id or "_unknown"
-                        _log_name = st.current_person_name
-                        st.display_transcript_seq += 1
-                        st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "user", "text": _transcript, "pid": _log_pid, "name": _log_name})
-                        if len(st.display_transcript) > 100:
-                            st.display_transcript = st.display_transcript[-80:]
-                    if not st.no_memory:
-                        with st.lock:
-                            st.conversation_log.setdefault(_log_pid, []).append(("user", _transcript))
-                            _check_log = st.conversation_log.get(_log_pid, [])
-                            _est_tok = sum(len(t) * 1.5 for _, t in _check_log)
-                        if _est_tok > CONV_SUMMARY_THRESHOLD and _log_pid != "_unknown" and _memory_mgr:
-                            with st.lock:
-                                _snap = list(st.conversation_log.get(_log_pid, []))
-                                st.conversation_log[_log_pid] = []
-                            threading.Thread(target=_save_conversation_summary,
-                                             args=(_log_pid, _snap), daemon=True).start()
-                            log(f"📝 上下文过长，自动触发摘要({_log_pid[:12]}, ~{int(_est_tok)} tok)")
-            elif etype == "response.created":
-                with st.lock:
-                    st.in_flight += 1
-                    st.drop_audio = False
-                    st.resp_audio_count = 0
-                    st.fc_seen_this_resp = False
-                    st.last_interaction_at = now
-                    _dt_seq = st.display_transcript_seq
-                if _st_mod._current_turn is not None:
-                    _st_mod._current_turn["dt_seq"] = _dt_seq
-                log("💭 模型开始生成回复…")
-            elif etype == "response.function_call_arguments.done":
-                name = event.get("name", "")
-                call_id = event.get("call_id", "")
-                with st.lock:
-                    st.fc_seen_this_resp = True
-                    st.fc_gen = st.play_gen
-                log(f"🤖 模型调用工具: {name}")
-                if name == "take_snapshot":
-                    # ⭐ 两段式指向(模型路由 + 关键点方向都不可靠,用户定的根治方案):
-                    # 本地 1.2s 内见过伸指(廉价提示)或模型自己选了指向工具 → mode="judge"
-                    # 先原地看图,由 VLM 判断"是否真在指/目标是否已在画面/粗方向",
-                    # 确认在指且目标不在画面才转头(snapshot_loop 升级 point_request)。
-                    with st.lock:
-                        # 粘滞窗:1.2s 内见过伸出的食指就算可能在指(检测 ~6Hz 会闪烁)
-                        maybe_pointing = (time.monotonic() - st.finger_ext_at) < POINT_FRESH_S
-                        st.snapshot_pending += 1
-                    mode = "judge" if maybe_pointing else "scene"
-                    if maybe_pointing:
-                        log("👉 最近见过伸指 → 先原地看图判断是否真在指(两段式)")
-                    self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": mode})
-                elif name == "end_session":
-                    # EXIT-01:把告别词嵌进 function_call_output,让模型在【当前这个 response】里说出来——
-                    # 不再单独 create_response(那会和"调 end_session 的这个 response"撞车:"already active response")。
-                    # 仍代码轮换短语(沿用①教训)。状态切换交 behavior_loop(只置 flag,不写 st.state)。
-                    phrase = BYE_PHRASES[self.exit_i % len(BYE_PHRASES)]
-                    self.exit_i += 1
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(
-                                {"success": True,
-                                 "say": f"对话结束。用中文只说这一句简短告别:「{phrase}」,别追问、别挽留、别加别的。"},
-                                ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ end_session 回 output 失败:{e}")
-                    with st.lock:
-                        st.exit_request = True
-                    log(f"👋 收到结束意图 → 告别「{phrase}」+ 回待命")
-                elif name == "identify_pointed_object":
-                    with st.lock:
-                        st.snapshot_pending += 1
-                    log("👉 收到指向请求 → 先原地看图判断(两段式)")
-                    self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "judge"})
-                elif name in ("remember_fact", "forget_fact"):
-                    with st.lock:
-                        pid = st.current_person_id
-                    if pid is None:
-                        result = "当前没有识别到用户身份,无法存储记忆。"
-                    else:
-                        args_str = event.get("arguments", "{}")
-                        try:
-                            args_dict = json.loads(args_str)
-                        except (json.JSONDecodeError, TypeError):
-                            args_dict = {}
-                        result = _memory_mgr.handle_tool_call(pid, name, args_dict)
-                        if name == "remember_fact":
-                            with st.lock:
-                                st.identity_injected = False
-                                st.identity_injected_pid = None
-                            if args_dict.get("key") == "name":
-                                new_name = args_dict.get("value")
-                                if new_name and _id_recognizer is not None:
-                                    _id_recognizer.db.set_name(pid, new_name)
-                                    with st.lock:
-                                        st.current_person_name = new_name
-                                    if _owner_mgr is not None and not _owner_mgr.has_owner():
-                                        if _owner_mgr.try_claim(pid, new_name):
-                                            log(f"👑 认主成功: {new_name} ({pid})")
-                        elif name == "forget_fact":
-                            with st.lock:
-                                st.identity_injected = False
-                                st.identity_injected_pid = None
-                            if "name" in args_dict.get("key", "").lower():
-                                if _id_recognizer is not None:
-                                    _id_recognizer.db.set_name(pid, None)
-                                with st.lock:
-                                    st.current_person_name = None
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ 记忆工具回 output 失败:{e}")
-                    log(f"🧠 记忆工具 {name}: {result}")
-                elif name == "clear_memory":
-                    args_str = event.get("arguments", "{}")
-                    try:
-                        args_dict = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError):
-                        args_dict = {}
-                    result = _handle_clear_memory_intent(st, args_dict, self.conv)
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ clear_memory 回 output 失败:{e}")
-                    log(f"🔒 clear_memory 启动: {result}")
-                elif name == "confirm_clear":
-                    args_str = event.get("arguments", "{}")
-                    try:
-                        args_dict = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError):
-                        args_dict = {}
-                    result = _handle_confirm_clear(st, args_dict)
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ confirm_clear 回 output 失败:{e}")
-                    log(f"🔒 confirm_clear: {result}")
-                else:
-                    # 手势:乐观即时回 output → 说话不等动作做完
-                    self.motion_q.put({"name": name, "call_id": call_id})
-                    try:
-                        self.conv.create_item({
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": json.dumps({"success": True, "action": name}, ensure_ascii=False),
-                        })
-                    except Exception as e:
-                        log(f"⚠ 回 function_call_output 失败:{e}")
-            elif etype == "response.audio_transcript.delta":
-                print(event.get("delta", ""), end="", flush=True)
-            elif etype == "response.audio_transcript.done":
-                print(flush=True)
-                _atext = (event.get("transcript") or "").strip()
-                if _atext:
-                    for m in _ACTION_TAG_RE.finditer(_atext):
-                        act = _extract_tag_action(m.group())
-                        if act:
-                            log(f"⚠ 标签泄漏兜底: '{m.group()}' → 触发 {act}")
-                            self.motion_q.put({"name": act})
-                    _atext = _ACTION_TAG_RE.sub("", _atext).strip()
-                if _atext:
-                    with st.lock:
-                        _log_pid = st.current_person_id or "_unknown"
-                        _log_name = st.current_person_name
-                        st.display_transcript_seq += 1
-                        st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "assistant", "text": _atext, "pid": _log_pid, "name": _log_name})
-                        if len(st.display_transcript) > 100:
-                            st.display_transcript = st.display_transcript[-80:]
-                    if not st.no_memory:
-                        with st.lock:
-                            st.conversation_log.setdefault(_log_pid, []).append(("assistant", _atext))
-            elif etype == "response.audio.delta":
-                with st.lock:
-                    if st.drop_audio:
-                        return
-                    gen = st.play_gen
-                    st.resp_audio_count += 1
-                    if st.thinking:
-                        st.thinking = False    # M3-b:收到首段音频,停止歪头
-                b64 = event.get("delta") or event.get("audio") or ""
-                pcm = np.frombuffer(base64.b64decode(b64), dtype=np.int16)
-                f16k = resample_poly(pcm.astype(np.float32) / 32768.0, PLAY_SR, OUT_SR).astype(np.float32)
-                self.play_q.put((gen, f16k))
-            elif etype == "response.done":
-                fire_rc = False
-                with st.lock:
-                    st.in_flight = max(0, st.in_flight - 1)
-                    # 纯动作响应(无音频且没被打断)→ 马上补话,不等动作做完
-                    # 快照挂起时跳过:等图像描述回来再让模型开口
-                    if (
-                        st.fc_seen_this_resp
-                        and st.resp_audio_count == 0
-                        and st.fc_gen == st.play_gen
-                        and st.snapshot_pending == 0
-                    ):
-                        fire_rc = True
-                d = self.conv.get_last_first_audio_delay() if self.conv else None
-                log(f"✅ 本轮回复完成{f'(首音频延迟 {d:.0f}ms)' if d else ''}")
-                if fire_rc and self.conv is not None:
-                    self.conv.create_response()
-            elif etype == "error":
-                log(f"❌ 服务端错误事件:{event}")
-        except Exception as e:
-            log(f"❌ on_event 处理异常:{type(e).__name__}: {e}\n   原始事件:{str(event)[:300]}")
 
 
 # ───────────────────────── 动作线程:Primary 手势,串行执行 ─────────────────────────
@@ -609,7 +230,7 @@ def motion_loop(mini: ReachyMini, st: State, motion_q: "queue.Queue", stop: thre
 
 
 # ───────────────── ①对话+④指向:快照线程,共享帧 → Qwen-VL → 回结果(judge 轮可升级转头)─────────────────
-def snapshot_loop(mini: ReachyMini, st: State, cb: ChatCallback, oai: OpenAI,
+def snapshot_loop(mini: ReachyMini, st: State, cb: "ChatCallback", oai: OpenAI,
                   snap_q: "queue.Queue", stop: threading.Event) -> None:
     """take_snapshot:优先读视觉线程共享的最新帧(≤25ms 新,不抢 get_frame);
     视觉线程没帧时退回直接抓。→ 640×360 jpg → chat.completions 看图
@@ -766,137 +387,6 @@ def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event)
             cap.release()
 
 
-# ── 安全删除工作流 handlers ──
-
-def _handle_clear_memory_intent(st: State, args: dict, conv) -> str:
-    """模型调用 clear_memory → 仅做意图分类，启动验证工作流。"""
-    with st.lock:
-        pid = st.current_person_id
-        existing_wf = st.clear_workflow
-    if pid is None:
-        return "当前没有识别到用户身份,无法操作。"
-    if existing_wf is not None:
-        return "已有一个删除流程在进行中,请等待完成或超时。"
-    target_name = args.get("target_name")
-    target_pid = pid
-    if target_name and _id_recognizer is not None:
-        found = _id_recognizer.db.find_by_name(target_name)
-        if found is None:
-            return f"没有找到叫「{target_name}」的人。"
-        target_pid = found
-    with st.lock:
-        st.clear_workflow = {
-            "phase": "verifying",
-            "actor_pid": pid,
-            "target_pid": target_pid,
-            "target_name": target_name,
-            "started_at": time.monotonic(),
-            "verified_at": None,
-            "stable_count": 0,
-        }
-        st.clear_lock = True
-    target_desc = target_name or "你"
-    try:
-        conv.create_item({
-            "type": "message", "role": "system",
-            "content": [{"type": "input_text",
-                         "text": f"安全验证流程已启动(目标:{target_desc})。请告诉用户：'为了安全,请正面看着我保持几秒,我需要确认你的身份。'然后等待系统下一步指示。"}],
-        })
-        conv.create_response()
-    except Exception as e:
-        log(f"⚠ 注入验证提示失败: {e}")
-    return "⏳ 安全验证已启动,正在确认身份。"
-
-
-def _handle_confirm_clear(st: State, args: dict) -> str:
-    """模型调用 confirm_clear → 验证工作流状态后执行备份+删除。"""
-    confirmed = args.get("confirmed", False)
-    with st.lock:
-        wf = st.clear_workflow
-        cur_pid = st.current_person_id
-    if wf is None or wf.get("phase") != "confirming":
-        return "当前没有待确认的删除流程。"
-    if not confirmed:
-        with st.lock:
-            st.clear_workflow = None
-            st.clear_lock = False
-        log("🔒 用户取消删除")
-        return "好的,已取消删除。"
-    if cur_pid != wf["actor_pid"]:
-        with st.lock:
-            st.clear_workflow = None
-            st.clear_lock = False
-        log("🔒 身份变化,取消删除")
-        return "身份验证失败(面前的人已变化),已取消。"
-    actor_pid = wf["actor_pid"]
-    target_pid = wf["target_pid"]
-    # 备份
-    backup_face = None
-    backup_mem = None
-    if _id_recognizer is not None:
-        backup_face = _id_recognizer.db.backup_person(target_pid)
-    if _memory_mgr is not None:
-        backup_mem = _memory_mgr.backup_person(target_pid)
-    log(f"🔒 备份完成: face={backup_face}, mem={backup_mem}")
-    # 执行删除
-    result = "删除失败。"
-    if _memory_mgr is not None:
-        result = _memory_mgr.clear_all(target_pid, confirmed=True,
-                                       actor_pid=actor_pid)
-    if _id_recognizer is not None:
-        _id_recognizer.db.clear_person(target_pid)
-    if target_pid == cur_pid:
-        with st.lock:
-            st.current_person_id = None
-            st.current_person_name = None
-            st.current_is_owner = False
-            st.identity_injected = False
-            st.identity_injected_pid = None
-    with st.lock:
-        st.clear_workflow = None
-        st.clear_lock = False
-    log(f"🔒 删除完成: {result}")
-    return result
-
-
-def _inject_clear_msg(conv, text: str):
-    """注入系统消息并触发模型回应。"""
-    try:
-        conv.create_item({
-            "type": "message", "role": "system",
-            "content": [{"type": "input_text", "text": text}],
-        })
-        conv.create_response()
-    except Exception as e:
-        log(f"⚠ 注入 clear msg 失败: {e}")
-
-
-def _select_face_by_doa(all_faces: list[dict], doa_resid: float,
-                         track_yaw: float, body_yaw: float,
-                         fov_deg: float = FOV_X_DEG) -> int | None:
-    """从多张人脸中选出最接近 DOA 声源方向的脸，返回 all_faces 中的索引。
-
-    DOA resid 是相对于身体正前方的声源角度(正=左)。
-    摄像头在头上，头朝向 track_yaw(正=左)，身体朝向 body_yaw(正=左)。
-    声源在摄像头画面中的预期 u 坐标:
-      doa_in_camera = (body_yaw + resid) - track_yaw
-      expected_u = 0.5 - doa_in_camera / fov_deg
-    """
-    if not all_faces or len(all_faces) <= 1:
-        return None
-    doa_in_camera = (body_yaw + doa_resid) - track_yaw
-    expected_u = 0.5 - doa_in_camera / fov_deg
-    expected_u = max(0.0, min(1.0, expected_u))
-    best_idx = 0
-    best_dist = abs(all_faces[0]["u"] - expected_u)
-    for i in range(1, len(all_faces)):
-        d = abs(all_faces[i]["u"] - expected_u)
-        if d < best_dist:
-            best_dist = d
-            best_idx = i
-    return best_idx
-
-
 def vision_result_loop(st: State, result_q, stop: threading.Event,
                        cb_ref: list = None) -> None:
     """消费视觉子进程结果 → 时间常数型积分跟随目标(逻辑同 F-01,数据源改进程队列)。
@@ -952,7 +442,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                 _doa_ty = st.track_yaw
                 _doa_by = st.body_yaw_deg
             if _doa_c and _doa_r is not None:
-                _doa_selected_idx = _select_face_by_doa(
+                _doa_selected_idx = select_face_by_doa(
                     all_faces, _doa_r, _doa_ty, _doa_by)
                 if _doa_selected_idx is not None:
                     _sel = all_faces[_doa_selected_idx]
@@ -1025,7 +515,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                             st.clear_lock = False
                                         log("🔒 权限不足,非主人不能删他人记忆")
                                         if cb_ref[0] is not None and cb_ref[0].conv is not None:
-                                            _inject_clear_msg(cb_ref[0].conv,
+                                            inject_clear_msg(cb_ref[0].conv,
                                                 "权限不足：只有主人才能删除其他人的记忆。删除流程已取消,请告诉用户。")
                                     else:
                                         _cwf["phase"] = "confirming"
@@ -1033,7 +523,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                         _tdesc = _cwf["target_name"] or "你"
                                         log(f"🔒 身份验证通过,进入确认阶段(target={_tdesc})")
                                         if cb_ref[0] is not None and cb_ref[0].conv is not None:
-                                            _inject_clear_msg(cb_ref[0].conv,
+                                            inject_clear_msg(cb_ref[0].conv,
                                                 f"身份已验证。请向用户做最后确认：'你确定要我忘掉关于{_tdesc}的所有记忆吗？"
                                                 f"包括人脸和所有信息都将被清除,此操作不可恢复。'"
                                                 f"等用户明确回答后,调用confirm_clear(confirmed=true或false)。")
@@ -1042,7 +532,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                     _cwf["verified_at"] = time.monotonic()
                                     log("🔒 身份验证通过(删除自己),进入确认阶段")
                                     if cb_ref[0] is not None and cb_ref[0].conv is not None:
-                                        _inject_clear_msg(cb_ref[0].conv,
+                                        inject_clear_msg(cb_ref[0].conv,
                                             "身份已验证。请向用户做最后确认：'你确定要我忘掉关于你的所有记忆吗？"
                                             "包括你的脸和所有信息都将被清除,此操作不可恢复。'"
                                             "等用户明确回答后,调用confirm_clear(confirmed=true或false)。")
@@ -1052,7 +542,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                     st.clear_lock = False
                                 log("🔒 身份验证超时,取消删除")
                                 if cb_ref[0] is not None and cb_ref[0].conv is not None:
-                                    _inject_clear_msg(cb_ref[0].conv,
+                                    inject_clear_msg(cb_ref[0].conv,
                                         "身份验证超时(30秒内未能稳定识别),删除流程已取消。请告诉用户。")
                         elif _cwf_phase == "confirming":
                             if _cwf.get("verified_at") and (now - _cwf["verified_at"]) > CLEAR_TIMEOUT_S:
@@ -1061,7 +551,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                                     st.clear_lock = False
                                 log("🔒 确认超时,取消删除")
                                 if cb_ref[0] is not None and cb_ref[0].conv is not None:
-                                    _inject_clear_msg(cb_ref[0].conv,
+                                    inject_clear_msg(cb_ref[0].conv,
                                         "等待确认超时(30秒无回应),删除流程已取消。请告诉用户。")
                 except Exception as e:
                     log(f"⚠ 身份识别异常:{e}")
@@ -1911,75 +1401,6 @@ def head_control_loop(mini: ReachyMini, st: State, stop: threading.Event) -> Non
 
 
 # ───────────────────────── 主流程 ─────────────────────────
-class KwsGate:
-    """WAKE-01 唤醒门:本地 sherpa-onnx KeywordSpotter(单字"小艺"三形态)+ 去抖/不应期。
-    feed(mono_f32_16k) → True 表示一次真唤醒。armed/engaged 都喂(engaged 命中忽略)。"""
-    def __init__(self) -> None:
-        os.makedirs(os.path.dirname(KWS_KEYWORDS), exist_ok=True)
-        with open(KWS_KEYWORDS, "w", encoding="utf-8") as f:
-            f.write("\n".join(f"{form} #{KWS_SINGLE_THR:.2f} @小艺" for form in KWS_FORMS) + "\n")
-        tag = "epoch-12-avg-2-chunk-16-left-64"
-        self.kws = sherpa_onnx.KeywordSpotter(
-            tokens=os.path.join(KWS_MODEL_DIR, "tokens.txt"),
-            encoder=os.path.join(KWS_MODEL_DIR, f"encoder-{tag}.int8.onnx"),
-            decoder=os.path.join(KWS_MODEL_DIR, f"decoder-{tag}.int8.onnx"),
-            joiner=os.path.join(KWS_MODEL_DIR, f"joiner-{tag}.int8.onnx"),
-            num_threads=1, max_active_paths=4,
-            keywords_file=KWS_KEYWORDS,
-            keywords_score=1.0, keywords_threshold=0.10, num_trailing_blanks=1,
-            provider="cpu",
-        )
-        self.stream = self.kws.create_stream()
-        self._last_raw = -1e9
-        self._last_wake = -1e9
-        self._diag_t = time.monotonic()
-        self._diag_chunks = self._diag_dec = 0
-        self._diag_rms_sq = self._diag_rms_n = 0
-        self._diag_ch_done = False   # 只打一次各通道 RMS 对比
-
-    def feed(self, mono: "np.ndarray", chunk_full: "np.ndarray | None" = None) -> bool:
-        # 只打一次各通道 RMS（帮助定位哪个通道有声）
-        if not self._diag_ch_done and chunk_full is not None and chunk_full.ndim == 2:
-            ch_rms = [(c, float((chunk_full[:, c].astype(np.float64) ** 2).mean()) ** 0.5)
-                      for c in range(chunk_full.shape[1])]
-            log(f"[KWS通道诊断] shape={chunk_full.shape} dtype={chunk_full.dtype} "
-                f"min={float(chunk_full.min()):.5f} max={float(chunk_full.max()):.5f} | "
-                + " ".join(f"ch{c}={r:.5f}" for c, r in ch_rms))
-            self._diag_ch_done = True
-        self.stream.accept_waveform(16000, np.ascontiguousarray(mono, dtype=np.float32))
-        hit = False
-        n_dec = 0
-        while self.kws.is_ready(self.stream):
-            self.kws.decode_stream(self.stream)
-            n_dec += 1
-        self._diag_chunks += 1
-        self._diag_dec += n_dec
-        self._diag_rms_sq += float(np.dot(mono, mono))
-        self._diag_rms_n += len(mono)
-        now = time.monotonic()
-        if now - self._diag_t > 3.0:
-            rms = (self._diag_rms_sq / max(1, self._diag_rms_n)) ** 0.5
-            log(f"[KWS诊断] chunks={self._diag_chunks} dec={self._diag_dec} "
-                f"RMS={rms:.4f} {'⚠ 静音?' if rms < 0.001 else '✅ 有声'}")
-            self._diag_chunks = self._diag_dec = 0
-            self._diag_rms_sq = self._diag_rms_n = 0
-            self._diag_t = now
-        result = self.kws.get_result(self.stream)
-        if result:
-            log(f"[KWS] 原始命中: {result!r}")
-            self.kws.reset_stream(self.stream)
-            hit = True
-        if not hit:
-            return False
-        t = time.monotonic()
-        if t - self._last_wake < KWS_REFRACTORY_S or t - self._last_raw < KWS_DEBOUNCE_S:
-            self._last_raw = t
-            return False
-        self._last_raw = t
-        self._last_wake = t
-        return True
-
-
 def main() -> int:
     api_key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
@@ -2090,148 +1511,15 @@ def main() -> int:
             else:
                 active_tools = [t for t in TOOLS if t["name"] not in ("remember_fact", "clear_memory", "confirm_clear", "forget_fact")]
 
-            callback = ChatCallback(st, play_q, motion_q, snap_q, mini)
-
-            def _save_conversation_summary(pid: str, conv_log: list):
-                """后台线程：用廉价模型做对话摘要，存入 MemoryManager。"""
-                try:
-                    text = "\n".join(f"{'用户' if r == 'user' else '小艺'}: {t}"
-                                     for r, t in conv_log if t and t.strip())
-                    if len(text) < 20:
-                        return
-                    resp = oai.chat.completions.create(
-                        model=SUMMARY_MODEL,
-                        messages=[
-                            {"role": "system",
-                             "content": "用一两句话概括这段对话的要点，不超过100字。只输出摘要文本。"},
-                            {"role": "user", "content": text[-3000:]},
-                        ],
-                        temperature=0.3,
-                    )
-                    summary = resp.choices[0].message.content.strip()
-                    if summary:
-                        _memory_mgr.save_conversation_summary(pid, summary)
-                        log(f"📝 对话摘要已保存 ({pid[:12]}): {summary[:50]}")
-                        # 如果仍在和这个人对话，触发重新注入
-                        with st.lock:
-                            if st.current_person_id == pid:
-                                st.identity_injected = False
-                except Exception as e:
-                    log(f"⚠ 对话摘要失败({pid[:12]}):{e}")
-
-            def open_session(timeout: float = CONNECT_TIMEOUT_S):
-                """(b)命中才连:新建 WS + update_session,timeout 内未就绪 → None(超时也不卡死)。"""
-                st.session_updated.clear()
-                c = OmniRealtimeConversation(model=MODEL, callback=callback)
-                holder = {"err": None}
-                def _w():
-                    try:
-                        c.connect()
-                        c.update_session(
-                            output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-                            voice=VOICE,
-                            input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
-                            output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-                            enable_input_audio_transcription=True,
-                            enable_turn_detection=True,
-                            turn_detection_type="semantic_vad",
-                            instructions=active_instructions,
-                            tools=active_tools,
-                        )
-                    except Exception as e:
-                        holder["err"] = e
-                threading.Thread(target=_w, daemon=True).start()
-                if st.session_updated.wait(timeout):
-                    callback.conv = c
-                    with st.lock:        # 新会话 = 无在途回复,重置回复状态(防 in_flight 跨会话泄漏→招呼守卫误跳过)
-                        st.in_flight = 0
-                        st.resp_audio_count = 0
-                        st.fc_seen_this_resp = False
-                        st.drop_audio = False
-                    return c
-                log(f"⚠ 连接失败/超时(>{timeout:.1f}s)err={holder['err']}")
-                try:
-                    c.close()
-                except Exception:
-                    pass
-                return None
-
-            def close_session(c):
-                try:
-                    c.close()
-                except Exception:
-                    pass
-                callback.conv = None
-                with st.lock:
-                    # 先提取摘要数据再清身份
-                    _close_pid = st.current_person_id
-                    _close_log = list(st.conversation_log.get(_close_pid, [])) if _close_pid else []
-                    if _close_pid:
-                        st.conversation_log.pop(_close_pid, None)
-                    # 清身份——防止 late injection 用旧人的记忆注入新 session
-                    st.identity_injected = False
-                    st.identity_injected_pid = None
-                    st.current_person_id = None
-                    st.current_person_name = None
-                    st.current_is_owner = False
-                    st.user_speaking = False
-                    if st.clear_workflow is not None:
-                        st.clear_workflow = None
-                        st.clear_lock = False
-                if _close_log and len(_close_log) >= 2 and _memory_mgr and not no_memory:
-                    threading.Thread(target=_save_conversation_summary,
-                                     args=(_close_pid, _close_log), daemon=True).start()
-                # 服务端错误导致断连时 response.done 不会到来，强制关闭当前轮次
-                if _st_mod._current_turn is not None:
-                    _st_mod._current_turn["end_ts"] = time.strftime("%H:%M:%S")
-                    _st_mod._current_turn["end_mono"] = time.monotonic()
-                    _st_mod._current_turn = None
-                # 清掉未消费的 ASR buffer，防止它污染下一个新会话的第一个 turn
-                _st_mod._pending_asr = ""
-
-            def _update_memory_instructions(c, pid, pname):
-                """用 update_session 将记忆嵌入 session instructions,替换旧记忆而非追加。"""
-                mem_prompt = _memory_mgr.get_prompt(pid, person_name=pname) if _memory_mgr else None
-                new_instr = active_instructions + ("\n\n" + mem_prompt if mem_prompt else "")
-                try:
-                    c.update_session(
-                        output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
-                        voice=VOICE,
-                        input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
-                        output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-                        enable_input_audio_transcription=True,
-                        enable_turn_detection=True,
-                        turn_detection_type="semantic_vad",
-                        instructions=new_instr,
-                        tools=active_tools,
-                    )
-                    log(f"🧠 记忆已注入 session instructions ({pname or pid[:12]})")
-                    with st.lock:
-                        st.identity_injected = True
-                        st.identity_injected_pid = pid
-                        st.dbg_memory_prompt = mem_prompt
-                        st.dbg_session_instructions = new_instr
-                        # 开闸：flush 缓存的音频
-                        _buffered = list(st.audio_gate_buffer)
-                        st.audio_gate_buffer.clear()
-                        st.audio_gate_closed = False
-                    if _buffered:
-                        for chunk in _buffered:
-                            try:
-                                c.append_audio(chunk)
-                            except Exception:
-                                break
-                        log(f"🔓 音频闸门开启，flush {len(_buffered)} 帧缓存")
-                    return True
-                except Exception as e:
-                    log(f"⚠ 记忆 update_session 失败:{e}")
-                    return False
+            dialog = RealtimeDialog(st, play_q, motion_q, snap_q, mini,
+                                     oai, _memory_mgr, _owner_mgr, _id_recognizer,
+                                     active_instructions, active_tools, no_memory)
 
             conv = None
             kws_gate = None
             if no_wake:
                 log("连接 Qwen-Omni-Realtime(--no-wake:启动即连)…")
-                conv = open_session(timeout=10.0)
+                conv = dialog.open_session(timeout=10.0)
                 if conv is None:
                     log("❌ 启动连接失败,中止")
                     return 1
@@ -2248,7 +1536,7 @@ def main() -> int:
             threading.Thread(target=motion_loop, args=(mini, st, motion_q, stop), daemon=True).start()
             threading.Thread(target=head_control_loop, args=(mini, st, stop), daemon=True).start()
             if not NO_VOICE:
-                threading.Thread(target=snapshot_loop, args=(mini, st, callback, oai, snap_q, stop), daemon=True).start()
+                threading.Thread(target=snapshot_loop, args=(mini, st, dialog.callback, oai, snap_q, stop), daemon=True).start()
             threading.Thread(target=doa_sensor_loop, args=(st, stop), daemon=True).start()
             threading.Thread(target=behavior_loop, args=(st, snap_q, stop, not no_wake), daemon=True).start()
             if VIS_DEBUG:
@@ -2256,7 +1544,7 @@ def main() -> int:
             # 视觉(TRACK-FIX):检测在子进程(独立 GIL),主进程只跑抓帧泵+结果积分
             vis_frame_q = None
             _cb_ref = [None]
-            _cb_ref[0] = callback
+            _cb_ref[0] = dialog.callback
             _vis_enabled = os.path.exists(VIS_MODEL_PATH)
             if _vis_enabled:
                 _fb = os.environ.get("FACE_BACKEND", "yunet").lower()
@@ -2308,7 +1596,7 @@ def main() -> int:
                         woke_pending = st.wake_ok
                     if state == ST_ARMED:
                         if conv is not None and not woke_pending:     # engaged→armed:拆 WS(回零连接零计费)
-                            close_session(conv)
+                            dialog.close_session()
                             conv = None
                             log("🌙 已回待命,WS 断开(零连接零计费)")
                         elif wake and conv is None:                    # 命中才连(b)
@@ -2318,7 +1606,7 @@ def main() -> int:
                             log("🔔 听到「小艺」(上扬)→ 连接 Qwen…")
                             _record_vis_event("vis.wake_word", "🔔 唤醒词「小艺」触发", {})
                             tc = time.monotonic()
-                            conv = None if sim_fail else open_session()
+                            conv = None if sim_fail else dialog.open_session()
                             if conv is not None:
                                 log(f"✅ 已连接({(time.monotonic()-tc)*1000:.0f}ms)→ 唤醒,开始对话")
                                 with st.lock:
@@ -2363,8 +1651,8 @@ def main() -> int:
                                     st.audio_gate_buffer.clear()
                                     st.audio_gate_closed_at = time.monotonic()
                                 log(f"🔒 音频闸门关闭(声源偏移 {abs(_sr):.0f}° > {SWITCH_AWAY_DEG}°)，等身份确认")
-                            close_session(conv)
-                            conv = open_session()
+                            dialog.close_session()
+                            conv = dialog.open_session()
                             if conv is None:
                                 log("⚠ 切换重连失败/超时(留待 behavior 找人;无会话则后续自动回待命)")
                             continue   # 本块跳过 append(切换中)
@@ -2382,7 +1670,7 @@ def main() -> int:
                             _g_pname = st.current_person_name
                             _g_injected = st.identity_injected
                         if _g_pid and not _g_injected and _memory_mgr is not None:
-                            _update_memory_instructions(conv, _g_pid, _g_pname)
+                            dialog.update_memory(_g_pid, _g_pname)
                         _phrase = GREET_PHRASES[greet_i % len(GREET_PHRASES)]
                         greet_i += 1
                         try:
@@ -2399,16 +1687,16 @@ def main() -> int:
                             _late_pname = st.current_person_name
                             _late_injected = st.identity_injected
                         if _late_pid and not _late_injected and _memory_mgr is not None:
-                            _update_memory_instructions(conv, _late_pid, _late_pname)
+                            dialog.update_memory(_late_pid, _late_pname)
                     rms_acc.append(float(np.sqrt(np.mean(mono**2))))
-                    # M1.5-a 方向门控:只挡"确信范围外"(fresh+confident+|resid|>GATE_DEG),其余一律放行;
-                    # 范围外→发静音(服务端听不到→自动不送/不打断/不重置计时,不碰那些代码)。
+                    # M1.5-a 方向门控:仅 TRACKING(面前有人在对话)时屏蔽其他方向的声音;
+                    # 其他状态(寻人/回中/跟手等)一律放行,避免发静音导致服务端断连。
                     now_g = time.monotonic()
                     with st.lock:
                         g_resid = st.doa_resid_stable
                         g_fresh = g_resid is not None and (now_g - st.doa_at) < DOA_GATE_FRESH_S
                         g_conf = st.doa_confident
-                    gate_open = no_gate or not (g_fresh and g_conf and abs(g_resid) > GATE_DEG)
+                    gate_open = no_gate or state != ST_TRACKING or not (g_fresh and g_conf and abs(g_resid) > GATE_DEG)
                     if gate_open != prev_gate_open:
                         if gate_open:
                             log("🚪 门控:开 → 正常上行")
@@ -2451,8 +1739,8 @@ def main() -> int:
                         # append_audio 会抛 WebSocketConnectionClosedException。
                         # 自动重连，丢弃本帧音频继续。
                         log(f"⚠ 上行音频失败({type(_ae).__name__})，尝试自动重连…")
-                        close_session(conv)
-                        conv = open_session()
+                        dialog.close_session()
+                        conv = dialog.open_session()
                         if conv is None:
                             log("❌ 自动重连失败，等待下次唤醒")
                         else:
@@ -2495,7 +1783,7 @@ def main() -> int:
                     for _exit_pid, _exit_log in _remaining.items():
                         if _exit_pid != "_unknown" and len(_exit_log) >= 2:
                             log(f"📝 退出摘要({_exit_pid[:12]})…")
-                            _save_conversation_summary(_exit_pid, _exit_log)
+                            dialog.save_summary(_exit_pid, _exit_log)
                 log("已释放 Realtime 连接与 Reachy 媒体资源。")
                 if _memory_mgr is not None:
                     _memory_mgr.flush()
