@@ -577,8 +577,9 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                         if _sv is not None:
                             _asp_set = {"pid": _sv.person_id, "name": _sv.person_name,
                                         "track_id": _sv.track_id, "score": float(_spk[1]), "at": now}
-                    with st.lock:
-                        st.asd_speaker = _asp_set
+                    if _asp_set is not None:    # 有画面内说话人才更新;否则保持(读端按时间窗判 stale)
+                        with st.lock:
+                            st.asd_speaker = _asp_set
                     _attrib = None
                     if _spk is not None and _track_views:
                         _attrib = next((v for v in _track_views if v.track_id == _spk[0]), None)

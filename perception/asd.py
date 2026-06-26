@@ -148,6 +148,7 @@ class AudioRing:
         self.buf = np.zeros(self.maxlen, dtype=np.float32)
         self.filled = 0
         self.pos = 0
+        self.t_last_mono = 0.0       # 最后 push 的单调时刻(≈最新样本时间),用于时间↔样本映射
         self._lock = threading.Lock()
 
     def push(self, mono):
@@ -167,6 +168,7 @@ class AudioRing:
                 self.buf[:end - self.maxlen] = x[k:]
             self.pos = end % self.maxlen
             self.filled = min(self.maxlen, self.filled + n)
+            self.t_last_mono = time.monotonic()
 
     def get_last(self, n):
         with self._lock:
@@ -177,6 +179,19 @@ class AudioRing:
             if start + n <= self.maxlen:
                 return self.buf[start:start + n].copy()
             return np.concatenate([self.buf[start:], self.buf[:(start + n) % self.maxlen]])
+
+    def get_window(self, t0, t1):
+        """取 [t0,t1] 时间段的样本(按 t_last_mono 把单调时间映射到样本)。"""
+        if self.t_last_mono <= 0:
+            return None
+        n_after = max(0, int(round((self.t_last_mono - t1) * AUDIO_SR)))   # t1 之后的样本数
+        n_win = int(round((t1 - t0) * AUDIO_SR))
+        if n_win < AUDIO_SR // 10:                                         # <0.1s 不取
+            return None
+        seg = self.get_last(n_after + n_win)
+        if seg is None or seg.size < n_win:
+            return None
+        return seg[:n_win]
 
 
 class AsdEngine:
@@ -201,6 +216,7 @@ class AsdEngine:
         self._last_crop_t: dict[int, float] = {}
         self._scores: dict[int, float] = {}
         self._score_t: dict[int, float] = {}
+        self._last_pos_t: dict[int, float] = {}    # 每 track 最近一次"在说话"的时刻
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -226,7 +242,7 @@ class AsdEngine:
             if dq is None:
                 dq = collections.deque(maxlen=self.win)
                 self._crops[track_id] = dq
-            dq.append(g)
+            dq.append((now, g))          # 存(时间戳, 灰度脸),供 25fps 重采样 + 音频对齐
         self._last_crop_t[track_id] = now
 
     def start(self):
@@ -248,6 +264,7 @@ class AsdEngine:
             for tid in [k for k in self._last_crop_t if k not in alive]:
                 self._last_crop_t.pop(tid, None)
                 self._score_t.pop(tid, None)
+                self._last_pos_t.pop(tid, None)
 
     def scores(self) -> dict[int, float]:
         with self._lock:
@@ -263,6 +280,16 @@ class AsdEngine:
             return None
         return max(cand, key=lambda kv: kv[1])
 
+    def speaker_window(self, t_start: float):
+        """本句归属(耐 ASD 延迟):自 t_start 起任意时刻被判为说话的 track 中分最高者。
+        即使'说完才出分',只要这句话期间检测到在说就能归对。返回 (track_id, score)|None。"""
+        with self._lock:
+            cand = [(tid, self._scores.get(tid, -9.9))
+                    for tid, t in self._last_pos_t.items() if t >= t_start]
+        if not cand:
+            return None
+        return max(cand, key=lambda kv: kv[1])
+
     def _loop(self):
         while not self._stop.is_set():
             time.sleep(self.score_interval)
@@ -270,19 +297,37 @@ class AsdEngine:
                 continue
             with self._lock:
                 items = [(tid, list(dq)) for tid, dq in self._crops.items()]
-            for tid, crops in items:
+            for tid, crops in items:    # crops: [(t, gray), ...]
                 if len(crops) < self.min_frames:
                     continue
-                audio = self.audio.get_last(len(crops) * SAMPLES_PER_FRAME + 800)
+                t0, t1 = crops[0][0], crops[-1][0]
+                span = t1 - t0
+                if span < 0.4:                                  # 不足 ~0.4s 不评
+                    continue
+                # 按时间戳重采样到 25fps:我们检测 ~16fps,必须补成 25 才与模型/音频 4:1 对齐
+                n_target = int(round(span * VIDEO_FPS))
+                if n_target < self.min_frames:
+                    continue
+                ts = [c[0] for c in crops]
+                vid, j = [], 0
+                for k in range(n_target):
+                    tt = t0 + k / float(VIDEO_FPS)
+                    while j + 1 < len(crops) and abs(ts[j + 1] - tt) <= abs(ts[j] - tt):
+                        j += 1
+                    vid.append(crops[j][1])
+                audio = self.audio.get_window(t0, t1)           # 同一时间段的音频
                 if audio is None or audio.size < SAMPLES_PER_FRAME:
                     continue
-                if float(np.abs(audio).max()) <= 4.0:    # 归一化 float → int16 量级(MFCC 期望)
+                if float(np.abs(audio).max()) <= 4.0:           # 归一化 float → int16 量级(MFCC 期望)
                     audio = audio * 32768.0
-                r = self.detector.score(crops, audio)
+                r = self.detector.score(vid, audio)
                 if r is None:
                     continue
                 sc = r["mean_score"]
+                _nowm = time.monotonic()
                 with self._lock:
                     prev = self._scores.get(tid)
                     self._scores[tid] = sc if prev is None else (self.ema * sc + (1 - self.ema) * prev)
-                    self._score_t[tid] = time.monotonic()
+                    self._score_t[tid] = _nowm
+                    if self._scores[tid] > self.speak_thresh:
+                        self._last_pos_t[tid] = _nowm           # 最近一次"在说话"的时刻(供归属耐延迟)

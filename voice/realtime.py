@@ -132,7 +132,7 @@ class ChatCallback(OmniRealtimeCallback):
                 # ── ASD 归属:本句说话人(画面内)/ 画外(无画面说话人 → 专门标签)──
                 with st.lock:
                     _asp = st.asd_speaker
-                if _asp is not None and (now - _asp.get("at", 0.0)) < 1.5:
+                if _asp is not None and (now - _asp.get("at", 0.0)) < 2.0:   # 宽限,耐 ASD 延迟
                     _tid = _asp.get("track_id")
                     _log_pid = _asp.get("pid") or f"_track{_tid}"      # 在画面但未识别:临时 track 键
                     _log_name = _asp.get("name") or f"?T{_tid}"
