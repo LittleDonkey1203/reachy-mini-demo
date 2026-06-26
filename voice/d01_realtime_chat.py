@@ -474,6 +474,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
     n_hit = 0
     infer_acc: list[float] = []
     stat_t = time.monotonic()
+    _asd_log_t = time.monotonic()       # ASD 分周期打印节流
 
     while not stop.is_set():
         try:
@@ -561,6 +562,14 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                     # ── 头部目标 + 发言归属:ASD 说话人优先,否则回退 ──
                     _asd_on = _asd_engine is not None and _asd_engine.available
                     _spk = _asd_engine.speaker() if _asd_on else None
+                    if _asd_on and now - _asd_log_t >= 3.0:    # 周期打印 ASD 分(便于无 dashboard 验证)
+                        _asd_log_t = now
+                        _scs = _asd_engine.scores()
+                        if _scs:
+                            _spk_t = _spk[0] if _spk else None
+                            log("🗣 ASD: " + "  ".join(
+                                f"{'▶' if tid == _spk_t else ' '}T{tid}={s:+.2f}"
+                                for tid, s in sorted(_scs.items())))
                     _attrib = None
                     if _spk is not None and _track_views:
                         _attrib = next((v for v in _track_views if v.track_id == _spk[0]), None)

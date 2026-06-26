@@ -1151,7 +1151,7 @@ async function doRegister(){
 poll();
 window.addEventListener('resize',()=>{if(document.getElementById('view-conv').classList.contains('active'))drawTimeline()});
 </script>
-<div id="reg-panel" style="position:fixed;left:12px;bottom:12px;z-index:50;background:#1e1e2e;border:1px solid #374151;border-radius:8px;padding:8px 10px;font:12px system-ui;color:#e5e7eb;width:240px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+<div id="reg-panel" style="position:fixed;right:12px;bottom:12px;z-index:50;background:#1e1e2e;border:1px solid #374151;border-radius:8px;padding:8px 10px;font:12px system-ui;color:#e5e7eb;width:240px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
   <div style="font-weight:600;margin-bottom:6px">🏷 注册身份(点下方人脸填入 track)</div>
   <div style="display:flex;gap:4px;margin-bottom:6px">
     <input id="reg-tid" type="number" placeholder="track" style="width:56px;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
