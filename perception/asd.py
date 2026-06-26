@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import os
 import sys
+import time
+import threading
+import collections
 import numpy as np
 from pathlib import Path
 
@@ -132,3 +135,154 @@ class SpeakerDetector:
         except Exception as e:
             print(f"[asd] score 异常({type(e).__name__}: {e})", flush=True)
             return None
+
+
+SAMPLES_PER_FRAME = AUDIO_SR // VIDEO_FPS    # 640(16000/25)
+
+
+class AudioRing:
+    """线程安全 16kHz mono 环形缓冲(供 ASD 取同步音频窗口)。"""
+
+    def __init__(self, seconds: float = 3.0):
+        self.maxlen = int(AUDIO_SR * seconds)
+        self.buf = np.zeros(self.maxlen, dtype=np.float32)
+        self.filled = 0
+        self.pos = 0
+        self._lock = threading.Lock()
+
+    def push(self, mono):
+        x = np.asarray(mono, dtype=np.float32).reshape(-1)
+        n = x.size
+        if n == 0:
+            return
+        if n >= self.maxlen:
+            x = x[-self.maxlen:]; n = self.maxlen
+        with self._lock:
+            end = self.pos + n
+            if end <= self.maxlen:
+                self.buf[self.pos:end] = x
+            else:
+                k = self.maxlen - self.pos
+                self.buf[self.pos:] = x[:k]
+                self.buf[:end - self.maxlen] = x[k:]
+            self.pos = end % self.maxlen
+            self.filled = min(self.maxlen, self.filled + n)
+
+    def get_last(self, n):
+        with self._lock:
+            n = min(n, self.filled)
+            if n <= 0:
+                return None
+            start = (self.pos - n) % self.maxlen
+            if start + n <= self.maxlen:
+                return self.buf[start:start + n].copy()
+            return np.concatenate([self.buf[start:], self.buf[:(start + n) % self.maxlen]])
+
+
+class AsdEngine:
+    """编排:per-track 灰度脸累积 + 独立线程跑 LR-ASD → per-track 说话分(EMA)。
+    d01 用法:feed_audio(mic mono) / feed_crop(track_id, rgb_face, now) / start();
+              读 scores() 或 speaker()。"""
+
+    def __init__(self, detector: "SpeakerDetector | None" = None,
+                 win_frames: int = 25, min_frames: int = 12,
+                 score_interval_s: float = 0.16, crop_fps: int = VIDEO_FPS,
+                 ema: float = 0.5, speak_thresh: float = 0.0, stale_s: float = 1.0):
+        self.detector = detector or SpeakerDetector()
+        self.win = win_frames
+        self.min_frames = min_frames
+        self.score_interval = score_interval_s
+        self.crop_dt = 1.0 / float(crop_fps)
+        self.ema = ema
+        self.speak_thresh = speak_thresh
+        self.stale_s = stale_s
+        self.audio = AudioRing()
+        self._crops: dict[int, collections.deque] = {}
+        self._last_crop_t: dict[int, float] = {}
+        self._scores: dict[int, float] = {}
+        self._score_t: dict[int, float] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    @property
+    def available(self) -> bool:
+        return self.detector.available
+
+    def feed_audio(self, mono):
+        self.audio.push(mono)
+
+    def feed_crop(self, track_id: int, rgb_face: np.ndarray, now: float):
+        """对每个 confirmed track 喂一张人脸 ROI(RGB);内部限到 ~crop_fps 并预处理为 112 灰度。"""
+        last = self._last_crop_t.get(track_id, 0.0)
+        if now - last < self.crop_dt:
+            return
+        try:
+            g = preprocess_face(rgb_face)
+        except Exception:
+            return
+        with self._lock:
+            dq = self._crops.get(track_id)
+            if dq is None:
+                dq = collections.deque(maxlen=self.win)
+                self._crops[track_id] = dq
+            dq.append(g)
+        self._last_crop_t[track_id] = now
+
+    def start(self):
+        if self._thread is not None or not self.available:
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def gc(self, active_ids):
+        """丢弃已消失 track 的状态。"""
+        alive = set(active_ids)
+        with self._lock:
+            for d in (self._crops, self._scores):
+                for tid in [k for k in d if k not in alive]:
+                    d.pop(tid, None)
+            for tid in [k for k in self._last_crop_t if k not in alive]:
+                self._last_crop_t.pop(tid, None)
+                self._score_t.pop(tid, None)
+
+    def scores(self) -> dict[int, float]:
+        with self._lock:
+            return dict(self._scores)
+
+    def speaker(self):
+        """返回 (track_id, score):分最高且 >阈值 的 track;否则 None。"""
+        now = time.monotonic()
+        with self._lock:
+            cand = [(tid, s) for tid, s in self._scores.items()
+                    if s > self.speak_thresh and (now - self._score_t.get(tid, 0.0)) < self.stale_s]
+        if not cand:
+            return None
+        return max(cand, key=lambda kv: kv[1])
+
+    def _loop(self):
+        while not self._stop.is_set():
+            time.sleep(self.score_interval)
+            if not self.detector.available:
+                continue
+            with self._lock:
+                items = [(tid, list(dq)) for tid, dq in self._crops.items()]
+            for tid, crops in items:
+                if len(crops) < self.min_frames:
+                    continue
+                audio = self.audio.get_last(len(crops) * SAMPLES_PER_FRAME + 800)
+                if audio is None or audio.size < SAMPLES_PER_FRAME:
+                    continue
+                if float(np.abs(audio).max()) <= 4.0:    # 归一化 float → int16 量级(MFCC 期望)
+                    audio = audio * 32768.0
+                r = self.detector.score(crops, audio)
+                if r is None:
+                    continue
+                sc = r["mean_score"]
+                with self._lock:
+                    prev = self._scores.get(tid)
+                    self._scores[tid] = sc if prev is None else (self.ema * sc + (1 - self.ema) * prev)
+                    self._score_t[tid] = time.monotonic()

@@ -145,13 +145,17 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 _ax0, _ay0, _ax1, _ay1 = int(_b[0]), int(_b[1]), int(_b[2]), int(_b[3])
                 _is_sel = bool(_v.get("selected"))
                 _is_conf = bool(_v.get("confirmed"))
-                _bcolor = (255, 80, 0) if _is_sel else (150, 150, 150)  # 选中=蓝, 其余=灰
-                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, 2 if _is_sel else 1)
-                # 顶部标签:身份(未确认 Unknown-N / 已确认真名)+ trackid —— 每框常驻
+                _spk = bool(_v.get("speaking"))      # ASD:正在说话
+                _asc = _v.get("asd")                 # ASD 说话分(signed)
+                # 框色:说话=绿, 选中(说话人候选)=蓝, 其余=灰
+                _bcolor = (0, 200, 0) if _spk else ((255, 80, 0) if _is_sel else (150, 150, 150))
+                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, 2 if (_spk or _is_sel) else 1)
+                # 顶部标签:身份(Unknown-N/真名)+ trackid + ASD 说话分 —— 每框常驻
                 _nm = _v.get("name") or "?"
-                _top = f"{_nm} T{_v.get('track_id')}"
+                _asd_s = f" {_asc:+.1f}" if _asc is not None else ""
+                _top = f"{_nm} T{_v.get('track_id')}{_asd_s}"
                 _cjk_w = sum(18 if ord(c) > 127 else 10 for c in _top) + 6
-                _lblc = (255, 80, 0) if _is_sel else ((0, 140, 0) if _is_conf else (90, 90, 90))
+                _lblc = (0, 150, 0) if _spk else ((255, 80, 0) if _is_sel else ((0, 140, 0) if _is_conf else (90, 90, 90)))
                 _ly = _ay0 - 20 if _ay0 - 20 >= 0 else _ay1   # 靠顶则画到框下方
                 _cv2.rectangle(bgr, (_ax0, _ly), (_ax0 + _cjk_w, _ly + 20), _lblc, -1)
                 _put_cjk_text(bgr, _top, (_ax0 + 2, _ly + 2), (255, 255, 255))

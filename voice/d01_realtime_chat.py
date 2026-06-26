@@ -99,6 +99,7 @@ from identity.owner import OwnerManager
 from memory.manager import MemoryManager, QWEN_TOOLS
 from perception.face_pipeline import FaceReIDPipeline
 from perception.face_config import FaceSystemConfig
+from perception.asd import AsdEngine
 
 from voice.config import (                          # ← 配置常量集中管理
     MODEL, VISION_MODEL, VISION_BASE_URL, VOICE, INSTRUCTIONS,
@@ -157,6 +158,7 @@ _id_recognizer: IdentityRecognizer | None = None
 _memory_mgr: MemoryManager | None = None
 _owner_mgr: OwnerManager | None = None
 _face_pipeline = None   # FaceReIDPipeline(ByteTrack + 三区间);main() 初始化
+_asd_engine = None      # AsdEngine(LR-ASD 谁在说话);main() 初始化
 
 # 仿真模式摄像头源切换:USE_WEBCAM=1 时 frame_pump_loop 从 Mac 摄像头取帧,
 # 绕过 MuJoCo 虚拟摄像头(空棋盘格场景无人脸,人脸检测永远失败)。
@@ -543,24 +545,51 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                     _dw, _dh = _W0 // DECIMATE, _H0 // DECIMATE   # 与 frame_pump 的 resize 尺寸精确一致
                     _primary, _track_views = _face_pipeline.process(
                         all_faces, (_dw, _dh), _full_rgb, DECIMATE, now, _doa_selected_idx)
-                    if _primary is not None:
-                        u_raw, v_raw = _primary.u, _primary.v
-                        if _primary.person_id is not None:
+                    # ── ASD:每 track 喂全分辨率灰度脸(谁在说话)──
+                    if _asd_engine is not None and _asd_engine.available and _track_views:
+                        for _v in _track_views:
+                            _b = _v.bbox_px
+                            _bw, _bh = (_b[2] - _b[0]), (_b[3] - _b[1])
+                            _x0 = max(0, int((_b[0] - 0.4 * _bw) * DECIMATE))
+                            _y0 = max(0, int((_b[1] - 0.4 * _bh) * DECIMATE))
+                            _x1 = min(_W0, int((_b[2] + 0.4 * _bw) * DECIMATE))
+                            _y1 = min(_H0, int((_b[3] + 0.4 * _bh) * DECIMATE))
+                            if _x1 - _x0 >= 16 and _y1 - _y0 >= 16:
+                                _asd_engine.feed_crop(_v.track_id, _full_rgb[_y0:_y1, _x0:_x1], now)
+                        _asd_engine.gc([_v.track_id for _v in _track_views])
+
+                    # ── 头部目标 + 发言归属:ASD 说话人优先,否则回退 ──
+                    _asd_on = _asd_engine is not None and _asd_engine.available
+                    _spk = _asd_engine.speaker() if _asd_on else None
+                    _attrib = None
+                    if _spk is not None and _track_views:
+                        _attrib = next((v for v in _track_views if v.track_id == _spk[0]), None)
+                    if _attrib is None:
+                        if not _asd_on:
+                            _attrib = _primary                      # 无 ASD:回退最大脸(老行为)
+                        elif _track_views and len(_track_views) == 1:
+                            _attrib = _track_views[0]               # 单人:即使没说话也归属(记忆可注入)
+                        # 多人 + ASD 未定说话人 → 归属保持不变(不靠弱证据切人)
+                    _head_view = _attrib if _attrib is not None else _primary
+                    if _head_view is not None:
+                        u_raw, v_raw = _head_view.u, _head_view.v
+                    if _attrib is not None and _attrib.person_id is not None:
+                        with st.lock:
+                            old_pid = st.current_person_id
+                        if _attrib.person_id != old_pid:
+                            _pname = _attrib.person_name
+                            if _memory_mgr is not None:
+                                _mn = _memory_mgr.get_name(_attrib.person_id)
+                                if _mn:
+                                    _pname = _mn
                             with st.lock:
-                                old_pid = st.current_person_id
-                            if _primary.person_id != old_pid:
-                                _pname = _primary.person_name
-                                if _memory_mgr is not None:
-                                    _mn = _memory_mgr.get_name(_primary.person_id)
-                                    if _mn:
-                                        _pname = _mn
-                                with st.lock:
-                                    st.current_person_id = _primary.person_id
-                                    st.current_person_name = _pname
-                                    st.current_is_owner = (_owner_mgr.is_owner(_primary.person_id) if _owner_mgr else False)
-                                    st.identity_injected = False
-                                    st.identity_injected_pid = None
-                                log(f"🆔 {_pname or _primary.person_id[:12]} (track {_primary.track_id}/{_primary.zone})")
+                                st.current_person_id = _attrib.person_id
+                                st.current_person_name = _pname
+                                st.current_is_owner = (_owner_mgr.is_owner(_attrib.person_id) if _owner_mgr else False)
+                                st.identity_injected = False
+                                st.identity_injected_pid = None
+                            _src = "ASD" if (_spk and _attrib.track_id == _spk[0]) else "fallback"
+                            log(f"🆔 {_pname or _attrib.person_id[:12]} (track {_attrib.track_id}/{_attrib.zone}, {_src})")
                 except Exception as e:
                     log(f"⚠ 人脸 pipeline 异常:{e}")
 
@@ -798,15 +827,23 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
             # 每 track 视图:真实框(降采样像素)+ 身份(Unknown-N/真名)+ trackid + 是否选中
             _tv = []
             if _track_views:
-                _sel_tid = _primary.track_id if _primary is not None else None
+                _asd_scores = _asd_engine.scores() if _asd_engine is not None else {}
+                _spk_tid = None
+                if _asd_engine is not None and _asd_engine.available:
+                    _sp = _asd_engine.speaker()
+                    _spk_tid = _sp[0] if _sp else None
+                _sel_tid = _spk_tid if _spk_tid is not None else (_primary.track_id if _primary is not None else None)
                 for v in _track_views:
+                    _asc = _asd_scores.get(v.track_id)
                     _tv.append({
                         "box": v.bbox_px,           # [x1,y1,x2,y2] 降采样像素
                         "track_id": v.track_id,
                         "name": v.person_name,      # Unknown-N / 真名 / None(未绑定)
                         "zone": v.zone,
                         "confirmed": v.is_confirmed,
-                        "selected": (v.track_id == _sel_tid),
+                        "selected": (v.track_id == _sel_tid),   # = ASD 说话人(无则最大脸)
+                        "asd": round(_asc, 2) if _asc is not None else None,
+                        "speaking": (_asc is not None and _asc > 0),
                     })
             with st.lock:
                 st.dbg_det = {
@@ -1562,7 +1599,7 @@ def main() -> int:
     st.no_expression = no_expression
     st.no_memory = no_memory
 
-    global _id_recognizer, _memory_mgr, _owner_mgr, _face_pipeline
+    global _id_recognizer, _memory_mgr, _owner_mgr, _face_pipeline, _asd_engine
     _owner_mgr = OwnerManager()
     _id_recognizer = IdentityRecognizer()
     _memory_mgr = MemoryManager(owner_mgr=_owner_mgr,
@@ -1572,6 +1609,10 @@ def main() -> int:
                                       FaceSystemConfig(), log_fn=log)
     _n_gal = _face_pipeline.load_gallery()
     log(f"🧬 ReID pipeline 就绪(ByteTrack + 三区间, gallery {_n_gal} 人)")
+    _asd_engine = AsdEngine()           # LR-ASD 谁在说话(独立评分线程)
+    _asd_engine.start()
+    log("🗣 ASD 就绪(LR-ASD 谁在说话)" if _asd_engine.available
+        else "⚠ ASD 不可用(缺 torch/权重)→ 发言归属回退最大脸")
     if _id_recognizer.startup_merged:
         for drop_pid, keep_pid in _id_recognizer.startup_merged.items():
             _memory_mgr.merge_memories(keep_pid, drop_pid)
@@ -1722,6 +1763,8 @@ def main() -> int:
                         time.sleep(0.01)
                         continue
                     mono = chunk[:, 0]
+                    if _asd_engine is not None:
+                        _asd_engine.feed_audio(mono)   # ASD 同步音频(谁在说话)
                     # WAKE-01:同一份 16k mono 始终喂 KWS(本地);engaged 才扇出给 Qwen
                     wake = kws_gate.feed(mono, chunk) if kws_gate is not None else False
                     with st.lock:
@@ -1939,6 +1982,8 @@ def main() -> int:
                         log(f"💾 gallery 已持久化({len(_face_pipeline.store.identities)} 身份)")
                     except Exception as _e:
                         log(f"⚠ gallery 落盘失败:{type(_e).__name__}")
+                if _asd_engine is not None:
+                    _asd_engine.stop()
         finally:
             try:
                 mini.set_automatic_body_yaw(True)
