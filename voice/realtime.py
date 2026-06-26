@@ -129,11 +129,21 @@ class ChatCallback(OmniRealtimeCallback):
                 log("🤫 检测到你说完了,等模型回应…")
             elif etype == "conversation.item.input_audio_transcription.completed":
                 _transcript = (event.get("transcript") or "").strip()
-                log(f"📝 听到的是:「{_transcript}」")
+                # ── ASD 归属:本句说话人(画面内)/ 画外(无画面说话人 → 专门标签)──
+                with st.lock:
+                    _asp = st.asd_speaker
+                if _asp is not None and (now - _asp.get("at", 0.0)) < 1.5:
+                    _tid = _asp.get("track_id")
+                    _log_pid = _asp.get("pid") or f"_track{_tid}"      # 在画面但未识别:临时 track 键
+                    _log_name = _asp.get("name") or f"?T{_tid}"
+                    _attr_tag = f"{_log_name} (T{_tid}, ASD{_asp.get('score', 0.0):+.1f})"
+                else:
+                    _log_pid = "_offscreen"                            # 画外:专门归属标签(不张冠李戴)
+                    _log_name = "画外"
+                    _attr_tag = "画外(无画面说话人)"
+                log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
                 if _transcript:
                     with st.lock:
-                        _log_pid = st.current_person_id or "_unknown"
-                        _log_name = st.current_person_name
                         st.display_transcript_seq += 1
                         st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "user", "text": _transcript, "pid": _log_pid, "name": _log_name})
                         if len(st.display_transcript) > 100:
@@ -143,7 +153,9 @@ class ChatCallback(OmniRealtimeCallback):
                             st.conversation_log.setdefault(_log_pid, []).append(("user", _transcript))
                             _check_log = st.conversation_log.get(_log_pid, [])
                             _est_tok = sum(len(t) * 1.5 for _, t in _check_log)
-                        if _est_tok > CONV_SUMMARY_THRESHOLD and _log_pid != "_unknown" and self.memory_mgr:
+                        _attributable = (_log_pid not in ("_unknown", "_offscreen")
+                                         and not _log_pid.startswith("_track"))
+                        if _est_tok > CONV_SUMMARY_THRESHOLD and _attributable and self.memory_mgr:
                             with st.lock:
                                 _snap = list(st.conversation_log.get(_log_pid, []))
                                 st.conversation_log[_log_pid] = []

@@ -570,6 +570,15 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                             log("🗣 ASD: " + "  ".join(
                                 f"{'▶' if tid == _spk_t else ' '}T{tid}={s:+.2f}"
                                 for tid, s in sorted(_scs.items())))
+                    # 维护"画面内 ASD 说话人"(供 user query 归属;None=画外/无人说话)
+                    _asp_set = None
+                    if _spk is not None and _track_views:
+                        _sv = next((v for v in _track_views if v.track_id == _spk[0]), None)
+                        if _sv is not None:
+                            _asp_set = {"pid": _sv.person_id, "name": _sv.person_name,
+                                        "track_id": _sv.track_id, "score": float(_spk[1]), "at": now}
+                    with st.lock:
+                        st.asd_speaker = _asp_set
                     _attrib = None
                     if _spk is not None and _track_views:
                         _attrib = next((v for v in _track_views if v.track_id == _spk[0]), None)
@@ -1978,7 +1987,8 @@ def main() -> int:
                     with st.lock:
                         _remaining = dict(st.conversation_log)
                     for _exit_pid, _exit_log in _remaining.items():
-                        if _exit_pid != "_unknown" and len(_exit_log) >= 2:
+                        if (_exit_pid not in ("_unknown", "_offscreen")
+                                and not _exit_pid.startswith("_track") and len(_exit_log) >= 2):
                             log(f"📝 退出摘要({_exit_pid[:12]})…")
                             dialog.save_summary(_exit_pid, _exit_log)
                 log("已释放 Realtime 连接与 Reachy 媒体资源。")
