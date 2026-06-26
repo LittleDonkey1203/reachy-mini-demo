@@ -82,6 +82,7 @@ import random
 from collections import deque
 from datetime import datetime, timezone
 
+import cv2  # noqa: E402,F401  必须在 numpy 之前 import:规避 Windows spawn 下 cv2/numpy 循环 import 崩溃
 import numpy as np
 from PIL import Image
 import pytweening
@@ -96,6 +97,8 @@ from perception.vision_worker import vision_worker as _vision_worker_fn
 from identity.recognizer import IdentityRecognizer, IDENTITY_COOLDOWN_S
 from identity.owner import OwnerManager
 from memory.manager import MemoryManager, QWEN_TOOLS
+from perception.face_pipeline import FaceReIDPipeline
+from perception.face_config import FaceSystemConfig
 
 from voice.config import (                          # ← 配置常量集中管理
     MODEL, VISION_MODEL, VISION_BASE_URL, VOICE, INSTRUCTIONS,
@@ -153,6 +156,7 @@ import voice.state as _st_mod
 _id_recognizer: IdentityRecognizer | None = None
 _memory_mgr: MemoryManager | None = None
 _owner_mgr: OwnerManager | None = None
+_face_pipeline = None   # FaceReIDPipeline(ByteTrack + 三区间);main() 初始化
 
 # 仿真模式摄像头源切换:USE_WEBCAM=1 时 frame_pump_loop 从 Mac 摄像头取帧,
 # 绕过 MuJoCo 虚拟摄像头(空棋盘格场景无人脸,人脸检测永远失败)。
@@ -387,6 +391,22 @@ def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event)
             cap.release()
 
 
+def _make_face_embedder(rec):
+    """给 FaceReIDPipeline 注入 ArcFace 提特征器:全分辨率帧 + 5点 kps → 对齐 → 512d L2。"""
+    from identity.recognizer import _align_face, _crop_face
+
+    def _embed(full_rgb, box_xywh, kps):
+        try:
+            if kps and len(kps) == 5:
+                aligned = _align_face(full_rgb, kps)
+            else:
+                aligned = _crop_face(full_rgb, box_xywh)
+            return rec.arcface.get_embedding(aligned)
+        except Exception:
+            return None
+    return _embed
+
+
 def vision_result_loop(st: State, result_q, stop: threading.Event,
                        cb_ref: list = None) -> None:
     """消费视觉子进程结果 → 时间常数型积分跟随目标(逻辑同 F-01,数据源改进程队列)。
@@ -403,13 +423,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
     miss_streak = 0
     hit_window: collections.deque = collections.deque(maxlen=LOCK_WIN)
     locked = False
-    _id_last_t = 0.0           # 上次身份识别时刻(限频)
-    _id_switch_candidate = None  # 待确认的新人 pid(防止低 sim 抖动切换)
-    _id_switch_count = 0         # 连续匹配新人的次数
-    _id_switch_last_t = 0.0      # 上次切人时刻(切换冷却)
-    ID_SWITCH_HIGH_SIM = 0.65    # sim 高于此值立即切换(可信)
-    ID_SWITCH_CONFIRM_N = 3      # sim 低于 HIGH_SIM 时需连续 N 次才切换
-    ID_SWITCH_COOLDOWN_S = 6.0   # 切人后冷却时间，防止来回弹
+    # 身份/切换/限频逻辑已迁至 FaceReIDPipeline(ByteTrack + 三区间 + EMA),此处不再维护
     n_det = 0
     n_hit = 0
     infer_acc: list[float] = []
@@ -427,16 +441,15 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
             continue
         now = time.monotonic()
         face = msg.get("face")
-        u_raw, v_raw = (face[0], face[1]) if face else (None, None)
+        u_raw, v_raw = None, None   # 由 FaceReIDPipeline 的 primary 提供(下方)
         infer_ms = msg.get("face_ms", 0.0)
         n_det += 1
         infer_acc.append(infer_ms)
-        # 身份识别(P0):有 face_box 且距上次 >2s 时跑一次(不阻塞帧率)
+        # 人脸检测结果(供 FaceReIDPipeline)+ 多人脸 DOA 选说话人
         face_box = msg.get("face_box")
         face_kps = msg.get("face_kps")
         all_faces = msg.get("all_faces")
         _doa_selected_idx = None
-        # 多人脸 DOA 选人:优先用声源方向选定的脸做身份识别
         if all_faces and len(all_faces) > 1:
             with st.lock:
                 _doa_r = st.doa_resid_stable
@@ -450,59 +463,56 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                     _sel = all_faces[_doa_selected_idx]
                     face_box = _sel["box"]
                     face_kps = _sel.get("kps")
-        if face_box is not None and (now - _id_last_t) > IDENTITY_COOLDOWN_S:
-            _id_last_t = now
+
+        # ── ByteTrack + 全分辨率 ArcFace + 三区间身份(FaceReIDPipeline)──
+        if _face_pipeline is not None and all_faces is not None:
             with st.lock:
                 _raw_frame = st.latest_frame
             if _raw_frame is not None:
                 try:
-                    _rgb_small = np.ascontiguousarray(_raw_frame[::DECIMATE, ::DECIMATE, ::-1])
-                    pid, pname, sim, is_new = _id_recognizer.recognize(
-                        _rgb_small, face_box, face_kps)
-                    if pid is not None:
-                        if _memory_mgr is not None:
-                            mem_name = _memory_mgr.get_name(pid)
-                            if mem_name:
-                                pname = mem_name
-                        # 身份稳定性:防止低 sim 抖动切换
-                        with st.lock:
-                            old_pid = st.current_person_id
-                        accept = False
-                        if old_pid is None or old_pid == pid or is_new:
-                            accept = True
-                            _id_switch_candidate = None
-                            _id_switch_count = 0
-                        elif (now - _id_switch_last_t) < ID_SWITCH_COOLDOWN_S:
-                            pass
-                        elif sim >= ID_SWITCH_HIGH_SIM:
-                            accept = True
-                            _id_switch_candidate = None
-                            _id_switch_count = 0
-                        else:
-                            if _id_switch_candidate == pid:
-                                _id_switch_count += 1
-                            else:
-                                _id_switch_candidate = pid
-                                _id_switch_count = 1
-                            if _id_switch_count >= ID_SWITCH_CONFIRM_N:
-                                accept = True
-                                _id_switch_candidate = None
-                                _id_switch_count = 0
-                        if accept:
+                    _full_rgb = np.ascontiguousarray(_raw_frame[:, :, ::-1])  # 全分辨率 BGR→RGB
+                    _dh, _dw = _raw_frame[::DECIMATE, ::DECIMATE].shape[:2]
+                    _primary, _ = _face_pipeline.process(
+                        all_faces, (_dw, _dh), _full_rgb, DECIMATE, now, _doa_selected_idx)
+                    if _primary is not None:
+                        u_raw, v_raw = _primary.u, _primary.v
+                        if _primary.person_id is not None:
                             with st.lock:
-                                st.current_person_id = pid
-                                st.current_person_name = pname
-                                st.current_is_owner = (_owner_mgr.is_owner(pid) if _owner_mgr else False)
-                                if old_pid != pid:
+                                old_pid = st.current_person_id
+                            if _primary.person_id != old_pid:
+                                _pname = _primary.person_name
+                                if _memory_mgr is not None:
+                                    _mn = _memory_mgr.get_name(_primary.person_id)
+                                    if _mn:
+                                        _pname = _mn
+                                with st.lock:
+                                    st.current_person_id = _primary.person_id
+                                    st.current_person_name = _pname
+                                    st.current_is_owner = (_owner_mgr.is_owner(_primary.person_id) if _owner_mgr else False)
                                     st.identity_injected = False
                                     st.identity_injected_pid = None
-                                    _id_switch_last_t = now
-                            tag = "NEW" if is_new else "KNOWN"
-                            log(f"🆔 [{tag}] {pname or pid[:12]} (sim={sim:.2f})")
-                    # ── 安全删除工作流: 身份验证 ──
-                    with st.lock:
-                        _cwf = st.clear_workflow
-                    if _cwf is not None and pid is not None:
+                                log(f"🆔 {_pname or _primary.person_id[:12]} (track {_primary.track_id}/{_primary.zone})")
+                except Exception as e:
+                    log(f"⚠ 人脸 pipeline 异常:{e}")
+
+        # ── 安全删除工作流:仅工作流激活时单独识别取 (pid, sim) 驱动高阈值验证 ──
+        with st.lock:
+            _cwf = st.clear_workflow
+        if _cwf is not None and face_box is not None and _face_pipeline is not None:
+            with st.lock:
+                _raw_frame = st.latest_frame
+            if _raw_frame is not None:
+                try:
+                    _full_rgb2 = np.ascontiguousarray(_raw_frame[:, :, ::-1])
+                    _bxf = tuple(int(c * DECIMATE) for c in face_box)
+                    _kpf = ([(x * DECIMATE, y * DECIMATE) for x, y in face_kps]
+                            if face_kps else None)
+                    # 删除验证走与主路径同一身份空间(gallery identity_id)
+                    _emb_v = _face_pipeline.embedder(_full_rgb2, _bxf, _kpf)
+                    _mr = _face_pipeline.store.match(_emb_v) if _emb_v is not None else None
+                    pid = _mr.identity_id if (_mr and _mr.zone == "known") else None
+                    sim = _mr.confidence if _mr else 0.0
+                    if pid is not None:
                         _cwf_phase = _cwf.get("phase")
                         if _cwf_phase == "verifying":
                             if pid == _cwf["actor_pid"] and sim >= CLEAR_VERIFY_SIM:
@@ -1468,11 +1478,14 @@ def main() -> int:
     st.no_expression = no_expression
     st.no_memory = no_memory
 
-    global _id_recognizer, _memory_mgr, _owner_mgr
+    global _id_recognizer, _memory_mgr, _owner_mgr, _face_pipeline
     _owner_mgr = OwnerManager()
     _id_recognizer = IdentityRecognizer()
     _memory_mgr = MemoryManager(owner_mgr=_owner_mgr,
                                  face_db=_id_recognizer.db)
+    _face_pipeline = FaceReIDPipeline(_make_face_embedder(_id_recognizer), FaceSystemConfig())
+    _n_gal = _face_pipeline.load_gallery()
+    log(f"🧬 ReID pipeline 就绪(ByteTrack + 三区间, gallery {_n_gal} 人)")
     if _id_recognizer.startup_merged:
         for drop_pid, keep_pid in _id_recognizer.startup_merged.items():
             _memory_mgr.merge_memories(keep_pid, drop_pid)
