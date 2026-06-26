@@ -143,7 +143,7 @@ from voice.config import (                          # ← 配置常量集中管�
     EXPR_SMILE_ANT, EXPR_FROWN_ANT, EXPR_BLEND_TAU,
     AUDIO_GATE_TIMEOUT_S,
     _NOPARAM, BASE_TOOLS, SNAP_PROMPTS, _DIR_MAP,
-    greet_prompt,
+    greet_prompt, parse_judge,
 )
 from voice.state import (                           # ← 共享状态 + 日志 + 录制
     State, OneEuroFilter, log,

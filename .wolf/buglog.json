@@ -324,6 +324,18 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-06-26T15:10:00.000Z"
+    },
+    {
+      "id": "bug-055",
+      "timestamp": "2026-06-26T19:40:00.000Z",
+      "error_message": "NameError: name 'parse_judge' is not defined — 看图'指向判断'请求模型不回复",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "parse_judge 定义在 voice/config.py:307,但 d01 的 from voice.config import(...) 漏导入它(upstream 重构 d01 时遗漏)。用户问'你看一下我手上拿的什么东西',模型判为指向 → snapshot_loop 走两段式指向判断 → 调 parse_judge(desc) → NameError → snapshot 线程崩 → 该轮不回复。普通看图(非指向)路径不调 parse_judge,正常。",
+      "fix": "d01 config import 加 parse_judge(挨着 greet_prompt)。py_compile 绿 + import 验证通过。",
+      "tags": ["import", "NameError", "snapshot", "看图", "指向", "parse_judge", "no-reply"],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-26T19:40:00.000Z"
     }
   ]
 }
