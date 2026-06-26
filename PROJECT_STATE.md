@@ -2,6 +2,18 @@
 
 ## 已完成事项
 
+### 人脸检测/跟踪/ReID 全量迁移(参考 face-tracker-demo,2026-06-26)
+完全替换旧 FaceSelector + 零散身份逻辑,落地 5 commit(3781515→9d46898):
+- **检测**:vision_worker 默认 InsightFace **SCRFD**(buffalo_sc/det_500m,子进程),输出 all_faces=[{u,v,h,box,kps5,conf}];保留 MediaPipe(手势)与 YuNet 作可选 backend(FACE_BACKEND 切换)。
+- **跟踪**:`perception/face_tracker.py` 忠实移植 **ByteTrack**(KalmanBox + 两段 BYTE 关联 + lost-track embedding ReID + Tentative/Confirmed/Lost)。
+- **身份**:`identity/identity_store.py` **三区间**(known≤0.65 / unsure / unknown≥0.80,cosine 距离),provisional(Unknown-N 自动)vs confirmed(命名),质量门 min_quality=0.40,distance_log 标定;阈值直接复用 face-tracker-demo(检测+识别全复用故可迁移)。
+- **质量/平滑/聚类**:quality.py(FIQA 代理) + clustering.py(EmbeddingSmoother + GalleryClustering 完整移植)。
+- **集成层**:`perception/face_pipeline.py`(FaceReIDPipeline)串联 ByteTracker+全分辨率 ArcFace(w600k_mbf,复用既有 recognizer.arcface)+IdentityStore;懒提特征(per-track 限频 + 每帧预算 + DOA 优先);出口仅归一化 u/v/h(铁律:不写 st.state/不调 head_control)。
+- **d01 接线**:vision_result_loop 调 pipeline,primary→头部跟随,person_id(=gallery identity_id)→ st.current_person_id → 既有记忆注入/Owner 不变即可工作;安全删除工作流改走同一身份空间;cv2 提前 import 规避 spawn 崩溃。
+- **数据**:新开 `data/gallery.json`(旧库已清);记忆 keyed on gallery identity_id。
+- **验证**:py_compile 全绿;26 单测绿(test_facereid_port 20 + test_face_pipeline 6);SCRFD 子进程冒烟 6 脸/conf0.88。**待实机全链路验证**。
+- **遗留(非阻塞)**:①命名→gallery confirm_identity 钩子;②在线 clustering 维护(周期 find_mergeable_pairs/compact);③Dashboard track_id/zone 叠层;④_vis_enabled 门仍判 face_landmarker.task(机器人上已存在,对 SCRFD 非必需)。
+
 ### 架构
 - 6 模块拆分 → d01 瘦身(领域驱动): 拆出 kws.py / fusion.py / safety.py / realtime.py
 - 方向门控白名单化(仅 TRACKING 关门)
