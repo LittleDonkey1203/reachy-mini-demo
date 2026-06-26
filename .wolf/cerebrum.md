@@ -17,13 +17,14 @@
 
 - **Project:** Reachy Mini Lite 语音交互机器人(USB 版)，Qwen3.5-Omni-Realtime 驱动
 - **运行环境:** macOS Intel + Python 3.12 + dashscope SDK
-- **视觉后端:** YuNet 默认(100%检出率), MediaPipe 可选(--face-mp), ArcFace 身份识别
+- **视觉后端:** SCRFD/InsightFace 默认(2026-06-26 迁移,关键点更稳), YuNet/MediaPipe 可选(FACE_BACKEND 切换), ArcFace 身份识别;新 ReID 链路 = SCRFD检测 + ByteTrack + 三区间 IdentityStore(gallery.json)
 - **语音协议:** Qwen-Omni-Realtime WebSocket, update_session 做记忆注入(整体替换), 非 create_item(只增不删)
 - **状态机:** 9 态 FSM, TRACKING 态是核心对话状态, 方向门控只在此状态生效
 - **记忆存储:** 认知记忆架构(Entity Memory + Episodic Memory + Working Memory 注入)
 - **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `list[str]` 中文短句
 - **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+draft facts 生成最终 entity memory + episodic memory
 - **清华镜像:** UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ 所有 pip/uv 安装必用
+- **Realtime function-calling:** flash-realtime 触发可靠性差(OmniGAIA flash≈33.9 vs plus≈57.2),会把工具"说成文本"不发 function_call → 记忆/动作丢失;记忆/动作场景必用 plus。Qwen-Omni-Realtime 不支持 tool_choice/parallel_tool_calls,无法强制调用。诊断:日志看 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记;动作全走"标签泄漏兜底"=模型在文本化工具。realtime.py:110 的"已注册"日志是写死文本,不反映真实 tools payload。
 
 ## Do-Not-Repeat
 
@@ -41,6 +42,9 @@
 - [2026-06-25] **d01 重构要领域驱动**: 移动代码时按领域归属(语音/记忆/感知)分配模块，不按"从哪里提取"机械分配。ChatCallback + 闭包 → 完整对话协议层(realtime.py)，不是"callback.py"。
 - [2026-06-25] **多线程 flag 消费顺序**: 清除 flag 必须在写入后续 state 之后(同一锁或之后的锁内)，否则其他线程在 flag=False + state=旧值 窗口误判。不要用超时阈值修补竞态——调整操作顺序消除窗口。
 - [2026-06-25] **conv=None 时 KWS 唤醒不能丢弃**: audio loop 在非 ARMED 状态 conv=None 时必须处理 KWS 命中(重连 WS)，否则 WS 意外断连后永远唤不醒。
+
+- [2026-06-26] **诊断"记忆没写入"先看工具有没有被调用**: 不要直接跳到持久化链(save_gallery/flush)。先看日志 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记是否出现——这局根因是 flash 模型根本没发 function call(把"我记住啦"说成文本),持久化 bug 是次级。记忆/动作场景别用 flash-realtime,用 plus。
+- [2026-06-26] **realtime.py:110 的"已注册"日志不可信**: 它是写死文本,漏列 end_session 和 4 个记忆工具,不反映真实 update_session(tools=...) payload。别拿它当"工具没注册"的证据。真实注册看 d01:175→1544→1561 + realtime.py:388/463。
 
 ## Decision Log
 

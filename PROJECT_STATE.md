@@ -14,6 +14,17 @@
 - **验证**:py_compile 全绿;26 单测绿(test_facereid_port 20 + test_face_pipeline 6);SCRFD 子进程冒烟 6 脸/conf0.88。**待实机全链路验证**。
 - **遗留(非阻塞)**:①命名→gallery confirm_identity 钩子;②在线 clustering 维护(周期 find_mergeable_pairs/compact);③Dashboard track_id/zone 叠层;④_vis_enabled 门仍判 face_landmarker.task(机器人上已存在,对 SCRFD 非必需)。
 
+### 人脸 ReID 稳定化(2026-06-26,实机验证"识别很稳定")
+迁移后逐项实机调优,识别已稳定。关键修复(commit 8f0e750→a583171):
+- **track churn 根因修复**(bug-054):split 路径检测无 embedding,`embedding_distance` 返回全 1.0,按 embedding_weight=0.3 加权把 IoU 门从 0.30 抬到 0.429 → 低 fps 丢轨重建。`face_pipeline` 在 `tracker.update` 前 all-None 时清零 embedding_weight(镜像 face-tracker-demo)。实测最大 track_id 214→6。
+- **方案B(跟踪/识别解耦)**:DECIMATE=3 做跟踪(track 稳、fps 23-25);识别走主进程惰性 SCRFD 对选中脸**全分辨率 ROI 重检**拿 sharp kps → 判别力够,异人 dist 0.816 vs 同人 ≤0.58 分开,**误匹配消失**。
+- **身份冻结**(Q4):`_needs_embedding` 对已绑定 track 返回 False,只有新 track 才识别(track 在则身份不变)。
+- **命名落 gallery**:`realtime`/UI 起名 → `store.confirm_identity` + `save_gallery`;退出也 save_gallery;**跨会话持久化已验证**(重启加载回 confirmed 身份)。
+- **每框常驻显示**:`dbg_det.track_views` → debug_server 每框画 身份(Unknown-N/真名)+ T<id>,蓝/灰/绿;右上角毫秒时间戳(对应 log);每 track 识别日志 `🔍 track N → 名 (dist=..)` 供阈值校准。
+- **UI 注册功能**:Dashboard 左下角面板,点人脸填 track→命名,绕过"谁在说话"显式命名指定脸。
+- **模型档**:记忆/动作场景必用 `qwen3.5-omni-plus-realtime`(flash function-calling 不可靠;plus 需账号开通,已购买,见 buglog-051)。
+- **待办**:①阈值校准(0.65 对低质量帧余量紧,靠质量门而非收紧);②残留 track churn(两人动态场景 cosmetic,可上 Kalman 线性噪声);③**"谁在说话"= 移植 asd-demo 的 LR-ASD 音视频同步**(用户已定用 LR-ASD;方案见对话/待实现:perception/asd.py + 音频 ring tap + per-track 灰度累积 + 说话人归属 current_person_id)。
+
 ### 架构
 - 6 模块拆分 → d01 瘦身(领域驱动): 拆出 kws.py / fusion.py / safety.py / realtime.py
 - 方向门控白名单化(仅 TRACKING 关门)
