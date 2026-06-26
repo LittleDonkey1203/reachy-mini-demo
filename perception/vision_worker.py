@@ -213,6 +213,12 @@ YUNET_SCORE_THR = 0.5
 YUNET_NMS_THR = 0.3
 YUNET_TOP_K = 10
 
+# ── SCRFD(InsightFace)人脸检测:默认后端(关键点质量更稳,原生 per-face 置信)──
+SCRFD_PACK = os.environ.get("SCRFD_PACK", "buffalo_sc")  # det_500m(SCRFD) + w600k_mbf
+SCRFD_DET_SIZE = int(os.environ.get("SCRFD_DET_SIZE", "640"))
+SCRFD_THRESH = 0.5
+SCRFD_MAX_FACES = 10
+
 
 _MODEL_GESTURE_MAP = {
     "Closed_Fist": "fist",
@@ -244,17 +250,28 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
     """
     import cv2
 
-    face_backend = os.environ.get("FACE_BACKEND", "yunet").lower()
+    face_backend = os.environ.get("FACE_BACKEND", "scrfd").lower()
     no_sticky = os.environ.get("VISION_NO_STICKY", "") == "1"
     face_sel = FaceSelector(sticky=not no_sticky)
 
-    # ── 人脸后端初始化 ──
-    use_yunet = (face_backend != "mediapipe")
+    # ── 人脸后端初始化(默认 SCRFD/InsightFace;yunet/mediapipe 仍可选)──
+    use_scrfd = (face_backend == "scrfd")
+    use_yunet = (face_backend == "yunet")
+    use_mp = (face_backend == "mediapipe")
     yunet = None
     face_lm = None
+    scrfd = None
     yunet_size = None  # (W, H) 缓存,尺寸变化时重建
 
-    if use_yunet:
+    if use_scrfd:
+        from insightface.app import FaceAnalysis
+        _app = FaceAnalysis(name=SCRFD_PACK, allowed_modules=["detection"],
+                            providers=["CPUExecutionProvider"])
+        _app.prepare(ctx_id=-1, det_size=(SCRFD_DET_SIZE, SCRFD_DET_SIZE),
+                     det_thresh=SCRFD_THRESH)
+        scrfd = _app.models.get("detection") or getattr(_app, "det_model", None)
+        print(f"[vision_worker] 人脸后端: SCRFD/InsightFace ({SCRFD_PACK})", flush=True)
+    elif use_yunet:
         print(f"[vision_worker] 人脸后端: YuNet ({YUNET_MODEL})", flush=True)
     else:
         import mediapipe as mp
@@ -275,7 +292,7 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
     gesture_rec = None
     use_gesture_rec = False
     try:
-        if use_yunet:
+        if not use_mp:   # SCRFD/YuNet 人脸后端时,手部仍需 MediaPipe → 这里导入
             import mediapipe as mp
             from mediapipe.tasks import python as mp_python
             from mediapipe.tasks.python import vision as mp_vision
@@ -326,7 +343,38 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
         try:
             # ── 人脸检测 ──
             t0 = time.monotonic()
-            if use_yunet:
+            if use_scrfd:
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                bboxes, kpss = scrfd.detect(bgr, max_num=SCRFD_MAX_FACES, metric="default")
+                out["face_ms"] = (time.monotonic() - t0) * 1000.0
+                n_faces = 0 if bboxes is None else int(len(bboxes))
+                out["n_faces"] = n_faces
+                if n_faces > 0:
+                    _all = []
+                    for _i in range(n_faces):
+                        x1, y1, x2, y2 = (float(bboxes[_i][0]), float(bboxes[_i][1]),
+                                          float(bboxes[_i][2]), float(bboxes[_i][3]))
+                        _conf = float(bboxes[_i][4])
+                        _bw, _bh = x2 - x1, y2 - y1
+                        _kp = ([(float(kpss[_i][k][0]), float(kpss[_i][k][1])) for k in range(5)]
+                               if kpss is not None and len(kpss) > _i else None)
+                        _all.append({
+                            "u": float((x1 + x2) / 2 / W),
+                            "v": float((y1 + y2) / 2 / H),
+                            "h": float(_bh / H),
+                            "box": (int(x1), int(y1), int(_bw), int(_bh)),
+                            "kps": _kp,
+                            "conf": _conf,
+                        })
+                    out["all_faces"] = _all
+                    # 主脸 = 最大框(过渡:旧身份路径仍用 face/face_box;ByteTracker 接入后改用 all_faces)
+                    _big = max(_all, key=lambda a: a["h"])
+                    out["face"] = (_big["u"], _big["v"], _big["h"])
+                    out["face_box"] = _big["box"]
+                    out["face_kps"] = _big["kps"]
+                else:
+                    out["face"] = None
+            elif use_yunet:
                 if yunet is None or yunet_size != (W, H):
                     yunet = cv2.FaceDetectorYN.create(
                         YUNET_MODEL, "", (W, H), YUNET_SCORE_THR, YUNET_NMS_THR, YUNET_TOP_K)
@@ -421,7 +469,7 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
             if _hand_ready and (n % HAND_EVERY == 0 or t_grab <= hand_boost_until):
                 mp_img_h = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                 last_hand_ts = max(last_hand_ts + 1, int(t_grab * 1000) + 1)
-                if not use_yunet:
+                if use_mp:   # 仅 MediaPipe 人脸后端才与 face 时间戳耦合(同一单调时钟)
                     last_hand_ts = max(last_hand_ts, last_face_ts + 1)
                 _hand_landmarks = None
                 _handedness = None
