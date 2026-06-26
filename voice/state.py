@@ -23,8 +23,9 @@ _conv_seq: int = 0
 _turn_counter: int = 0
 _feedback_notes: list[dict] = []
 _current_turn: dict | None = None
-_feedback_seq: int = 0
+_state: "State | None" = None
 _pending_asr: str = ""
+_feedback_seq: int = 0
 
 
 # ── 日志 ──
@@ -105,12 +106,18 @@ def _record_event(etype: str, event: dict) -> None:
                if e["ts_mono"] > ctx_cutoff and e["role"] == "system"
                and e["type"] not in ("session.created", "session.updated")]
         _turn_counter += 1
+        person_id = _state.current_person_id if _state else None
+        person_name = _state.current_person_name if _state else None
+        injected_pid = _state.identity_injected_pid if _state else None
         turn = {"turn_id": seq, "turn_num": _turn_counter,
                 "start_ts": ts, "start_mono": now_mono,
                 "end_ts": None, "end_mono": None,
                 "asr": _pending_asr, "tool_calls": [], "transcript": "",
                 "snapshot_desc": "", "events": [seq],
-                "context": ctx[-5:]}
+                "context": ctx[-5:],
+                "person_id": person_id,
+                "person_name": person_name,
+                "injected_pid": injected_pid}
         _pending_asr = ""
         _current_turn = turn
         if len(_conv_turns) >= 100:
@@ -211,6 +218,8 @@ class OneEuroFilter:
 # ── 共享状态容器 ──
 class State:
     def __init__(self) -> None:
+        global _state
+        _state = self
         self.lock = threading.Lock()
         self.session_updated = threading.Event()
         self.play_gen = 0
@@ -282,6 +291,7 @@ class State:
         self.current_is_owner: bool = False
         self.identity_injected = False
         self.identity_injected_pid: str | None = None
+        self.pending_identity_restart: bool = False
         self.resp_snapshot_pid: str | None = None
         self.resp_snapshot_name: str | None = None
         self.vis_ready = False

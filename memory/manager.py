@@ -5,13 +5,13 @@
 
 记忆生命周期:
   会话中:
-    remember_fact(fact, replaces?) → draft notes 实时存盘
-    forget_fact(keyword) → 模糊匹配删除
+    remember_fact(key, value) → KV 格式实时存盘，同 key 自动覆盖
+    forget_fact(keyword) → 模糊匹配 key 或 value 删除
   会话后 (close_session):
-    consolidate_facts(new_facts) → LLM 复盘后整体替换 entity memory
+    consolidate_facts(new_facts, summary) → LLM 复盘后整体替换 entity memory
     save_episode(episode) → 结构化事件写入 episodic memory
   下次对话:
-    get_prompt(pid) → 从 entity + episodic 组装注入 Working Memory
+    get_prompt(pid) → summary + KV 详情 + episodic 组装注入 Working Memory
 
 用法(独立测试):
   python memory/manager.py --list
@@ -25,6 +25,7 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -48,28 +49,57 @@ _LEGACY_SKIP_KEYS = {"name", "is_owner"}
 _LEGACY_SKIP_PREFIXES = ("weather_",)
 
 
-def _migrate_legacy_facts(old_facts: dict) -> tuple[Optional[str], list[str]]:
-    """将旧 {key: value} facts 迁移为 (name, list[str])。"""
+def _migrate_legacy_facts(old_facts) -> tuple[Optional[str], dict[str, str]]:
+    """将旧格式 facts 迁移为 (name, dict[str,str])。
+
+    支持两种旧格式:
+      1. dict 英文 key (likes_cats: "true") → KV 中文化
+      2. list[str] 中文短句 → 用序号 key 兜底
+    """
+    if isinstance(old_facts, list):
+        new_facts = {}
+        for i, item in enumerate(old_facts):
+            if "喜欢" in item:
+                thing = item.replace("喜欢吃", "").replace("喜欢打", "").replace("喜欢", "")
+                key = f"喜欢的{'食物' if '吃' in item else '运动' if '打' in item else '东西'}"
+                if key in new_facts:
+                    key = f"{key}{i}"
+                new_facts[key] = item
+            elif "是" in item and len(item) < 10:
+                new_facts["职业"] = item.lstrip("是")
+            elif "岁" in item:
+                new_facts["年龄"] = item
+            elif "爱好" in item:
+                new_facts["爱好"] = item.replace("爱好是", "")
+            else:
+                new_facts[f"备注{i+1}"] = item
+        return None, new_facts
+
     name = old_facts.get("name")
-    new_facts = []
+    new_facts = {}
     for k, v in old_facts.items():
         if k in _LEGACY_SKIP_KEYS:
             continue
         if any(k.startswith(p) for p in _LEGACY_SKIP_PREFIXES):
             continue
         if k in _LEGACY_FACT_MAP:
-            new_facts.append(_LEGACY_FACT_MAP[k])
+            mapped = _LEGACY_FACT_MAP[k]
+            thing = k[6:].replace("_", " ") if k.startswith("likes_") else k
+            key = f"喜欢的{'食物' if 'eat' in k or '吃' in mapped else '运动' if '打' in mapped else '东西'}"
+            if key in new_facts:
+                key = f"{key}_{thing}"
+            new_facts[key] = mapped.replace("喜欢吃", "").replace("喜欢打", "").replace("喜欢", "")
         elif k.startswith("likes_"):
             thing = k[6:].replace("_", " ")
-            new_facts.append(f"喜欢{thing}")
+            new_facts[f"喜欢的东西"] = thing
         elif k == "job":
-            new_facts.append(f"是{v}")
+            new_facts["职业"] = v
         elif k == "age":
-            new_facts.append(f"{v}岁")
+            new_facts["年龄"] = f"{v}岁"
         elif k == "hobby":
-            new_facts.append(f"爱好是{v}")
+            new_facts["爱好"] = v
         else:
-            new_facts.append(f"{v}")
+            new_facts[k] = v
     return name, new_facts
 
 
@@ -93,27 +123,24 @@ QWEN_TOOLS = [
         "type": "function",
         "name": "remember_fact",
         "description": (
-            "记住用户告诉你的个人信息。用一句简短中文描述。"
-            "例如：'我喜欢猫'→ fact='喜欢猫'；"
-            "'我是做AI的'→ fact='从事AI工作'；"
-            "'我叫小明'→ name='小明' fact='叫小明'。"
-            "如果用户改变了之前说的信息（如'我不喜欢篮球了，改喜欢羽毛球'），"
-            "用 replaces 指定要替换的关键词（如 replaces='篮球'）。"
+            "记住用户告诉你的个人信息。用 key 描述类别，value 描述内容。"
+            "例如：'我喜欢猫'→ remember_fact(key='喜欢的动物', value='猫')；"
+            "'我是做AI的'→ remember_fact(key='职业', value='AI从业者')；"
+            "'我叫小明'→ remember_fact(key='称呼', value='小明', name='小明')。"
+            "相同 key 会自动覆盖旧值，不需要额外处理。"
+            "注重理解上下文含义，提取有意义的信息分类存储。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "fact": {"type": "string", "description": "一句中文短句描述这条信息"},
-                "replaces": {
-                    "type": "string",
-                    "description": "要替换的旧信息关键词（可选，仅在更新已有信息时传）",
-                },
+                "key": {"type": "string", "description": "信息类别，如'爱好''职业''喜欢的食物'"},
+                "value": {"type": "string", "description": "具体内容，如'打篮球''程序员''火锅'"},
                 "name": {
                     "type": "string",
                     "description": "用户的名字（仅在用户自报姓名时传）",
                 },
             },
-            "required": ["fact"],
+            "required": ["key", "value"],
         },
     },
     {
@@ -197,18 +224,39 @@ class MemoryManager:
             with open(path, "r") as f:
                 data = json.load(f)
         else:
-            data = {"name": None, "facts": [], "episodes": [], "history": []}
+            data = {"name": None, "summary": None, "facts": {}, "episodes": []}
 
-        if isinstance(data.get("facts"), dict):
+        # 自动移除 history 字段
+        if "history" in data:
+            del data["history"]
+
+        # 迁移旧格式: list[str] 或旧英文 key dict → 新 dict[str,str]
+        needs_migrate = False
+        if isinstance(data.get("facts"), list):
             migrated_name, migrated_facts = _migrate_legacy_facts(data["facts"])
             data["facts"] = migrated_facts
             if migrated_name and not data.get("name"):
                 data["name"] = migrated_name
-            if "conversation_summaries" in data:
-                data["episodes"] = _migrate_legacy_summaries(
-                    data.pop("conversation_summaries"))
+            needs_migrate = True
+        elif isinstance(data.get("facts"), dict):
+            sample_keys = list(data["facts"].keys())[:3]
+            if sample_keys and all(k.isascii() and "_" in k for k in sample_keys):
+                migrated_name, migrated_facts = _migrate_legacy_facts(data["facts"])
+                data["facts"] = migrated_facts
+                if migrated_name and not data.get("name"):
+                    data["name"] = migrated_name
+                needs_migrate = True
+
+        if "conversation_summaries" in data:
+            data["episodes"] = _migrate_legacy_summaries(
+                data.pop("conversation_summaries"))
+            needs_migrate = True
+
+        if needs_migrate:
             if "name" not in data:
                 data["name"] = None
+            if "summary" not in data:
+                data["summary"] = None
             if "episodes" not in data:
                 data["episodes"] = []
             self._dirty.add(person_id)
@@ -218,10 +266,12 @@ class MemoryManager:
 
         if "name" not in data:
             data["name"] = None
+        if "summary" not in data:
+            data["summary"] = None
         if "episodes" not in data:
             data["episodes"] = []
-        if not isinstance(data.get("facts"), list):
-            data["facts"] = []
+        if not isinstance(data.get("facts"), dict):
+            data["facts"] = {}
         self._session[person_id] = data
         return data
 
@@ -237,97 +287,63 @@ class MemoryManager:
         data = self.load_memory(person_id)
         return data.get("name")
 
-    # ── Entity Memory: facts (draft notes / consolidation 输出) ──
+    # ── Entity Memory: facts (KV 格式, 同 key 自动覆盖) ──
 
-    def save_fact(self, person_id: str, fact: str,
-                  replaces: str = None) -> str:
-        """保存一条 fact。replaces 非空时先删除含该关键词的旧 fact。"""
+    def save_fact(self, person_id: str, key: str, value: str) -> str:
+        """保存一条 fact。同 key 自动覆盖旧值。"""
         data = self.load_memory(person_id)
-        facts = data.get("facts", [])
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        removed = []
-        if replaces:
-            new_facts = []
-            for f in facts:
-                if replaces in f:
-                    removed.append(f)
-                else:
-                    new_facts.append(f)
-            facts = new_facts
-        if fact not in facts:
-            facts.append(fact)
+        facts = data.get("facts", {})
+        old_value = facts.get(key)
+        facts[key] = value
+        # 超限时删除最老的 key（dict 保序，前面的是旧的）
         if len(facts) > MAX_FACTS:
-            facts = facts[-MAX_FACTS:]
+            oldest_keys = list(facts.keys())[: len(facts) - MAX_FACTS]
+            for ok in oldest_keys:
+                if ok != key:  # 不删刚加的
+                    del facts[ok]
         data["facts"] = facts
-        history = data.get("history", [])
-        history.append({
-            "action": "save_fact",
-            "fact": fact,
-            "replaces": replaces,
-            "removed": removed,
-            "at": now,
-        })
-        if len(history) > 200:
-            history = history[-100:]
-        data["history"] = history
         self._dirty.add(person_id)
         self._persist(person_id)
-        if removed:
-            return f"已更新：'{removed[0]}' → '{fact}'"
-        return f"已记住：{fact}"
+        if old_value is not None:
+            return f"已更新：{key}='{old_value}' → '{value}'"
+        return f"已记住：{key}={value}"
 
     def forget_fact(self, person_id: str, keyword: str,
                     actor_pid: str = None) -> str:
-        """删除含 keyword 的 fact。支持模糊匹配。"""
+        """删除 key 或 value 包含 keyword 的 fact。"""
         if actor_pid and self._owner and not self._owner.can_delete_memory(actor_pid, person_id):
             return "只有主人才能删除其他人的记忆哦。"
         data = self.load_memory(person_id)
-        facts = data.get("facts", [])
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        matched = [f for f in facts if keyword in f]
+        facts = data.get("facts", {})
+        matched = {k: v for k, v in facts.items() if keyword in k or keyword in v}
         if not matched:
-            available = "、".join(facts[:10]) if facts else "无"
+            available = "、".join(f"{k}={v}" for k, v in list(facts.items())[:10]) if facts else "无"
             return f"没有找到包含「{keyword}」的记忆。当前记忆: {available}"
-        remaining = [f for f in facts if keyword not in f]
-        data["facts"] = remaining
-        history = data.get("history", [])
-        history.append({
-            "action": "forget_fact",
-            "keyword": keyword,
-            "removed": matched,
-            "at": now,
-        })
-        data["history"] = history
+        for k in matched:
+            del facts[k]
+        data["facts"] = facts
         self._dirty.add(person_id)
         self._persist(person_id)
-        return f"已忘掉 {len(matched)} 条: {'、'.join(matched)}"
+        removed_str = "、".join(f"{k}={v}" for k, v in matched.items())
+        return f"已忘掉 {len(matched)} 条: {removed_str}"
 
-    def get_facts(self, person_id: str) -> list[str]:
-        """获取某人当前所有 facts。"""
+    def get_facts(self, person_id: str) -> dict[str, str]:
+        """获取某人当前所有 facts (KV dict)。"""
         data = self.load_memory(person_id)
-        return list(data.get("facts", []))
+        return dict(data.get("facts", {}))
 
-    def consolidate_facts(self, person_id: str, new_facts: list[str],
-                          new_name: str = None):
-        """会话后 consolidation：整体替换 facts 列表。"""
+    def consolidate_facts(self, person_id: str, new_facts: dict[str, str],
+                          new_name: str = None, new_summary: str = None):
+        """会话后 consolidation：整体替换 facts dict + summary。"""
         data = self.load_memory(person_id)
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        old_facts = list(data.get("facts", []))
-        data["facts"] = new_facts[:MAX_FACTS]
+        trimmed = dict(list(new_facts.items())[:MAX_FACTS])
+        data["facts"] = trimmed
+        if new_summary is not None:
+            data["summary"] = new_summary
         if new_name and new_name != data.get("name"):
             data["name"] = new_name
             if self._face_db:
                 self._face_db.set_name(person_id, new_name)
-        history = data.get("history", [])
-        history.append({
-            "action": "consolidate",
-            "old_facts": old_facts,
-            "new_facts": new_facts,
-            "at": now,
-        })
-        if len(history) > 200:
-            history = history[-100:]
-        data["history"] = history
         self._dirty.add(person_id)
         self._persist(person_id)
 
@@ -347,15 +363,22 @@ class MemoryManager:
     # ── Working Memory 注入 ──
 
     def get_prompt(self, person_id: str, person_name: str = None) -> Optional[str]:
-        """从 Entity + Episodic Memory 组装注入 Working Memory 的 prompt。"""
+        """从 Entity + Episodic Memory 组装注入 Working Memory 的 prompt。
+
+        格式: [记忆] summary叙事 + KV详情 + episode + 使用指引
+        """
         data = self.load_memory(person_id)
         parts = []
         name = data.get("name") or person_name
         if name:
             parts.append(f"你面前的人叫{name}。")
-        facts = data.get("facts", [])
+        summary = data.get("summary")
+        if summary:
+            parts.append(summary)
+        facts = data.get("facts", {})
         if facts:
-            parts.append("你记得：" + "；".join(facts) + "。")
+            kv_lines = "\n".join(f"- {k}：{v}" for k, v in facts.items())
+            parts.append(kv_lines)
         episodes = data.get("episodes", [])
         if episodes:
             latest = episodes[-1]
@@ -363,57 +386,59 @@ class MemoryManager:
             if topic:
                 parts.append(f"你们上次聊过：{topic.rstrip('。')}。")
         if parts:
-            parts.append("这些记忆仅作为背景知识，只在用户主动提起相关话题时才使用，绝不要主动提起或背诵。")
-        return "".join(parts) if parts else None
+            parts.append("这些是你对这个人的了解，作为背景知识自然运用，不要主动背诵或列举。")
+        return "\n".join(parts) if parts else None
 
     # ── 清除 / 合并 ──
 
     def clear_all(self, person_id: str, confirmed: bool = False,
                   actor_pid: str = None) -> str:
-        """清除某人所有记忆。需要 confirmed=True。"""
+        """清除某人所有记忆。需要 confirmed=True。操作前自动备份到 backups/。"""
         if not confirmed:
             return "请先向用户确认是否要清除所有记忆。"
         if actor_pid and self._owner and not self._owner.can_delete_memory(actor_pid, person_id):
             return "只有主人才能删除其他人的记忆哦。"
         data = self.load_memory(person_id)
-        now = time.strftime("%Y-%m-%dT%H:%M:%S")
-        old_facts = list(data.get("facts", []))
-        old_name = data.get("name")
+        old_facts = dict(data.get("facts", {}))
+        # 备份到 backups/ 目录
+        backup_dir = Path(self.memories_dir) / "backups"
+        backup_dir.mkdir(exist_ok=True)
+        backup_path = backup_dir / f"{person_id}_{int(time.time())}.json"
+        with open(backup_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        # 清空
         data["name"] = None
-        data["facts"] = []
+        data["summary"] = None
+        data["facts"] = {}
         data["episodes"] = []
-        history = data.get("history", [])
-        history.append({
-            "action": "clear_all",
-            "old_name": old_name,
-            "old_facts": old_facts,
-            "at": now,
-        })
-        data["history"] = history
         self._dirty.add(person_id)
         self._persist(person_id)
-        return f"已清除所有记忆（共 {len(old_facts)} 条事实）。"
+        return f"已清除所有记忆（共 {len(old_facts)} 条事实），备份已保存到 {backup_path.name}。"
 
     def merge_memories(self, keep_pid: str, drop_pid: str) -> None:
-        """合并 drop_pid 的记忆到 keep_pid（facts 去重 + episodes 合并）。"""
+        """合并 drop_pid 的记忆到 keep_pid（facts KV 合并 + episodes 合并）。"""
         drop_data = self.load_memory(drop_pid)
-        drop_facts = drop_data.get("facts", [])
+        drop_facts = drop_data.get("facts", {})
         drop_episodes = drop_data.get("episodes", [])
         drop_name = drop_data.get("name")
+        drop_summary = drop_data.get("summary")
         if not drop_facts and not drop_episodes and not drop_name:
             return
         keep_data = self.load_memory(keep_pid)
-        keep_facts = keep_data.get("facts", [])
-        for f in drop_facts:
-            if f not in keep_facts:
-                keep_facts.append(f)
-        keep_data["facts"] = keep_facts[:MAX_FACTS]
+        keep_facts = keep_data.get("facts", {})
+        for k, v in drop_facts.items():
+            if k not in keep_facts:
+                keep_facts[k] = v
+        trimmed = dict(list(keep_facts.items())[:MAX_FACTS])
+        keep_data["facts"] = trimmed
         keep_episodes = keep_data.get("episodes", [])
         keep_episodes.extend(drop_episodes)
         keep_episodes.sort(key=lambda e: e.get("ts", ""))
         keep_data["episodes"] = keep_episodes[-MAX_EPISODES:]
         if not keep_data.get("name") and drop_name:
             keep_data["name"] = drop_name
+        if not keep_data.get("summary") and drop_summary:
+            keep_data["summary"] = drop_summary
         self._dirty.add(keep_pid)
         self._persist(keep_pid)
         self.clear_all(drop_pid, confirmed=True)
@@ -465,12 +490,17 @@ class MemoryManager:
             try:
                 with open(path) as f:
                     data = json.load(f)
-                facts = data.get("facts", [])
-                if isinstance(facts, dict):
+                facts = data.get("facts", {})
+                if isinstance(facts, list):
                     _, facts = _migrate_legacy_facts(facts)
+                elif isinstance(facts, dict):
+                    sample_keys = list(facts.keys())[:3]
+                    if sample_keys and all(k.isascii() and "_" in k for k in sample_keys):
+                        _, facts = _migrate_legacy_facts(facts)
                 result.append({
                     "person_id": pid,
                     "name": data.get("name"),
+                    "summary": data.get("summary"),
                     "n_facts": len(facts),
                     "facts": facts,
                     "n_episodes": len(data.get("episodes", [])),
@@ -484,11 +514,11 @@ class MemoryManager:
         注意: clear_memory 和 confirm_clear 由 d01 工作流直接处理。
         """
         if tool_name == "remember_fact":
-            fact = args.get("fact", "")
-            if not fact:
-                return "缺少 fact 参数。"
-            replaces = args.get("replaces")
-            return self.save_fact(person_id, fact, replaces=replaces)
+            key = args.get("key", "")
+            value = args.get("value", "")
+            if not key or not value:
+                return "缺少 key 或 value 参数。"
+            return self.save_fact(person_id, key, value)
         elif tool_name == "forget_fact":
             keyword = args.get("keyword", "")
             if not keyword:
@@ -516,20 +546,33 @@ def _main():
         print(f"共 {len(persons)} 人有记忆：")
         for p in persons:
             name_s = p["name"] or "(未命名)"
-            print(f"\n  {p['person_id']}  {name_s}  ({p['n_facts']} facts, {p['n_episodes']} episodes)")
-            for f in p["facts"]:
-                print(f"    · {f}")
+            summary_s = f"  {p['summary']}" if p.get("summary") else ""
+            print(f"\n  {p['person_id']}  {name_s}  ({p['n_facts']} facts, {p['n_episodes']} episodes){summary_s}")
+            facts = p["facts"]
+            if isinstance(facts, dict):
+                for k, v in facts.items():
+                    print(f"    · {k}: {v}")
+            else:
+                for f in facts:
+                    print(f"    · {f}")
         return
 
     if args.show:
         data = mm.load_memory(args.show)
         name = data.get("name") or "(未命名)"
-        facts = data.get("facts", [])
+        summary = data.get("summary")
+        facts = data.get("facts", {})
         episodes = data.get("episodes", [])
         print(f"{args.show} ({name})")
+        if summary:
+            print(f"\n  Summary: {summary}")
         print(f"\n  Entity Memory ({len(facts)} facts):")
-        for f in facts:
-            print(f"    · {f}")
+        if isinstance(facts, dict):
+            for k, v in facts.items():
+                print(f"    · {k}: {v}")
+        else:
+            for f in facts:
+                print(f"    · {f}")
         print(f"\n  Episodic Memory ({len(episodes)} episodes):")
         for ep in episodes:
             print(f"    [{ep.get('ts', '?')}] {ep.get('topic', '?')} ({ep.get('mood', '?')})")

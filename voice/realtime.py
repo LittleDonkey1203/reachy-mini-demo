@@ -27,6 +27,21 @@ from voice.state import State, log, _record_event
 import voice.state as _st_mod
 
 
+def _record_tool_output(st: State, tool_name: str, call_id: str, output: str):
+    """把 tool output 写入 display_transcript，保持模型上下文时序完整。"""
+    with st.lock:
+        st.display_transcript_seq += 1
+        st.display_transcript.append({
+            "seq": st.display_transcript_seq,
+            "ts": time.strftime("%H:%M:%S"),
+            "role": "tool_output",
+            "text": f"{tool_name} → {output[:120]}",
+            "call_id": call_id,
+        })
+        if len(st.display_transcript) > 100:
+            st.display_transcript = st.display_transcript[-80:]
+
+
 # ── transcript 泄漏标签 → 物理动作兜底 ──
 _TAG_TO_ACTION = {
     "nod": "nod", "点头": "nod", "nodding": "nod",
@@ -129,7 +144,11 @@ class ChatCallback(OmniRealtimeCallback):
                 log("🤫 检测到你说完了,等模型回应…")
             elif etype == "conversation.item.input_audio_transcription.completed":
                 _transcript = (event.get("transcript") or "").strip()
-                log(f"📝 听到的是:「{_transcript}」")
+                with st.lock:
+                    _log_pid = st.current_person_id or "_unknown"
+                    _log_name = st.current_person_name
+                    _injected_pid = st.identity_injected_pid
+                log(f"📝 ASR结果:「{_transcript}」 当前人={_log_name}({_log_pid[:12]}) 已注入记忆pid={_injected_pid or '无'}")
                 if _transcript:
                     with st.lock:
                         _log_pid = st.current_person_id or "_unknown"
@@ -161,9 +180,13 @@ class ChatCallback(OmniRealtimeCallback):
                     st.resp_snapshot_pid = st.current_person_id
                     st.resp_snapshot_name = st.current_person_name
                     _dt_seq = st.display_transcript_seq
+                    _rc_pid = st.current_person_id
+                    _rc_name = st.current_person_name
+                    _rc_injected = st.identity_injected
+                    _rc_injected_pid = st.identity_injected_pid
                 if _st_mod._current_turn is not None:
                     _st_mod._current_turn["dt_seq"] = _dt_seq
-                log("💭 模型开始生成回复…")
+                log(f"💭 模型开始生成回复… 当前人={_rc_name}({(_rc_pid or '')[:12]}) injected={_rc_injected}(pid={_rc_injected_pid or '无'})")
             elif etype == "response.function_call_arguments.done":
                 name = event.get("name", "")
                 call_id = event.get("call_id", "")
@@ -180,7 +203,7 @@ class ChatCallback(OmniRealtimeCallback):
                         "pid": st.resp_snapshot_pid or st.current_person_id or "_unknown",
                         "name": st.resp_snapshot_name or st.current_person_name,
                     })
-                log(f"🤖 模型调用工具: {name}")
+                log(f"🤖 模型调用工具: {name}({_fc_args[:200]})")
                 if name == "take_snapshot":
                     with st.lock:
                         maybe_pointing = (time.monotonic() - st.finger_ext_at) < POINT_FRESH_S
@@ -192,14 +215,15 @@ class ChatCallback(OmniRealtimeCallback):
                 elif name == "end_session":
                     phrase = BYE_PHRASES[self.exit_i % len(BYE_PHRASES)]
                     self.exit_i += 1
+                    output_msg = {"success": True,
+                                  "say": f"对话结束。用中文只说这一句简短告别:「{phrase}」,别追问、别挽留、别加别的。"}
                     try:
+                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=end_session output={json.dumps(output_msg, ensure_ascii=False)}")
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(
-                                {"success": True,
-                                 "say": f"对话结束。用中文只说这一句简短告别:「{phrase}」,别追问、别挽留、别加别的。"},
-                                ensure_ascii=False),
+                            "output": json.dumps(output_msg, ensure_ascii=False),
                         })
+                        _record_tool_output(st, "end_session", call_id, json.dumps(output_msg, ensure_ascii=False))
                     except Exception as e:
                         log(f"⚠ end_session 回 output 失败:{e}")
                     with st.lock:
@@ -253,10 +277,13 @@ class ChatCallback(OmniRealtimeCallback):
                                 with st.lock:
                                     st.current_person_name = None
                     try:
+                        result_payload = {"result": result}
+                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool={name} output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
+                            "output": json.dumps(result_payload, ensure_ascii=False),
                         })
+                        _record_tool_output(st, name, call_id, json.dumps(result_payload, ensure_ascii=False))
                     except Exception as e:
                         log(f"⚠ 记忆工具回 output 失败:{e}")
                     log(f"🧠 记忆工具 {name}: {result}")
@@ -269,10 +296,13 @@ class ChatCallback(OmniRealtimeCallback):
                     result = handle_clear_memory_intent(st, args_dict, self.conv,
                                                        self.id_recognizer)
                     try:
+                        result_payload = {"result": result}
+                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=clear_memory output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
+                            "output": json.dumps(result_payload, ensure_ascii=False),
                         })
+                        _record_tool_output(st, "clear_memory", call_id, json.dumps(result_payload, ensure_ascii=False))
                     except Exception as e:
                         log(f"⚠ clear_memory 回 output 失败:{e}")
                     log(f"🔒 clear_memory 启动: {result}")
@@ -285,21 +315,27 @@ class ChatCallback(OmniRealtimeCallback):
                     result = handle_confirm_clear(st, args_dict,
                                                   self.memory_mgr, self.id_recognizer)
                     try:
+                        result_payload = {"result": result}
+                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=confirm_clear output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
                         self.conv.create_item({
                             "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps({"result": result}, ensure_ascii=False),
+                            "output": json.dumps(result_payload, ensure_ascii=False),
                         })
+                        _record_tool_output(st, "confirm_clear", call_id, json.dumps(result_payload, ensure_ascii=False))
                     except Exception as e:
                         log(f"⚠ confirm_clear 回 output 失败:{e}")
                     log(f"🔒 confirm_clear: {result}")
                 else:
                     self.motion_q.put({"name": name, "call_id": call_id})
+                    output_msg = {"success": True, "action": name}
                     try:
+                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool={name} output={json.dumps(output_msg, ensure_ascii=False)}")
                         self.conv.create_item({
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": json.dumps({"success": True, "action": name}, ensure_ascii=False),
+                            "output": json.dumps(output_msg, ensure_ascii=False),
                         })
+                        _record_tool_output(st, name, call_id, json.dumps(output_msg, ensure_ascii=False))
                     except Exception as e:
                         log(f"⚠ 回 function_call_output 失败:{e}")
             elif etype == "response.audio_transcript.delta":
@@ -322,6 +358,7 @@ class ChatCallback(OmniRealtimeCallback):
                         st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "assistant", "text": _atext, "pid": _log_pid, "name": _log_name})
                         if len(st.display_transcript) > 100:
                             st.display_transcript = st.display_transcript[-80:]
+                    log(f"📝 模型回复:「{_atext[:100]}{'…' if len(_atext)>100 else ''}」 归属={_log_name}({_log_pid[:12]})")
                     if not st.no_memory:
                         with st.lock:
                             st.conversation_log.setdefault(_log_pid, []).append(("assistant", _atext))
@@ -354,6 +391,7 @@ class ChatCallback(OmniRealtimeCallback):
                 d = self.conv.get_last_first_audio_delay() if self.conv else None
                 log(f"✅ 本轮回复完成{f'(首音频延迟 {d:.0f}ms)' if d else ''}")
                 if fire_rc and self.conv is not None:
+                    log(f"📤 create_response(仅调工具无语音) 自动触发")
                     self.conv.create_response()
             elif etype == "error":
                 log(f"❌ 服务端错误事件:{event}")
@@ -396,6 +434,7 @@ class RealtimeDialog:
         def _w():
             try:
                 c.connect()
+                log(f"📤 update_session(初始化) instructions前80字: {self.instructions[:80]}... tools数: {len(self.tools)}")
                 c.update_session(
                     output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
                     voice=VOICE,
@@ -460,6 +499,40 @@ class RealtimeDialog:
             _st_mod._current_turn = None
         _st_mod._pending_asr = ""
 
+    def restart_session_for_switch(self, old_pid: str | None, new_pid: str, new_pname: str | None):
+        """身份切换时重启 WS 会话，清除旧对话历史防止上下文污染。"""
+        st = self.st
+        log(f"🔄 身份切换重启: {old_pid and old_pid[:8]}→{new_pid[:8]} ({new_pname})")
+        if old_pid and self.memory_mgr and not self.no_memory:
+            with st.lock:
+                _old_log = list(st.conversation_log.get(old_pid, []))
+                st.conversation_log.pop(old_pid, None)
+            if len(_old_log) >= 2:
+                threading.Thread(target=self.save_summary,
+                                 args=(old_pid, _old_log), daemon=True).start()
+        c = self.conv
+        if c is not None:
+            try:
+                c.close()
+            except Exception:
+                pass
+            self.callback.conv = None
+            self.conv = None
+        with st.lock:
+            st.in_flight = 0
+            st.resp_audio_count = 0
+            st.fc_seen_this_resp = False
+            st.drop_audio = False
+            st.pending_identity_restart = False
+        new_c = self.open_session()
+        if new_c is not None:
+            self.update_memory(new_pid, new_pname)
+            log(f"✅ 会话重启完成，已注入 {new_pname or new_pid[:12]} 的记忆")
+            return new_c
+        else:
+            log("⚠ 会话重启失败(open_session 超时)")
+            return None
+
     def update_memory(self, pid: str, pname: str | None) -> bool:
         """用 update_session 将记忆嵌入 session instructions。"""
         if time.monotonic() - self._last_inject_fail < 2.0:
@@ -471,6 +544,8 @@ class RealtimeDialog:
         if c is None:
             return False
         try:
+            log(f"📤 update_session(记忆注入) pid={pid} name={pname} 记忆前80字: {(mem_prompt or '')[:80]}...")
+            log(f"   完整instructions前200字: {new_instr}...")
             c.update_session(
                 output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
                 voice=VOICE,
@@ -513,26 +588,28 @@ class RealtimeDialog:
                 return
             current_facts = self.memory_mgr.get_facts(pid)
             current_name = self.memory_mgr.get_name(pid)
-            facts_str = json.dumps(current_facts, ensure_ascii=False) if current_facts else "[]"
+            facts_str = json.dumps(current_facts, ensure_ascii=False) if current_facts else "{}"
             prompt = (
                 "你是记忆管理助手。仔细阅读对话，提取关于用户的所有个人信息。\n\n"
-                f"当前用户名字：{current_name or '未知'}\n"
                 f"已有记忆：{facts_str}\n\n"
                 f"对话内容：\n{text[-4000:]}\n\n"
                 "任务：\n"
-                "1. facts = 合并已有记忆 + 对话中发现的新信息。每条是中文短句。\n"
+                "1. facts = KV 格式合并已有记忆 + 对话中发现的新信息。key 是类别，value 是内容。\n"
                 "   - 重点提取：爱好、喜好、职业、年龄、习惯、观点、提到的人/事物\n"
-                "   - 用户说'我喜欢X/我爱X/我常X' → 加入 facts\n"
-                "   - 如果新信息与旧 fact 矛盾，保留新的、去掉旧的\n"
+                "   - 用户说'我喜欢X' → {\"喜欢的东西\": \"X\"}\n"
+                "   - 如果新信息与旧 fact 矛盾，保留新的 value，同 key 覆盖\n"
                 "   - 不要把名字放进 facts（名字在独立字段管理）\n"
-                "   - 不要写 '名字是XXX' '叫XXX' 这样的 fact\n"
-                "2. episode = 这次对话的结构化事件\n"
-                "   - topic: 具体说聊了什么，不要太笼统\n"
-                "   - highlights: 关键信息点（每条是完整短句）\n\n"
+                "2. summary = 基于所有 facts 和对话理解，写一句话描述你对这个人的整体认知。\n"
+                "   - 体现对用户的整体理解，不是列举属性\n"
+                "   - 用「用户」指代，例如：'用户喜欢打篮球和看科幻小说，最近在关注《黑暗森林》上线'\n"
+                "3. episode = 这次对话的结构化事件\n"
+                "   - topic: 具体说聊了什么，不要太笼统，用「用户」指代\n"
+                "   - highlights: 关键信息点（每条是完整短句），用「用户」指代\n\n"
                 "只输出JSON：\n"
-                '{"name":"用户名字(对话中提到则更新,否则保留原名,未知则null)",'
-                '"facts":["短句1","短句2"],'
-                '"episode":{"topic":"具体话题","highlights":["要点1"],"mood":"engaged/casual/emotional/tense"}}'
+                '{"name":"用户名字(对话中提到则更新,否则为null)",'
+                '"summary":"一句话认知描述(用\\"用户\\"指代)",'
+                '"facts":{"类别1":"内容1","类别2":"内容2"},'
+                '"episode":{"topic":"具体话题(用\\"用户\\"指代)","highlights":["要点1(用\\"用户\\"指代)"],"mood":"engaged/casual/emotional/tense"}}'
             )
             resp = self.oai.chat.completions.create(
                 model=SUMMARY_MODEL,
@@ -547,12 +624,17 @@ class RealtimeDialog:
                 raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
             result = json.loads(raw)
             new_facts = result.get("facts", current_facts)
+            if isinstance(new_facts, list):
+                new_facts = {f"备注{i+1}": f for i, f in enumerate(new_facts)}
             new_name = result.get("name")
+            if new_name is None and current_name:
+                new_name = current_name
+            new_summary = result.get("summary")
             episode = result.get("episode")
-            self.memory_mgr.consolidate_facts(pid, new_facts, new_name)
+            self.memory_mgr.consolidate_facts(pid, new_facts, new_name, new_summary)
             if episode:
                 self.memory_mgr.save_episode(pid, episode)
-            log(f"📝 记忆 consolidation 完成 ({pid[:12]}): {len(new_facts)} facts, episode={episode.get('topic', '')[:30] if episode else 'none'}")
+            log(f"📝 记忆 consolidation 完成 ({pid[:12]}): {len(new_facts)} facts, summary={new_summary[:30] if new_summary else 'none'}, episode={episode.get('topic', '')[:30] if episode else 'none'}")
             with self.st.lock:
                 if self.st.current_person_id == pid:
                     self.st.identity_injected = False

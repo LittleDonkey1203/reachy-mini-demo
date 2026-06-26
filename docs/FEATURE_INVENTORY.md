@@ -158,23 +158,23 @@
 
 | 子特性 | 代码位置 | 说明 |
 |--------|----------|------|
-| F13.1 Entity Memory (facts) | `memory/manager.py:MemoryManager` | `list[str]` 中文短句 + history + JSON 持久化 |
-| F13.2 remember_fact 工具 | `memory/manager.py:QWEN_TOOLS[0]` + `realtime.py:on_event` | `fact`(中文短句) + `replaces`(关键词替换) + `name`(自报姓名) |
+| F13.1 Entity Memory (facts) | `memory/manager.py:MemoryManager` | `dict[str,str]` KV 格式 + summary 叙事 + history + JSON 持久化 |
+| F13.2 remember_fact 工具 | `memory/manager.py:QWEN_TOOLS[0]` + `realtime.py:on_event` | `key`(类别) + `value`(内容)，同 key 自动覆盖 + `name`(自报姓名) |
 | F13.3 clear_memory 工具 | `memory/manager.py:QWEN_TOOLS[1]` + `memory/safety.py` | 安全删除工作流(多步验证+备份) |
-| F13.4 forget_fact 工具 | `memory/manager.py:QWEN_TOOLS[3]` + `realtime.py:on_event` | `keyword` 模糊匹配删除 |
-| F13.5 Working Memory 注入 | `memory/manager.py:get_prompt` + `realtime.py:update_memory` | Entity + Episodic 组装 → update_session instructions |
+| F13.4 forget_fact 工具 | `memory/manager.py:QWEN_TOOLS[3]` + `realtime.py:on_event` | `keyword` 模糊匹配 key 或 value 删除 |
+| F13.5 Working Memory 注入 | `memory/manager.py:get_prompt` + `realtime.py:update_memory` | summary叙事 + KV详情 + Episodic 组装 → update_session instructions |
 | F13.6 延迟注入 | `d01:main()` | 唤醒时识别未出 → 后续补注入 |
-| F13.7 Session Consolidation | `realtime.py:save_summary` | 会话后 LLM 复盘: 全量对话 + draft facts → 最终 entity memory + episodic memory |
+| F13.7 Session Consolidation | `realtime.py:save_summary` | 会话后 LLM 复盘: 全量对话 + facts KV → 最终 entity dict + summary + episodic |
 | F13.8 Episodic Memory | `memory/manager.py:save_episode` | 结构化事件(topic/highlights/mood), 保留最近 10 条 |
 | F13.9 `--no-memory` | `d01:main()` | 关记忆系统, 剥离 remember_fact/clear_memory 工具 |
-| F13.10 merge_memories | `memory/manager.py:merge_memories` | 人脸合并时迁移 facts(去重) + episodes(合并排序) |
+| F13.10 merge_memories | `memory/manager.py:merge_memories` | 人脸合并时迁移 facts(KV合并) + episodes(合并排序) + summary |
 | F13.11 owner 权限校验 | `memory/manager.py:clear_all/forget_fact` | actor_pid + OwnerManager.can_delete_memory 校验 |
-| F13.12 consolidate_facts | `memory/manager.py:consolidate_facts` | LLM 复盘后整体替换 facts 列表 |
+| F13.12 consolidate_facts | `memory/manager.py:consolidate_facts` | LLM 复盘后整体替换 facts dict + summary |
 | F13.13 auto_merge 同步 | `d01:main()` 初始化 + `identity/recognizer.py:startup_merged` | FaceDB 合并碎片后自动调用 merge_memories 同步记忆 |
 | F13.14 conversation_log 分桶 | `state.py:State.conversation_log` | `dict[str, list]` 按 pid 分桶，`"_unknown"` 暂存未识别人 |
 | F13.15 上下文过长自动 consolidation | `realtime.py:on_event` user transcript | 估算 token > CONV_SUMMARY_THRESHOLD 自动触发后台 consolidation + 清桶 |
 | F13.16 退出时遍历 consolidation | `d01:main()` 退出块 | 遍历所有剩余 pid 桶，逐个调 save_summary (consolidation) |
-| F13.17 旧数据自动迁移 | `memory/manager.py:load_memory` | 检测旧 dict facts 格式 → 自动转换为 list[str] + episodes |
+| F13.17 旧数据自动迁移 | `memory/manager.py:load_memory` | 检测旧 list[str] 或英文 key dict → 自动转换为 dict[str,str] KV 格式 |
 
 ### F21 — 音频闸门(切人身份保护)
 
