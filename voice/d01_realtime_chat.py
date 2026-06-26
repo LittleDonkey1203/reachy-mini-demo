@@ -484,6 +484,29 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                 st.vis_ready = True
             continue
         now = time.monotonic()
+
+        # ── UI 注册请求:显式给指定 track 命名(绕过"谁在说话"归属,等价于语音"我叫X")──
+        with st.lock:
+            _reg = st.register_request
+            st.register_request = None
+        if _reg and _face_pipeline is not None:
+            _rtid, _rname = _reg.get("track_id"), _reg.get("name")
+            if _face_pipeline.name_track(_rtid, _rname):
+                _rtrk = _face_pipeline.tracker.find_track(_rtid)
+                _rpid = _rtrk.identity_id if _rtrk else None
+                _face_pipeline.save_gallery()
+                if _rpid and _memory_mgr is not None:
+                    _memory_mgr.set_name(_rpid, _rname)
+                if _rpid and _owner_mgr is not None and not _owner_mgr.has_owner():
+                    _owner_mgr.try_claim(_rpid, _rname)
+                with st.lock:
+                    st.register_result = f"✅ track {_rtid} → {_rname}(已落盘)"
+                log(f"🏷 UI 注册: track {_rtid} → {_rname}(gallery 已落盘)")
+            else:
+                with st.lock:
+                    st.register_result = f"⚠ track {_rtid} 注册失败(track 不存在或无特征)"
+                log(f"⚠ UI 注册失败: track {_rtid}(track 不存在或无特征)")
+
         face = msg.get("face")
         u_raw, v_raw = None, None   # 由 FaceReIDPipeline 的 primary 提供(下方)
         infer_ms = msg.get("face_ms", 0.0)

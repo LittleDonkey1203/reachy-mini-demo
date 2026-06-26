@@ -1109,6 +1109,8 @@ async function poll(){
       logSeq=s.log_seq||logSeq;
       if(s.new_logs&&s.new_logs.length)addLog(s.new_logs);
       refreshCamera(s);
+      if(s.track_views)renderRegTracks(s.track_views);
+      if(s.register_result)$('reg-status').textContent=s.register_result;
       // conv
       if(s.conv_events&&s.conv_events.length){
         allEvents.push(...s.conv_events);
@@ -1130,9 +1132,32 @@ async function poll(){
   }catch(e){dot.classList.remove('ok');conn=false}
   setTimeout(poll,250);
 }
+function renderRegTracks(tvs){
+  const el=$('reg-tracks');if(!el)return;
+  if(!tvs||!tvs.length){el.textContent='(无人脸)';return}
+  el.innerHTML=tvs.map(v=>`<div onclick="document.getElementById('reg-tid').value=${v.track_id}" style="cursor:pointer;padding:1px 0">${v.selected?'🔵':'⚪'} T${v.track_id} <b>${v.name||'?'}</b> <span style="color:#6b7280">${v.zone||''}${v.confirmed?' ✓':''}</span></div>`).join('');
+}
+async function doRegister(){
+  const tid=$('reg-tid').value, name=$('reg-name').value.trim();
+  if(!tid||!name){$('reg-status').textContent='⚠ 填 track 号和名字';return}
+  try{const r=await fetch(`/register?track_id=${tid}&name=${encodeURIComponent(name)}`);
+    const d=await r.json();$('reg-status').textContent=d.msg||'已提交';$('reg-name').value='';}
+  catch(e){$('reg-status').textContent='⚠ '+e.message}
+}
 poll();
 window.addEventListener('resize',()=>{if(document.getElementById('view-conv').classList.contains('active'))drawTimeline()});
-</script></body></html>"""
+</script>
+<div id="reg-panel" style="position:fixed;left:12px;bottom:12px;z-index:50;background:#1e1e2e;border:1px solid #374151;border-radius:8px;padding:8px 10px;font:12px system-ui;color:#e5e7eb;width:240px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+  <div style="font-weight:600;margin-bottom:6px">🏷 注册身份(点下方人脸填入 track)</div>
+  <div style="display:flex;gap:4px;margin-bottom:6px">
+    <input id="reg-tid" type="number" placeholder="track" style="width:56px;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
+    <input id="reg-name" type="text" placeholder="名字" style="flex:1;min-width:0;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
+    <button onclick="doRegister()" style="background:#2563eb;color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer">注册</button>
+  </div>
+  <div id="reg-tracks" style="font-size:11px;color:#9ca3af;max-height:110px;overflow-y:auto"></div>
+  <div id="reg-status" style="font-size:11px;margin-top:5px;color:#9ca3af"></div>
+</div>
+</body></html>"""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -1146,8 +1171,34 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                 self._mjpeg()
             elif path == "/state.json":
                 self._state()
+            elif path == "/register":
+                self._register()
             else:
                 self.send_error(404)
+
+        def _register(self):
+            """UI 注册:显式给某 track 命名(绕过'谁在说话'归属)。"""
+            import json as _json
+            import urllib.parse as _up
+            qs = dict(_up.parse_qsl(self.path.split("?", 1)[1] if "?" in self.path else ""))
+            try:
+                tid = int(qs.get("track_id", ""))
+            except ValueError:
+                tid = None
+            name = (qs.get("name") or "").strip()
+            if tid is None or not name:
+                msg = "⚠ 需要 track_id 和 name"
+            else:
+                with st.lock:
+                    st.register_request = {"track_id": tid, "name": name}
+                    st.register_result = f"⏳ 已提交 track {tid} → {name}"
+                msg = f"⏳ 已提交 track {tid} → {name}"
+            body = _json.dumps({"msg": msg}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _html(self):
             body = _VIS_HTML.encode("utf-8")
@@ -1215,6 +1266,13 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                     "audio_gate": st.audio_gate_closed,
                     "clear_phase": (st.clear_workflow or {}).get("phase"),
                     "user_speaking": st.user_speaking,
+                    "track_views": [
+                        {"track_id": v.get("track_id"), "name": v.get("name"),
+                         "zone": v.get("zone"), "confirmed": v.get("confirmed"),
+                         "selected": v.get("selected")}
+                        for v in ((st.dbg_det or {}).get("track_views") or [])
+                    ],
+                    "register_result": st.register_result,
                 }
             data["log_seq"] = _vis_log_seq
             data["new_logs"] = [t for s, t in _vis_log_buf if s > after]

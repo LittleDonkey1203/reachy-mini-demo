@@ -258,6 +258,8 @@ class State:
         self.snapshot_pending = 0
         self.dbg_frame_small = None
         self.dbg_det = None
+        self.register_request = None   # UI 注册请求 {track_id, name},vision_loop 消费(绕过"谁在说话")
+        self.register_result = ""      # UI 注册结果回显
         self.dbg_gate_open = True
         self.dbg_switching = False
         self.dbg_switch_phase = ""
