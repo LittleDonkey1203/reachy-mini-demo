@@ -46,10 +46,18 @@ def _init_pil_fonts():
         return
     try:
         from PIL import ImageFont
+        _windir = os.environ.get("WINDIR", r"C:\Windows")
         _candidates = [
+            # Windows(微软雅黑 / 黑体 / 宋体)
+            os.path.join(_windir, "Fonts", "msyh.ttc"),
+            os.path.join(_windir, "Fonts", "simhei.ttf"),
+            os.path.join(_windir, "Fonts", "simsun.ttc"),
+            os.path.join(_windir, "Fonts", "Deng.ttf"),
+            # macOS
             "/System/Library/Fonts/STHeiti Medium.ttc",
             "/System/Library/Fonts/PingFang.ttc",
             "/System/Library/Fonts/Hiragino Sans GB.ttc",
+            # Linux
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         ]

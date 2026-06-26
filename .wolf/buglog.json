@@ -243,6 +243,44 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-25T13:32:05.928Z"
+    },
+    {
+      "id": "bug-051",
+      "timestamp": "2026-06-26T11:00:00.000Z",
+      "error_message": "记忆没有实际写入:用户说'叫我陛下',模型回'好的我记住啦'但记忆/认主未发生",
+      "file": "voice/realtime.py + 启动 env REALTIME_MODEL",
+      "root_cause": "本局用 qwen3.5-omni-flash-realtime(我启动时手设),flash 的 function-calling 触发可靠性差,把 remember_fact 当文本说了出来,从未发 response.function_call_arguments.done。日志三标记(🤖模型调用工具/🧠记忆工具/👑认主成功)全缺,所有动作走标签泄漏兜底=无一次干净 function call。remember_fact 其实已正确注册(d01:175→1544→1561,realtime.py:388/463 tools=self.tools;d01:1557 剔除只在 --no-memory)。会话日志'未提 remember_fact'是 realtime.py:110 写死文本的误导,非注册缺陷。Qwen-Omni-Realtime 不支持 tool_choice,无法强制兜底。",
+      "fix": "未改代码(诊断turn)。修复方向:①记忆/动作场景用 plus-realtime(config.py:16 默认即 plus),别用 flash;先重测 plus 被拒原因。②强化提示词/工具描述为硬指令式。③给记忆加 transcript 兜底(动作有 realtime.py:296-307,记忆没有)。④离线补抽取(普通文本模型支持 tool_choice=required)。⑤realtime.py:110 改成动态打印 self.tools。次级:save_gallery/confirm_identity/flush 持久化链(工具被调用后才相关)。",
+      "tags": [
+        "function-calling",
+        "qwen-omni-realtime",
+        "flash-vs-plus",
+        "memory",
+        "tool-not-called"
+      ],
+      "related_bugs": [
+        "bug-014"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-06-26T11:00:00.000Z"
+    },
+    {
+      "id": "bug-052",
+      "timestamp": "2026-06-26T11:30:00.000Z",
+      "error_message": "Dashboard 视频叠层中文显示为豆腐块/不显示(字体不显示)",
+      "file": "voice/debug_server.py",
+      "root_cause": "_init_pil_fonts() 候选字体只有 macOS/Linux 路径,Windows 上全部命中不到 → 退化 ImageFont.load_default()(无中文字形)→ _put_cjk_text 画出豆腐块。之前在 session 分支修过,但 main 回退到 upstream 后丢失。",
+      "fix": "在 _candidates 列表前面加 Windows 字体路径(os.path.join(WINDIR,'Fonts',...)):msyh.ttc(微软雅黑)/simhei.ttf/simsun.ttc/Deng.ttf。本机实测 msyh.ttc 命中且渲染成功(844 非黑像素)。",
+      "tags": [
+        "dashboard",
+        "font",
+        "cjk",
+        "windows",
+        "debug_server"
+      ],
+      "related_bugs": [],
+      "occurrences": 2,
+      "last_seen": "2026-06-26T11:30:00.000Z"
     }
   ]
 }
