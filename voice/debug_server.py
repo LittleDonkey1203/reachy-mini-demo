@@ -140,11 +140,16 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             for _fi, _af in enumerate(_all_faces):
                 _is_sel = (_doa_sel is not None and _fi == _doa_sel)
                 _afu, _afv, _afh = _af["u"], _af["v"], _af["h"]
-                _afw = _afh * 0.85
-                _ax0 = int((_afu - _afw / 2) * W)
-                _ay0 = int((_afv - _afh / 2) * H)
-                _ax1 = int((_afu + _afw / 2) * W)
-                _ay1 = int((_afv + _afh / 2) * H)
+                _abox = _af.get("box")
+                if _abox:   # 真实检测框(降采样像素,与画布同坐标系)→ 贴合
+                    _ax0, _ay0 = int(_abox[0]), int(_abox[1])
+                    _ax1, _ay1 = int(_abox[0] + _abox[2]), int(_abox[1] + _abox[3])
+                else:       # 兜底:无 box 时用 u/v/h 估
+                    _afw = _afh * 0.85
+                    _ax0 = int((_afu - _afw / 2) * W)
+                    _ay0 = int((_afv - _afh / 2) * H)
+                    _ax1 = int((_afu + _afw / 2) * W)
+                    _ay1 = int((_afv + _afh / 2) * H)
                 _color = (255, 80, 0) if _is_sel else (120, 120, 120)
                 _thick = 2 if _is_sel else 1
                 _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _color, _thick)
@@ -162,11 +167,16 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                     _put_cjk_text(bgr, id_str, (_ax0 + 2, _ay1 + 2), (255, 255, 255))
         elif det and det.get("face") is not None:
             fu, fv, fh = det["face"]
-            fw = fh * 0.85
-            fx0 = int((fu - fw / 2) * W)
-            fy0 = int((fv - fh / 2) * H)
-            fx1 = int((fu + fw / 2) * W)
-            fy1 = int((fv + fh / 2) * H)
+            _fbox = det.get("face_box")
+            if _fbox:   # 真实检测框(降采样像素)→ 贴合
+                fx0, fy0 = int(_fbox[0]), int(_fbox[1])
+                fx1, fy1 = int(_fbox[0] + _fbox[2]), int(_fbox[1] + _fbox[3])
+            else:       # 兜底:无 box 时用 u/v/h 估
+                fw = fh * 0.85
+                fx0 = int((fu - fw / 2) * W)
+                fy0 = int((fv - fh / 2) * H)
+                fx1 = int((fu + fw / 2) * W)
+                fy1 = int((fv + fh / 2) * H)
             _cv2.rectangle(bgr, (fx0, fy0), (fx1, fy1), (255, 80, 0), 2)
             label = f"FACE u={fu:.2f} v={fv:.2f} h={fh:.2f} n={det.get('n_faces',1)}"
             _cv2.rectangle(bgr, (fx0, fy0 - 18), (fx0 + len(label) * 9, fy0), (255, 80, 0), -1)

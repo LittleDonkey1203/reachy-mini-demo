@@ -281,6 +281,27 @@
       "related_bugs": [],
       "occurrences": 2,
       "last_seen": "2026-06-26T11:30:00.000Z"
+    },
+    {
+      "id": "bug-053",
+      "timestamp": "2026-06-26T12:30:00.000Z",
+      "error_message": "人脸识别不准 + Dashboard 人脸框不贴合(对比 face-tracker-demo 分析)",
+      "file": "voice/debug_server.py + voice/d01_realtime_chat.py + voice/config.py",
+      "root_cause": "①识别不准首因:frame_pump 用 frame[::3,::3] stride 抽点(无抗锯齿)把帧砍到 640×360 才送 SCRFD,kps 精度钉死在原图 3px 网格 → ×3 还原对齐变粗 → ArcFace 特征漂移。参考工程在全分辨率原帧检测、kps float 亚像素。②框不贴合:debug_server 用 u/v/h + 写死 w=h×0.85 重建框,丢弃 all_faces 里现成的真实 SCRFD box;单脸路径 dbg_det 连 face_box 都没存。",
+      "fix": "框:debug_server 多脸/单脸分支改画真实 box(all_faces[i]['box'] / det['face_box']),保留 u/v/h 兜底;d01 dbg_det 增存 face_box。降采样:frame_pump stride 抽点 → cv2.resize INTER_AREA 抗锯齿;DECIMATE 3→2(env 可调)提升 kps 精度;d01 det_wh 改 floor-div 与 resize 尺寸精确一致。py_compile 全绿,待实机验证。阈值重标(match/unknown)留到实机用 distance_log 采分布后做。",
+      "tags": [
+        "face-reid",
+        "accuracy",
+        "bbox",
+        "downsample",
+        "scrfd",
+        "dashboard"
+      ],
+      "related_bugs": [
+        "bug-051"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-06-26T12:30:00.000Z"
     }
   ]
 }

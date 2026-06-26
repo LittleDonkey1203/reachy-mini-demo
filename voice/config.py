@@ -80,7 +80,7 @@ TRACK_SWAY_SCALE = 0.4
 # ── 视觉跟随 ──
 VIS_MAX_FPS = 40.0
 VIS_MISS_N = 5
-DECIMATE = 3
+DECIMATE = int(os.environ.get("DECIMATE", "2"))  # 检测降采样倍数(3→2:kps 精度↑,识别更准;可 env 调)
 FOV_X_DEG = 65.0
 FOV_Y_DEG = 40.0
 TRACK_TAU = 0.40

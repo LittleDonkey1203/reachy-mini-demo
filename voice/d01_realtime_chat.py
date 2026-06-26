@@ -374,7 +374,11 @@ def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event)
             if now - t_last < 1.0 / VIS_MAX_FPS:
                 continue
             t_last = now
-            rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])  # BGR→RGB
+            # 受控抗锯齿缩放(替代 stride 抽点):保留细节 → SCRFD kps 更精确 → 识别更准
+            _fh, _fw = frame.shape[:2]
+            _small = _cv2.resize(frame, (_fw // DECIMATE, _fh // DECIMATE),
+                                 interpolation=_cv2.INTER_AREA)
+            rgb = np.ascontiguousarray(_small[:, :, ::-1])  # BGR→RGB
             if VIS_DEBUG:
                 with st.lock:
                     st.dbg_frame_small = rgb.copy()
@@ -471,7 +475,8 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
             if _raw_frame is not None:
                 try:
                     _full_rgb = np.ascontiguousarray(_raw_frame[:, :, ::-1])  # 全分辨率 BGR→RGB
-                    _dh, _dw = _raw_frame[::DECIMATE, ::DECIMATE].shape[:2]
+                    _H0, _W0 = _raw_frame.shape[:2]
+                    _dw, _dh = _W0 // DECIMATE, _H0 // DECIMATE   # 与 frame_pump 的 resize 尺寸精确一致
                     _primary, _ = _face_pipeline.process(
                         all_faces, (_dw, _dh), _full_rgb, DECIMATE, now, _doa_selected_idx)
                     if _primary is not None:
@@ -729,6 +734,7 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
             with st.lock:
                 st.dbg_det = {
                     "face": msg.get("face"),
+                    "face_box": face_box,   # DOA 选中后的真实像素框(降采样系),供单脸贴合绘制
                     "hand": msg.get("hand"),
                     "n_faces": msg.get("n_faces", 0),
                     "all_faces": all_faces,
