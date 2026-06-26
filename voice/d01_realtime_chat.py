@@ -374,11 +374,9 @@ def frame_pump_loop(mini: ReachyMini, st: State, frame_q, stop: threading.Event)
             if now - t_last < 1.0 / VIS_MAX_FPS:
                 continue
             t_last = now
-            # 受控抗锯齿缩放(替代 stride 抽点):保留细节 → SCRFD kps 更精确 → 识别更准
-            _fh, _fw = frame.shape[:2]
-            _small = _cv2.resize(frame, (_fw // DECIMATE, _fh // DECIMATE),
-                                 interpolation=_cv2.INTER_AREA)
-            rgb = np.ascontiguousarray(_small[:, :, ::-1])  # BGR→RGB
+            # stride 抽点(近零开销;INTER_AREA 每帧全分辨率缩放会吃满 CPU 拖慢 SCRFD 推理)
+            # 识别精度靠 DECIMATE=2(分辨率比 3 高)+ 全分辨率 ROI 重检(后续)保证
+            rgb = np.ascontiguousarray(frame[::DECIMATE, ::DECIMATE, ::-1])  # BGR→RGB
             if VIS_DEBUG:
                 with st.lock:
                     st.dbg_frame_small = rgb.copy()
