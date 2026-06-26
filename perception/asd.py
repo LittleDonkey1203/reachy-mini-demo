@@ -45,10 +45,39 @@ def preprocess_face(rgb_crop: np.ndarray) -> np.ndarray:
     return gray.astype(np.float32)
 
 
+def syncnet_crop(full_rgb: np.ndarray, bbox_xyxy, crop_scale: float = 0.4):
+    """asd-demo(SyncNet/TalkNet)式裁剪几何:让"嘴"落在 112 窗口正中央(模型训练时的位置)。
+    bbox_xyxy = 全分辨率 [x1,y1,x2,y2]。纵向不对称(上 bs / 下 1.8bs),横向 ±1.4bs。
+    返回 112×112 灰度 float32 或 None。"""
+    import cv2
+    H, W = full_rgb.shape[:2]
+    x1, y1, x2, y2 = bbox_xyxy
+    bs = max(x2 - x1, y2 - y1) / 2.0                  # 半边长
+    if bs <= 4:
+        return None
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0          # 脸中心
+    cs = crop_scale
+    ty0 = int(round(my - bs))                          # 纵向不对称:上 bs
+    ty1 = int(round(my + bs * (1 + 2 * cs)))           #            下 1.8bs → 嘴居中
+    tx0 = int(round(mx - bs * (1 + cs)))               # 横向对称 ±1.4bs
+    tx1 = int(round(mx + bs * (1 + cs)))
+    cy0, cy1 = max(0, ty0), min(H, ty1)
+    cx0, cx1 = max(0, tx0), min(W, tx1)
+    if cy1 - cy0 < 8 or cx1 - cx0 < 8:
+        return None
+    face = full_rgb[cy0:cy1, cx0:cx1]
+    pt, pb, pl, pr = cy0 - ty0, ty1 - cy1, cx0 - tx0, tx1 - cx1   # 越界补边(复制)
+    if pt or pb or pl or pr:
+        face = cv2.copyMakeBorder(face, pt, pb, pl, pr, cv2.BORDER_REPLICATE)
+    gray = cv2.cvtColor(face, cv2.COLOR_RGB2GRAY)
+    gray = cv2.resize(gray, (224, 224))
+    return gray[56:168, 56:168].astype(np.float32)     # 中心裁 112 → 嘴在正中
+
+
 class SpeakerDetector:
     """LR-ASD 单轨迹主动说话人检测(CPU)。"""
 
-    def __init__(self, weight_path: str | None = None, device: str = "cpu",
+    def __init__(self, weight_path: str | None = None, device: str = "auto",
                  speak_thresh: float = 0.0, smooth_window: int = 2):
         self.available = False
         self.speak_thresh = speak_thresh
@@ -72,7 +101,10 @@ class SpeakerDetector:
         try:
             from model.Model import ASD_Model
             from loss import lossAV
-            self.device = torch.device("cuda" if (device == "cuda" and torch.cuda.is_available()) else "cpu")
+            if device == "cpu":
+                self.device = torch.device("cpu")
+            else:                                            # auto/cuda:有就用 GPU(LR-ASD 0.22ms vs CPU 18ms)
+                self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.model = ASD_Model()
             self.lossAV = lossAV()
             sd = torch.load(weight, map_location="cpu", weights_only=False)
@@ -229,14 +261,14 @@ class AsdEngine:
     def feed_audio(self, mono):
         self.audio.push(mono)
 
-    def feed_crop(self, track_id: int, rgb_face: np.ndarray, now: float):
-        """对每个 confirmed track 喂一张人脸 ROI(RGB);内部限到 ~crop_fps 并预处理为 112 灰度。"""
+    def feed_crop(self, track_id: int, full_rgb: np.ndarray, bbox_xyxy, now: float):
+        """对每个 confirmed track 喂一帧:从全分辨率帧按 SyncNet 几何裁脸(嘴居中)→112 灰度。
+        bbox_xyxy = 全分辨率 [x1,y1,x2,y2]。内部限到 ~crop_fps。"""
         last = self._last_crop_t.get(track_id, 0.0)
         if now - last < self.crop_dt:
             return
-        try:
-            g = preprocess_face(rgb_face)
-        except Exception:
+        g = syncnet_crop(full_rgb, bbox_xyxy)
+        if g is None:
             return
         with self._lock:
             dq = self._crops.get(track_id)
@@ -309,17 +341,8 @@ class AsdEngine:
                 span = t1 - t0
                 if span < 0.4:                                  # 不足 ~0.4s 不评
                     continue
-                # 按时间戳重采样到 25fps:我们检测 ~16fps,必须补成 25 才与模型/音频 4:1 对齐
-                n_target = int(round(span * VIDEO_FPS))
-                if n_target < self.min_frames:
-                    continue
-                ts = [c[0] for c in crops]
-                vid, j = [], 0
-                for k in range(n_target):
-                    tt = t0 + k / float(VIDEO_FPS)
-                    while j + 1 < len(crops) and abs(ts[j + 1] - tt) <= abs(ts[j] - tt):
-                        j += 1
-                    vid.append(crops[j][1])
+                # GPU 让检测回 ~25fps → 直接喂真帧(不重采样,webcam 同款,避免重采样引入失同步)
+                vid = [c[1] for c in crops]
                 audio = self.audio.get_window(t0, t1)           # 同一时间段的音频
                 if audio is None or audio.size < SAMPLES_PER_FRAME:
                     continue

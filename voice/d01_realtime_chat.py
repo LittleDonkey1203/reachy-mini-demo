@@ -546,17 +546,13 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                     _dw, _dh = _W0 // DECIMATE, _H0 // DECIMATE   # 与 frame_pump 的 resize 尺寸精确一致
                     _primary, _track_views = _face_pipeline.process(
                         all_faces, (_dw, _dh), _full_rgb, DECIMATE, now, _doa_selected_idx)
-                    # ── ASD:每 track 喂全分辨率灰度脸(谁在说话)──
+                    # ── ASD:每 track 喂全分辨率帧 + 全分辨率 bbox(SyncNet 嘴居中裁剪在引擎内做)──
                     if _asd_engine is not None and _asd_engine.available and _track_views:
                         for _v in _track_views:
                             _b = _v.bbox_px
-                            _bw, _bh = (_b[2] - _b[0]), (_b[3] - _b[1])
-                            _x0 = max(0, int((_b[0] - 0.4 * _bw) * DECIMATE))
-                            _y0 = max(0, int((_b[1] - 0.4 * _bh) * DECIMATE))
-                            _x1 = min(_W0, int((_b[2] + 0.4 * _bw) * DECIMATE))
-                            _y1 = min(_H0, int((_b[3] + 0.4 * _bh) * DECIMATE))
-                            if _x1 - _x0 >= 16 and _y1 - _y0 >= 16:
-                                _asd_engine.feed_crop(_v.track_id, _full_rgb[_y0:_y1, _x0:_x1], now)
+                            _bbox_full = (_b[0] * DECIMATE, _b[1] * DECIMATE,
+                                          _b[2] * DECIMATE, _b[3] * DECIMATE)
+                            _asd_engine.feed_crop(_v.track_id, _full_rgb, _bbox_full, now)
                         _asd_engine.gc([_v.track_id for _v in _track_views])
 
                     # ── 头部目标 + 发言归属:ASD 说话人优先,否则回退 ──
