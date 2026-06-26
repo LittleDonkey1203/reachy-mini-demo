@@ -89,7 +89,17 @@ class FaceReIDPipeline:
                                   landmarks=lmk, embedding=None,
                                   quality=0.0))
 
-        self.tracker.update(dets)
+        # 子进程检测不带 embedding(主进程事后懒算)→ 这条路 dets 恒无 embedding。
+        # 必须在关联前把 embedding_weight 清零,否则 embedding_distance 返回全 1.0,
+        # 给每对关联加 0.3 惩罚,把 IoU 门从名义 0.30 抬到 0.429 → 低 fps 下丢轨重建
+        # (镜像 face-tracker-demo pipeline.py 的 split-path 守卫)。
+        _emb_w = self.tracker.cfg.embedding_weight
+        if all(d.embedding is None for d in dets):
+            self.tracker.cfg.embedding_weight = 0.0
+        try:
+            self.tracker.update(dets)
+        finally:
+            self.tracker.cfg.embedding_weight = _emb_w
         active = self.tracker.get_all_active()
 
         # ── 懒提特征 + 三区间身份(只对 confirmed track,限频 + 每帧预算)──
