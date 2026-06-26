@@ -302,6 +302,28 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-06-26T12:30:00.000Z"
+    },
+    {
+      "id": "bug-054",
+      "timestamp": "2026-06-26T15:10:00.000Z",
+      "error_message": "track 疯狂抖动:96-100% 检出率下 track_id 每秒重建(192→214),同一人裂成多个身份反复横跳",
+      "file": "perception/face_pipeline.py",
+      "root_cause": "移植 ByteTracker 时漏了参考工程(face-tracker-demo pipeline.py:216-222)的 split-path 守卫。子进程检测不带 embedding(dets 恒 embedding=None,主进程懒算),embedding_distance 返回全 1.0;按 embedding_weight=0.3 加权使 Stage-1 融合代价恒 +0.3,把 IoU 匹配门从名义 0.30(1-iou_threshold)抬到 0.429。DECIMATE=2(检测帧 960×540,fps 比 DECIMATE=3 低)下转头脸相邻帧 IoU 落入 0.30-0.43 死区被判未匹配→丢轨重建。实证:DECIMATE=3 时 track 稳在 1;DECIMATE=2 时 1→214。非 Kalman 噪声问题(噪声按面积相对缩放,两边一致)。",
+      "fix": "face_pipeline.process 在 tracker.update 前,若 all(d.embedding is None) 则把 cfg.embedding_weight 置 0,finally 还原(镜像参考 split-path 守卫)。实测最大 track_id 214→52、🆔 切换 79→27(churn 降 ~4x)。残留 churn 系 Kalman 噪声按 area/20 二次缩放在大框下放大,待改线性(box 高)缩放;叠加 Q4 已确认 track 身份冻结 + provisional 在线合并 进一步治身份裂变。",
+      "tags": [
+        "bytetrack",
+        "track-churn",
+        "embedding-weight",
+        "iou",
+        "decimate",
+        "face-reid",
+        "port-gotcha"
+      ],
+      "related_bugs": [
+        "bug-053"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-06-26T15:10:00.000Z"
     }
   ]
 }
