@@ -1764,6 +1764,7 @@ def main() -> int:
             rms_acc: list[float] = []
             rms_t = time.monotonic()
             vid_send_t = 0.0          # 视频送帧节流(1fps)
+            vid_sent = 0              # 已送视频帧计数(周期回显)
             t_run0 = time.monotonic()
             greet_i = 0   # 唤醒招呼轮换索引
             greet_sent_at = 0.0
@@ -1965,6 +1966,9 @@ def main() -> int:
                                 _ok, _jpg = cv2.imencode(".jpg", _vframe, [cv2.IMWRITE_JPEG_QUALITY, 70])
                                 if _ok:
                                     conv.append_video(base64.b64encode(_jpg.tobytes()).decode("ascii"))
+                                    vid_sent += 1
+                                    if vid_sent % 30 == 0:        # 每 ~30s 回显一次
+                                        log(f"📹 视频流已送 {vid_sent} 帧({_jpg.size // 1024}KB/帧)")
                             except Exception as _ve:
                                 log(f"⚠ 送视频帧失败:{type(_ve).__name__}")
                     if time.monotonic() - rms_t >= 10.0:
