@@ -69,7 +69,7 @@
 
 | 子特性 | 代码位置 | 说明 |
 |--------|----------|------|
-| F6.1 engaged 再唤醒切换 | `d01:main()` L1919-1942 | "小艺" + 非A方向 → 切换转向新人B, 丢弃A重开会话 |
+| F6.1 engaged 再唤醒(打断+转向找喊话人,A方案) | `d01:main()` 音频循环唤醒块 | 对话中喊"小艺"(KWS命中)→ ①`_do_barge_in` 立刻打断当前回话 ②`wake_cue="heard"` 天线上扬应答 ③`switch_request` 转向 DOA 方向找喊话人(三档),**保留会话**(不再 close/reopen,身份按本句说话人注入)。**用法:必须不带 `--no-wake` 启动**(否则无 KWS) |
 | F6.2 三档方向 | `behavior_loop` L1052-1089 | confident 直转 / fresh 粗方向 / 无 → 反向离A |
 | F6.3 切换途中找脸 | `behavior_loop` L1161-1203 | turn → sweep(附近找脸), 超时回A |
 | F6.4 切换冷却 | `d01:main()` L1919 | SWITCH_COOLDOWN_S=2.0s |
@@ -175,6 +175,13 @@
 | F13.15 上下文过长自动 consolidation | `realtime.py:on_event` user transcript | 估算 token > CONV_SUMMARY_THRESHOLD 自动触发后台 consolidation + 清桶 |
 | F13.16 退出时遍历 consolidation | `d01:main()` 退出块 | 遍历所有剩余 pid 桶，逐个调 save_summary (consolidation) |
 | F13.17 旧数据自动迁移 | `memory/manager.py:load_memory` | 检测旧 dict facts 格式 → 自动转换为 list[str] + episodes |
+| F13.18 记忆归属=本句说话人 | `state.py:turn_speaker_pid` + `realtime.py:transcription.completed/response.created` | 记忆存(resp_snapshot/remember_fact)/读(update_memory)统一用 speaker_window 定的本句说话人,与飘的 current_person_id 解耦(后者只管焦点/显示)。用法:无需操作,说个人信息自动存给说话人 |
+| F13.19 每轮工具审视兜底 | `realtime.py:RealtimeDialog.extract_memory_async` + `config.py:EXTRACT_MODEL` | 每轮用户说完无条件用 qwen-plus+最近5轮上下文抽"本句说话人"个人事实/姓名,save_fact 去重,兜底 realtime 漏调 remember_fact。用法:自动;`EXTRACT_MODEL` 环境变量可换模型 |
+| F13.20 命名 guard(防脑补/画外/乱改名) | `realtime.py:try_name_identity` | 命名走统一 guard 三道门:①名字合法(1-8 中英文字)②**必须出现在当轮转写里**(防模型脑补,名字以 ASR 为准)③**已命名不静默覆盖**。**用法**:首次命名直接说『我叫X』;**改名必须显式说『我改名叫X / 我其实叫X / 叫错了我叫X』**,普通再说『我叫X』不会覆盖已有名字。画外/无归属说话人一律不命名 |
+| F13.21 显示名实时取 | `d01:vision_result_loop`(dashboard 标签 + 焦点名) | 人脸名每帧从 `memory_mgr.get_name(pid)` 现取(模型用哪个库就显示哪个),改名后立即跟上,不再用识别那刻的缓存。用法:无需操作,dashboard 框名/🆔 日志即实时库状态 |
+| F14.x 头部转向平滑 | `d01:vision_result_loop` 头部块 + `config.py:HEAD_*` | 头"看谁"独立于归属:引擎EMA上叠二级重EMA(`HEAD_ASD_EMA`)+黏滞(`HEAD_SWITCH_MARGIN`)+保持(`HEAD_HOLD_S`/DOA确信`HEAD_DOA_HOLD_S`)。治多人头部来回甩。参数全在 config 可调 |
+| F14.y Dashboard 画框配色 | `debug_server.py:_build_frame` + `asd.py:speaking_ids` | 脸:绿=说话(speaking_ids带新鲜度门)/灰=跟踪;手:青=有效/橙=底部/黄=低置信。绿只给说话脸,蓝色已去除,ASD分2位小数 |
+| F14.z DOA 瞟头(喊他能找人) | `d01:vision_result_loop` 头部积分块 + `config.py:DOA_GLANCE_DEG/GLANCE_MAX_DEG/GLANCE_MIN_TURN_DEG/GLANCE_LOCAL_RMS` | TRACKING 态,DOA确信+偏离>20°+画面无人说话+最近有人说话→转向声源找人,到位等说话,ASD锁到→按身份黏滞接管。**F1**:"有人说话"= realtime VAD **或** 本地麦响度>`GLANCE_LOCAL_RMS`(门控前,绕开>55°方向门控对侧边声音的静音死锁,喊大声生效)。**F4**:转角朝 DOA **符号**方向取 `max(\|resid\|, GLANCE_MIN_TURN_DEG=50)` 封顶 75°(DOA角度不可信只信符号,治"转向不够")。日志`👀 DOA 转头找人` |
 
 ### F21 — 音频闸门(切人身份保护)
 

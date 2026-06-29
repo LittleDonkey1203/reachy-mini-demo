@@ -118,6 +118,17 @@ def test_stage3_lost_reid_by_embedding():
     assert any(t.track_id == tid for t in out)
 
 
+def test_stage3_lost_reid_by_iou_no_embedding():
+    """方案B(检测无 embedding):track 漏检一帧丢失后,同位置重检靠 IoU 在 Stage3 找回同 id。
+    这是治 churn 的关键——否则无 embedding 的 lost 永远找不回,漏检一帧就新建 track。"""
+    tr = ByteTracker(TrackingConfig(min_hits=1, max_age=10))
+    out = tr.update([_det(100, 100)])              # 无 embedding
+    tid = out[0].track_id
+    tr.update([])                                  # 漏检一帧 → lost
+    out = tr.update([_det(101, 100)])             # 同位置重检(无 embedding)→ 应按 IoU 找回
+    assert any(t.track_id == tid for t in out), "无 embedding 时应按 IoU 位置找回 lost,不新建"
+
+
 def test_smooth_embedding_ema_normalized():
     tr = ByteTracker(TrackingConfig(min_hits=1))
     e = _nrm(2)

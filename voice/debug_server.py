@@ -93,7 +93,7 @@ def _put_cjk_text(bgr, text: str, pos: tuple, color=(255, 255, 255), font=None):
 def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
     """VIS_DEBUG=1 时启动 MJPEG HTTP 服务，浏览器打开 http://localhost:{port} 查看实时标注帧。
     画面 = 视觉子进程实际看到的降采样帧（DECIMATE×），叠加：
-      蓝框=人脸(u,v,h)  绿框=有效手(score≥阈值)  黄框=低置信度手(可能误检)
+      绿框=正在说话的脸  灰框=跟踪中的脸  青框=有效手  橙/黄框=底部过滤/低置信手
       左上角=状态机/头部目标/face_locked  右上角=帧时间戳"""
     import cv2 as _cv2
     _init_pil_fonts()
@@ -143,19 +143,18 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 if not _b:
                     continue
                 _ax0, _ay0, _ax1, _ay1 = int(_b[0]), int(_b[1]), int(_b[2]), int(_b[3])
-                _is_sel = bool(_v.get("selected"))
                 _is_conf = bool(_v.get("confirmed"))
-                _spk = bool(_v.get("speaking"))      # ASD:正在说话
+                _spk = bool(_v.get("speaking"))      # ASD:正在说话(>阈值且新鲜)
                 _asc = _v.get("asd")                 # ASD 说话分(signed)
-                # 框色:说话=绿, 选中(说话人候选)=蓝, 其余=灰
-                _bcolor = (0, 200, 0) if _spk else ((255, 80, 0) if _is_sel else (150, 150, 150))
-                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, 2 if (_spk or _is_sel) else 1)
+                # 框色:说话=绿,其余=灰(蓝色已去掉;头部跟随只看机器人朝向/yaw)
+                _bcolor = (0, 200, 0) if _spk else (150, 150, 150)
+                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, 2 if _spk else 1)
                 # 顶部标签:身份(Unknown-N/真名)+ trackid + ASD 说话分 —— 每框常驻
                 _nm = _v.get("name") or "?"
-                _asd_s = f" {_asc:+.1f}" if _asc is not None else ""
+                _asd_s = f" {_asc:+.2f}" if _asc is not None else ""
                 _top = f"{_nm} T{_v.get('track_id')}{_asd_s}"
                 _cjk_w = sum(18 if ord(c) > 127 else 10 for c in _top) + 6
-                _lblc = (0, 150, 0) if _spk else ((255, 80, 0) if _is_sel else ((0, 140, 0) if _is_conf else (90, 90, 90)))
+                _lblc = (0, 150, 0) if _spk else ((0, 140, 0) if _is_conf else (90, 90, 90))
                 _ly = _ay0 - 20 if _ay0 - 20 >= 0 else _ay1   # 靠顶则画到框下方
                 _cv2.rectangle(bgr, (_ax0, _ly), (_ax0 + _cjk_w, _ly + 20), _lblc, -1)
                 _put_cjk_text(bgr, _top, (_ax0 + 2, _ly + 2), (255, 255, 255))
@@ -173,7 +172,7 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                     _ay0 = int((_afv - _afh / 2) * H)
                     _ax1 = int((_afu + _afw / 2) * W)
                     _ay1 = int((_afv + _afh / 2) * H)
-                _color = (255, 80, 0) if _is_sel else (120, 120, 120)
+                _color = (230, 230, 230) if _is_sel else (120, 120, 120)   # DOA选中=白(非蓝),其余灰
                 _thick = 2 if _is_sel else 1
                 _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _color, _thick)
                 _ftag = f"DOA" if _is_sel else f"#{_fi}"
@@ -186,7 +185,7 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                     mem_s = "MEM" if identity_injected else ""
                     id_str = f"{id_label} {mem_s}".strip()
                     _cjk_w = sum(18 if ord(c) > 127 else 10 for c in id_str) + 4
-                    _cv2.rectangle(bgr, (_ax0, _ay1), (_ax0 + _cjk_w, _ay1 + 22), (200, 60, 0), -1)
+                    _cv2.rectangle(bgr, (_ax0, _ay1), (_ax0 + _cjk_w, _ay1 + 22), (70, 70, 70), -1)
                     _put_cjk_text(bgr, id_str, (_ax0 + 2, _ay1 + 2), (255, 255, 255))
         elif det and det.get("face") is not None:
             fu, fv, fh = det["face"]
@@ -200,9 +199,9 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 fy0 = int((fv - fh / 2) * H)
                 fx1 = int((fu + fw / 2) * W)
                 fy1 = int((fv + fh / 2) * H)
-            _cv2.rectangle(bgr, (fx0, fy0), (fx1, fy1), (255, 80, 0), 2)
+            _cv2.rectangle(bgr, (fx0, fy0), (fx1, fy1), (230, 230, 230), 2)   # 单脸兜底=白(非蓝)
             label = f"FACE u={fu:.2f} v={fv:.2f} h={fh:.2f} n={det.get('n_faces',1)}"
-            _cv2.rectangle(bgr, (fx0, fy0 - 18), (fx0 + len(label) * 9, fy0), (255, 80, 0), -1)
+            _cv2.rectangle(bgr, (fx0, fy0 - 18), (fx0 + len(label) * 9, fy0), (90, 90, 90), -1)
             _cv2.putText(bgr, label, (fx0 + 2, fy0 - 4),
                          _cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
             if person_name or person_id:
@@ -210,7 +209,7 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 mem_s = "MEM" if identity_injected else ""
                 id_str = f"{id_label} {mem_s}".strip()
                 _cjk_w = sum(18 if ord(c) > 127 else 10 for c in id_str) + 4
-                _cv2.rectangle(bgr, (fx0, fy1), (fx0 + _cjk_w, fy1 + 22), (200, 60, 0), -1)
+                _cv2.rectangle(bgr, (fx0, fy1), (fx0 + _cjk_w, fy1 + 22), (70, 70, 70), -1)
                 _put_cjk_text(bgr, id_str, (fx0 + 2, fy1 + 2), (255, 255, 255))
 
         # ── 手部框（绿=有效 / 黄=低置信 / 橙=底部过滤）──
@@ -226,7 +225,7 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             hx1 = min(W - 1, int(hu * W) + half_w)
             hy1 = min(H - 1, int(hv * H) + half_h)
             valid = hscore >= PLAY_SCORE_MIN and hsize >= PLAY_SIZE_OFF and hv <= PLAY_HAND_V_MAX
-            color = (0, 200, 0) if valid else ((0, 120, 255) if hv > PLAY_HAND_V_MAX else (0, 200, 255))  # 绿/橙(底部)/黄
+            color = (255, 255, 0) if valid else ((0, 120, 255) if hv > PLAY_HAND_V_MAX else (0, 200, 255))  # 青(有效)/橙(底部)/黄(低置信);绿只留给说话人脸
             tag = "HAND" if valid else ("HAND(BOT)" if hv > PLAY_HAND_V_MAX else "HAND(LOW)")
             _cv2.rectangle(bgr, (hx0, hy0), (hx1, hy1), color, 2)
             fingers = h.get("fingers", -1)
@@ -1225,8 +1224,8 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                         + data + b"\r\n"
                     )
                     time.sleep(1 / 15)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                pass   # 客户端关/刷新 Dashboard 标签导致断流,正常,不打 traceback
 
         def _state(self):
             qs = self.path.split("?", 1)[1] if "?" in self.path else ""

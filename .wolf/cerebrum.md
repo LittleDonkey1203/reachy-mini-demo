@@ -12,6 +12,8 @@
 - 闸门/门控机制不能过于敏感：只在明确的切人+声源大幅变化时才生效，避免常规场景误触发
 - Dashboard 调试功能要能看到"模型看到什么" — session instructions、memory prompt、conversation log 必须可视化
 - 遵循 CLAUDE.md 规则：每次改动后必须更新 wolf 文件（cerebrum/memory/anatomy/buglog）
+- 记忆抽取兜底要"工具模型每轮都审视"，不要用关键词触发（词表永远漏）。判断交给模型，规则不可靠（2026-06-27 明确）
+- 改方案前先"写出来给我审核"，确认后再动手；讨论时给出取舍并附推荐项
 
 ## Key Learnings
 
@@ -24,6 +26,19 @@
 - **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `list[str]` 中文短句
 - **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+draft facts 生成最终 entity memory + episodic memory
 - **清华镜像:** UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ 所有 pip/uv 安装必用
+- **归属有两套,别用混(2026-06-27):** ①转写显示归属 = `transcription.completed` 里 `speaker_window(speech_start)`,看整句谁在说,**稳**;②全局 `current_person_id` = vision loop 用瞬时 `asd.speaker()`+单人 fallback 持续刷,**飘**(会 fallback 切错人,只管头部跟随/显示)。**记忆「存(remember_fact/resp_snapshot)+ 读(update_memory)」必须用①**(新 `st.turn_speaker_pid`,transcription 时设),不能用②。**不需要给 current_person_id 加守卫**:inject 只读不污染数据;d01 late-inject 本就有 `in_flight==0` 守卫(回复在途不注入),fallback 切人只发生在两句之间且下一句自愈。曾加 TURN_LOCK 后判定是伪需求移除。
+- **ASD 有三个消费方,需求不同别用混(2026-06-27):** ①**归属/记忆保存**(speaker_window)= 敏感(原参数 ema=0.5/thresh=0,抓任意一瞬说话,不增延迟);②**头部转向 + 当前人焦点**(_head_view/current_person_id)= 稳(引擎 EMA 上叠二级重 EMA `HEAD_ASD_EMA=0.18` + 黏滞 `HEAD_SWITCH_MARGIN` + **按身份 person_id 黏滞、离场才释放**);③**绿框**(speaking_ids)= 敏感但带新鲜度门。
+- **track churn 的真正根因 = Stage3 lost 找回纯 embedding,方案B 下失效(2026-06-27,bug-062):** ByteTracker `update` 的 Stage3(lost track 找回)只用 `embedding_distance`(门0.45);但方案B 跟踪检测无 embedding → `embedding_distance` 返回全 1.0 → lost 永远找不回 → **漏检一帧就新建 track**(稳定画面也 ~8个/分钟,崩溃期飙到 84)。**修法:Stage3 按 embedding 有无分两路(都用匈牙利 linear_assignment):全无 embedding→纯 IoU 位置找回(门 1-iou_threshold);有→原 embedding 跨位找回。** 对照 asd-demo `webcam_asd_demo.py` 的朴素 IoU 跟踪(漏检 miss+1、留池、下帧 IoU 重匹配)印证它不 churn。我们的 `linear_assignment` 是真匈牙利(scipy linear_sum_assignment)。**churn 治本后,ASD 限量(ASD_MAX_TRACKS)/fps 冻结(FPS_FREEZE_BELOW)降级为保险。** 小风险:纯 IoU 找回时 position-swap(某人走、另一人 1.5s 内占位)会短暂继承冻结身份误 ID,罕见暂接受。
+- **track churn 是多个问题的共同根(2026-06-27):** 相机自运动(头/身大幅转,如 DOA 瞟头+身体跟随追侧面人甩到 -77°)→ 运动模糊+大角度 → SCRFD 检测碎裂 → ByteTrack 疯狂换 track(id 冲到 104)→ 同时存活 track 多 → ASD 每 track crop+打分负载飙 → 抢 CPU/GPU → 子进程 SCRFD wall-time 40→390ms → **fps 崩→跟踪更差→更多 churn 死亡螺旋**。同时 churn 让新人(坤坤)ASD 按 track_id 攒不够帧→没说话分→画外。**断路器**:`FPS_FREEZE_BELOW=8`,vision 循环 fps EMA 低于此→冻结身体跟随+不瞟头(身体甩=最大相机自运动),断螺旋(日志 🧊)。根治待办:ASD/识别按身份(person_id)聚合。
+- **记忆注入只认「本句说话人」,绝不挂 current_person_id/焦点(2026-06-27,bug-060):** 焦点(头看谁)在多人交替时本就该翻,若注入跟着焦点翻→每翻一次 update_session 重注入→竞态→回复用错人记忆。唯一注入源 = realtime transcription 按 turn_speaker。视觉循环焦点变化**不重置 identity_injected、不注入**;d01 late-inject 已删。
+- **ASD 必须按身份键(person_id 或 t{track_id})聚合,不能按 track_id(2026-06-27,bug-060):** ByteTrack churn 换 id,按 track_id 则每次从空缓冲攒、攒不够 12帧/1.3s→新人一直没说话分→画外。改按身份键后 churn 换 track 喂同一缓冲→能激活。引擎(asd.py)键本就通用,只需调用方传 key;`last_track(key)` 侧表供显示/归属。speaker/speaker_window 返回的是 key:`t` 开头=未识别(画面内未绑定),否则=person_id 直接当 pid。
+- **DOA 转头找人 = 状态机(2026-06-27 定稿,bug-060):** 正确逻辑(用户明确):转到 DOA 角度 → **停那等说话** → 锁说话人 → 找不到**不弹回原来的大人脸**。实现:`_glance_phase` 0/1/2。①触发=DOA偏>20°+确信+画面无人说话+fps够+冷却过+持续0.3s。②进入时**锁定一次**目标 `body_yaw+clip(resid,±75°)`(=声源世界角,**不 live 追→平滑不来回转**)+ **清 _head_key**(忘原焦点)。③phase1 转向(头到 DOA;**resid 是身体系,必须转身体才减小**,所以身体跟随必须放开 fps 冻结 `_cam_ok or phase in(1,2)`,否则 churn 掉 fps 身体就停、够不到 45°+ 的人)。④到位(头距目标<8°)→phase2 停那等。⑤phase2 有人说话(head_ema>阈值)→锁定跟随;超 `GLANCE_TIMEOUT_S`(5s)没人→放弃+冷却(保持朝向,不弹回原脸)。**关键认知:转头(颈限±23°)永远够不到侧面 45°+ 的人,必须转身体;身体转会引发 churn,得在"找人"这个有意动作里临时放开 fps 冻结。** **触发必须加"真说话"闸**(`user_speaking` 麦 VAD,最近 `GLANCE_SPEECH_GRACE_S=1.5s` 内):光 DOA 确信会把环境音/反射当声源 → 身体右转时 resid 常报负(左)→ 触发左转 + "放弃不弹回" → **累积无声左漂**;加了说话闸,纯环境音不转。 身份合并只能按 embedding 同脸,绝不按名字(两人可能重名)。
+- **画外/未识别说话人要注入「中性上下文」,不能残留上一个在场人的身份(2026-06-27,bug-061):** 否则模型拿上一个在场人(陛下)的记忆回答画外的人,被问"我是谁"会乱答"你是陛下"。`update_memory_neutral()` 注入"看不到对方/不知道是谁/别套用他人名字",`identity_injected_pid='_neutral'` 防抖;在场人再开口自动重注入其记忆。模型回复要 `log('💬 小艺:...')` 才进网页 log 面板(否则只 print 到 stdout)。Dashboard MJPEG 断流在 Windows 是 ConnectionAbortedError(10053),_mjpeg 要 catch 它(+OSError)。
+- **画外的话绝不能存给在场的人(2026-06-27,bug-058/059):** resp_snapshot 在"本轮有用户说话(turn_speaker_at 新鲜)"时必须用 turn_speaker_pid(画外=None=不存),**不能回退 current_person_id**——否则画外说"我叫X"会被 remember_fact 张冠李戴给在场人(实测把大大改名坤坤)。仅"无近期用户说话(如系统招呼)"才回退当前人。
+- **DOA 角度不可信,只信符号(项目老教训,2026-06-27 再确认):** `doa_resid_stable=90−中值角`(身体系,符号=左/右,`confident=IQR<25°`,10Hz)。ARCHITECTURE/CALIBRATION §14:角度/spread 都不准(镜像错),SEEK/瞟头只用 **resid 符号**定方向、视觉见脸才锁。**DOA 瞟头**(TRACKING 态,侧面有人喊但画面没人说话→朝声源侧瞟 ≤15°找人,`DOA_GLANCE_DEG/GLANCE_MAX_DEG/GLANCE_MIN_HOLD_S`):只在 vision 循环 TRACKING 写头(不和 behavior_loop 抢);GLANCE_MAX_DEG=15 < 颈限23×0.7=16.1 保证只动头不甩身;找到说话人(ASD)→按身份黏滞立即锁(新 key EMA 以瞬时分起步,无弹回)。
+- **头部/当前人必须按身份(person_id)黏滞,不能按 track_id 或瞬时 ASD(2026-06-27):** ByteTrack track churn 频繁换 id(同人 T14→T17→…),按 track_id 黏滞会"离场→重选→晃";瞬时 ASD 驱动 current_person_id 会在多人间疯狂切→`update_session` 反复重注入→竞态→**回复称呼错人**(归属对但叫错)。解法:`_head_key = person_id or t{track_id}`,churn 换 track 不算离场;current_person_id 跟稳定焦点走;realtime transcription 只 update_memory(本句说话人)不写 current_person_id。
+- **Dashboard 画框配色(2026-06-27 定稿):** 脸:🟩绿=正在说话(speaking_ids,>阈值且新鲜)/⬜灰=跟踪中;手:🟦青=有效/🟧橙=底部过滤/🟨黄=低置信。**绿只给说话脸**(有效手从绿改青,避免手框压脸误认);**蓝色全部去掉**(头部跟谁看机器人朝向/yaw,不用框色重复表达)。ASD 分显示 2 位小数(1 位会把 0.0x 显示成 +0.0)。
+- **记忆兜底抽取(2026-06-27):** `RealtimeDialog.extract_memory_async` 每轮 transcription 后无条件用 `EXTRACT_MODEL`(qwen-plus)+最近5轮上下文抽「本句说话人」个人事实,`save_fact` 内置去重 → 兜底 plus 偶发漏调 remember_fact("说了不做")。与 realtime 原生 remember_fact 并存不冲突。
 - **Realtime function-calling:** flash-realtime 触发可靠性差(OmniGAIA flash≈33.9 vs plus≈57.2),会把工具"说成文本"不发 function_call → 记忆/动作丢失;记忆/动作场景必用 plus。Qwen-Omni-Realtime 不支持 tool_choice/parallel_tool_calls,无法强制调用。诊断:日志看 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记;动作全走"标签泄漏兜底"=模型在文本化工具。realtime.py:110 的"已注册"日志是写死文本,不反映真实 tools payload。
 
 ## Do-Not-Repeat
@@ -44,11 +59,38 @@
 - [2026-06-25] **conv=None 时 KWS 唤醒不能丢弃**: audio loop 在非 ARMED 状态 conv=None 时必须处理 KWS 命中(重连 WS)，否则 WS 意外断连后永远唤不醒。
 
 - [2026-06-26] **诊断"记忆没写入"先看工具有没有被调用**: 不要直接跳到持久化链(save_gallery/flush)。先看日志 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记是否出现——这局根因是 flash 模型根本没发 function call(把"我记住啦"说成文本),持久化 bug 是次级。记忆/动作场景别用 flash-realtime,用 plus。
+- [2026-06-27] **记忆别挂在 current_person_id 上**: 它由 vision loop 瞬时 ASD+fallback 刷,会在说话人没变时 fallback 切错人 → 存错人/读错记忆。记忆存/读统一用 `st.turn_speaker_pid`(speaker_window,per-utterance)。转写归属对≠记忆归属对,两条链当时是分开的。
+- [2026-06-27] **"模型说了记住啦"≠真存了**: plus 也会偶发不发 function_call(本轮 0 次 remember_fact),靠模型主动调不可靠。必须有每轮工具模型兜底抽取。诊断"没存"先 grep `🤖 模型调用工具: remember_fact` 看调没调,再看存到谁(磁盘 data/memories/*.json facts)。
 - [2026-06-26] **realtime.py:110 的"已注册"日志不可信**: 它是写死文本,漏列 end_session 和 4 个记忆工具,不反映真实 update_session(tools=...) payload。别拿它当"工具没注册"的证据。真实注册看 d01:175→1544→1561 + realtime.py:388/463。
 
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->
+
+### 二次唤醒 A 方案:打断+转向找喊话人,保留会话 (2026-06-29)
+- 需求:对话中喊"小艺"→ 打断 + 天线动一下 + 转到 DOA 方向找喊话人。
+- 决策(用户选 A):喊"小艺"(KWS)→ `_do_barge_in` 打断当前回话 + `wake_cue="heard"` 天线上扬 + `switch_request` 转向 DOA 找人,**保留会话**(去掉原来无条件 close+reopen);身份仍按本句说话人逐轮注入,上下文不丢。
+- 否决 B(丢弃会话重开):上下文丢失、重连有延迟;A 更轻、更连贯。
+- **依赖**:必须**不带 `--no-wake`** 启动(否则无 KWS,喊"小艺"无效)。且麦增益要够 KWS 能听到。
+- 用唤醒词当触发(KWS 训练模型)比 DOA 响度(RMS 阈值)在低麦增益下可靠得多——这是相对 F1 的更稳路径。
+
+### 命名 guard:命名是身份关键操作,与存事实分离严格 gate (2026-06-29, bug-064)
+- 背景:真机测出名字混乱(毕夏被记成陛下;同一身份 1 分钟被改名 坤坤→陛下→大大;画外『我叫大大』落到在场人;碎片幻听→唐林子)。
+- 决策:**命名走独立 guard `try_name_identity()`**,三道门:①合法 ②**名字必须出现在当轮转写里**(防模型脑补,名字以 ASR 为准)③**已命名不静默覆盖**(仅显式改名意图『改名/其实叫/叫错/应该叫』才改)。
+- **改名策略**:默认拒绝静默覆盖;extract(工具审视)路径 `allow_rename=False` 永不改名,只首次命名;改名只能走模型直调路径且需显式意图。不做确认握手(低麦克风+实时模型下握手脆且加延迟,门2/3 已够)。
+- **画外绝不命名**:删 remember_fact 处理器的 `or current_person_id` 兜底(它把画外 None 兜回在场人)。靠 response.created 已有的 turn_speaker gate。
+- 取舍:门2 用「子串」最稳——若 ASR 把名字听岔(宫坤↔坤坤),模型传的名不在转写里会被拒,那轮以 ASR 文本为准命名(更对)。用户认可「宁可少记别记错」。
+
+### 显示名实时取,不用缓存 (2026-06-29, bug-065)
+- `trk.identity_name`/`FaceResult.person_name` 是识别那刻从 store 缓存的,改名后滞后,且与模型用的 `memory_mgr` 名可能不一致。
+- 决策:dashboard 标签 + 焦点名**每帧从 `memory_mgr.get_name(pid)` 现取**(模型用哪个库就显示哪个),便于诊断 store/memory 不一致。
+
+### Track churn 治理:IoU 召回 优先于 ArcFace 重认 (2026-06-29)
+- 用户拍板:方案B(检测无 embedding)下治 churn,**保留 Stage3 IoU+匈牙利召回**(lost 池按位置续回),不改成"匹配不上就新建 track + 重提 ArcFace"。
+- 理由:IoU 召回时 **track_id 与 identity 都不变** → ASD 时序完全无缝、不提 ArcFace、无"未识别窗口"断点。漏检一帧靠位置秒续。
+- 仅当 IoU+匈牙利彻底匹配不上(脸真离开/大跳变)才落到 新建 track → Confirmed 后 ArcFace 按 gallery 身份匹配(罕见路径)。
+- 用户三条逻辑映射:① 匹配不上→新建+ArcFace(罕见,已有);② 匹配上→身份不变(Stage1/2 + Stage3 IoU 召回);③ ASD 按身份时序(bug-060 已按 person_id 聚合)。三条全部落地。
+- 残留小风险(已知接受):A 走、B 在 max_age(~1.5s)内站到 A 的位置,Stage3 IoU 可能误续成 A 身份。概率低,IoU 召回收益更大。
 
 ### YuNet 后端切换 (2026-06-23)
 - `FACE_BACKEND` 环境变量控制人脸后端: `yunet`(默认) / `mediapipe`

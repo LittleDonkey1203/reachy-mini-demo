@@ -2,6 +2,75 @@
 
 ## 已完成事项
 
+### track churn 治本(2026-06-27,bug-062)—— 当前一切乱象的总根
+- **根因**:ByteTracker Stage3(lost track 找回)只用 embedding ReID;方案B 跟踪检测无 embedding → `embedding_distance` 全 1.0 → lost 永远找不回 → 漏检一帧就新建 track(稳定画面 ~8个/分钟,崩溃期飙到 84)→ ASD 逐 track 负载爆 → fps 崩 1.0fps。
+- **对照** asd-demo `webcam_asd_demo.py`(run_webcam_asd.bat)的朴素 IoU 跟踪:漏检 miss+1、留池、下帧 IoU 重匹配 → 不 churn。印证差在"lost 找回纯 embedding"。
+- **修法**:Stage3 按 embedding 有无分两路(都用匈牙利 `linear_assignment`):①全无 embedding→纯 IoU 位置找回(门 1-iou_threshold);②有→原 embedding 跨位找回(门0.45)。新增单测锁定,21 单测全绿。
+- **决策已拍板(2026-06-29)**:用户确认**保留 IoU 召回**(优于"匹配不上就新建+重提 ArcFace")——IoU 召回时 track_id+identity 双不变,ASD 时序无缝、不提 ArcFace、无未识别窗口。用户三条逻辑(①匹配不上→新建+ArcFace ②匹配上→身份不变 ③ASD 按身份时序)全部已落地。
+- **✅ 真机验证通过(2026-06-29)**:两人+DOA转头场景 **fps 稳 14~18**(修复前同场景崩到 **2.4**),死亡螺旋已断;每次 churn 新建 track 都被 **ArcFace 重认回正确身份**(小一/坤坤 dist 0.085~0.36)→ track_id 可丢、身份稳(逻辑①坐实)。记忆归属(本 session 最初 bug)清晰说话时全链路正确:坤坤报名+喜好 → remember_fact×3 + gallery落盘 + 认主成功。残留:50s 内 track_id 到 13(~12/min,启动预热+DOA整帧位移破IoU),非螺旋、非阻塞。
+
+### ✅ 命名/身份名修复 CP1-5(2026-06-29,bug-063/064/065 已改,待真机验证)
+真机测出名字混乱(占位名 ?T 被读出 / 毕夏→陛下脑补 / 同一身份 1 分钟改名 坤坤→陛下→大大 / 画外『我叫大大』落在场人 / 碎片幻听唐林子)。全部 voice/realtime.py + voice/d01_realtime_chat.py:
+- **CP1**(bug-063):拆显示名/注入名——`_real_name`(未命名=None,占位 ?T 只用于日志/dashboard),turn_speaker/注入/extract 一律传 _real_name,占位名绝不进模型。
+- **CP2**(bug-064):删 remember_fact 的 `or st.current_person_id` → 画外/无归属不存不命名(靠 response.created 的 turn_speaker gate)。
+- **CP3**(bug-064):新增 `try_name_identity()` 统一命名 guard,两条命名路径都走——门1 名字合法、门2 **必须在当轮转写里**(防脑补,名以 ASR 为准)、门3 **不静默改名**(仅显式改名意图才覆盖;extract 路径 allow_rename=False 永不改名)。
+- **CP4**(bug-063):未命名已注册身份注入时明确"还不知道名字,别编名、别套别人名,可礼貌问"。
+- **CP5**(bug-065):dashboard 标签 + 焦点名每帧从 `memory_mgr.get_name` 现取(治改名后显示滞后,可看出 store/memory 不一致)。
+- **行为变化**:名字以 ASR 转写为准(模型听岔的 坤坤 vs 实际 宫坤 → 取转写的)。`py_compile` 通过。
+- **遗留(非代码)**:麦克风电平 RMS 0.003~0.005 偏低 → ASR 碎片/幻听,需硬件侧改善;gallery 脏数据由用户自行清空重认。
+
+### ✅ DOA 瞟头 F1+F4(2026-06-29,bug-066,待真机验证)
+用户反馈"侧边喊很大声头也不转/转不够"。根因:①门控 catch-22(>55° 确信声音被方向门控静音→realtime VAD 收不到→瞟头 _recent_speech 永 False);②触发靠 doa_confident 非音量;③转向用不可信的 resid 角度数值→不够。
+- **F1**:本地麦响度(门控前 mono RMS>`GLANCE_LOCAL_RMS`=0.006 且 in_flight==0)stamp `st.local_speech_at`;瞟头 _recent_speech = realtime VAD **或** 本地响度,绕开门控死锁。
+- **F4**:转角朝 DOA 符号方向取 `max(|resid|, GLANCE_MIN_TURN_DEG=50)` 封顶 75°,不信角度大小。
+- **待调**:`GLANCE_LOCAL_RMS` 估值(正常说话~0.003),真机喊了不转就调小、误触发就调大。未做 F2/F3。
+
+### ✅ 二次唤醒 A 方案(2026-06-29,真机验证通过)
+**真机验证(2026-06-29 15:15–15:18)**:不带 --no-wake 启动,KWS RMS 0.03~0.12 健康。共 5 次对话中喊"小艺"→ 全部触发 `🔀 二次唤醒 打断+转向找喊话人`(4 次粗方向 + 1 次 confident)→ 转向 DOA→锁脸→招呼,保留会话。画外问"我是谁"答"看不出你是谁"(中性上下文也对)。说"拜拜"正常回 ARMED。**观察**:5 次里 4 次 DOA 仅"粗方向"(不 confident)→ 按固定大角(~65-70°)转,能找到人但方向近似;想更准需提升 DOA 置信度(F2 类)。
+
+需求:对话中喊"小艺"→ 打断 + 天线动一下 + 转到 DOA 找喊话人。脚手架(KWS/switch_request/天线cue)已有,补两块 + 改保留会话:
+- 唤醒块(d01 音频循环):喊"小艺"→ `_do_barge_in` 打断当前回话 + `wake_cue="heard"` 天线上扬应答 + `switch_request` 转向 DOA 找人;**去掉原无条件 close+reopen → 保留会话**(身份按本句说话人逐轮注入)。
+- **必须不带 `--no-wake` 启动**(否则无 KWS)。麦增益要够 KWS 能听到"小艺"。
+- 上次"崩溃"教训:`--no-wake` 下 SEEK 放弃会进 ARMED+断WS 死胡同(无 KWS 回不来);改用带唤醒词启动可避开,且 DOA 把正前方判 -46° 转走人是 DOA 角度不准的老问题(behavior SoundTurn,非 F1/F4)。
+- **连带**:churn 治本后,`ASD_MAX_TRACKS`(ASD每帧只喂最大3个)+ `FPS_FREEZE_BELOW`(低fps冻身体/瞟头)降级为保险网。
+- **遗留小风险**:纯 IoU 找回 position-swap(某人走、另一人1.5s内占位)短暂继承冻结身份误 ID,罕见。3D-Speaker 声纹(CAM++)多模态可作后续加强(离线→需改流式)。
+
+### 注入只认说话人 + ASD按身份 + DOA角度转头(2026-06-27,bug-060)
+- **#2 记忆注入解耦焦点**:去掉视觉焦点变化的注入触发 + 删 d01 late-inject;注入唯一来源 = realtime transcription 按 `turn_speaker`(治"Unknown-2说→注入毕夏")。
+- **#4 ASD 按身份键聚合**(`person_id` 或 `t{track_id}`):feed_crop/scores/speaker/speaker_window/speaking_ids 全改 key,churn 换 track 喂同一缓冲→新人攒够帧能激活(治"大大/坤坤进来一直画外")。引擎加 `last_track(key)`;realtime 归属去 find_track、key 即 pid。
+- **#1 DOA 角度转头**:进入时锁 `body_yaw+clip(resid,±40°)` 世界目标,>颈限身体跟随转过去面对;封顶防镜像错转飞;身体转受 fps 断路器约束。
+- **遗留 #3 身份碎裂(毕夏×2)**:只能按 embedding 同脸合并(绝不按名字,两人可能重名)——待 #2/#4/#1 验证后做(clustering.merge_identities 按余弦 + merge_memories)。
+
+### fps 螺旋断路 + 画外不串人(2026-06-27,bug-059)
+- **fps 崩溃根因 = track churn 死亡螺旋**:相机自运动(DOA瞟头+身体跟随追侧面新人甩到-77°)→运动模糊→ByteTrack狂换track(id到104)→ASD每track负载飙→抢资源→子进程SCRFD 40→390ms→fps崩2.4→跟踪更差→更多churn。
+- **断路器**:vision循环算 fps EMA,`< FPS_FREEZE_BELOW(8)` → 冻结身体跟随 + 不瞟头(身体甩=最大相机自运动),断螺旋(日志🧊)。
+- **画外不串人**(补全 bug-058):`resp_snapshot` 本轮有用户说话就用 turn_speaker_pid(画外=None=不存),不回退在场人 → 画外的"我叫X"不再被存到在场人头上(治"大大被改名坤坤")。
+- 污染数据由用户全清(gallery/memories/face_db 均空),干净重来。
+- **遗留**:ASD/识别按身份(person_id)聚合(churn 根治)未做——先验证断路器是否足够(churn 降下来后坤坤这类新人或许就能正常激活)。
+
+### 头部转向平滑 + Dashboard 配色重整(2026-06-27,bug-057/058)
+- **头不晃 + 回复不叫错人(按身份黏滞)**:头部"看谁"(`_head_view`)**和当前人 `current_person_id` 都按身份(person_id)黏滞**——引擎 EMA 上叠二级重 EMA(`HEAD_ASD_EMA=0.18`)+ 黏滞(切人需高出 `HEAD_SWITCH_MARGIN=0.5`,否则黏住直到该身份离场;churn 换 track_id 不算离场)。
+  - 初版用时间 hold(HEAD_HOLD_S/DOA),实测"无人说话仍晃"——根因=回退最大脸帧间翻 + track churn;改"按身份黏滞、离场才释放"消除。
+  - **bug-058**:current_person_id 原由瞬时 ASD 抖动驱动→多人间疯狂切→`update_session` 反复重注入竞态→"归属对但回复叫错人(大大→陛下)"。改由稳定焦点驱动 + realtime transcription 不再写 current_person_id(只按本句说话人 update_memory)。**归属/记忆保存仍走 speaker_window 敏感不变**。
+  - **DOA 瞟头(2026-06-27 追加)**:治"我喊他都不转"。TRACKING 态,DOA 确信+偏离>20°+画面里没人在说话 持续≥0.3s → 头朝声源**符号方向**瞟 ≤15°(只用符号不信角度;<颈限×0.7=16.1° 保证只动头不甩身);瞟到说话人→按身份黏滞立即锁。只在 vision 循环 TRACKING 写头,不和 behavior_loop(SEEK/SWITCH 需唤醒词)抢。参数 `DOA_GLANCE_DEG/GLANCE_MAX_DEG/GLANCE_MIN_HOLD_S`。日志 `👀 DOA 瞟头`。
+  - 遗留:"出画面瞬间归属仍归到我"(asd_speaker 2s hold)未改,次要。
+- **绿框正确**:`asd.speaking_ids()` 加新鲜度门(治"残留正值绿不灭");ASD 分显示改 2 位小数。
+- **配色重整**:脸 🟩绿=说话 / ⬜灰=跟踪(**去掉蓝框**);手 🟦青=有效 / 🟧橙=底部 / 🟨黄=低置信(**绿只留给说话脸**,避免手框压脸误认)。
+- 验证:py_compile 4 文件绿;**待实机验证头部是否稳 + 配色**。
+
+### 记忆归属统一 + 每轮工具审视兜底(2026-06-27,bug-056)
+现象:xx 说"喜欢吃西瓜"没存给 xx,日志还显示"记忆已注入 吴觊豪"。根因 = **两套归属用了不同标准** + **plus 偶发漏调 remember_fact**。
+- **根因①(串人)**:转写显示用稳的 `speaker_window`(→xx 对);但记忆"存(resp_snapshot←current_person_id)+读(update_memory←current_person_id)"挂在飘的全局 `current_person_id`(vision loop 瞬时 ASD+单人 fallback 刷),11:04:59 fallback 把 current 切成吴觊豪 → 注入错记忆。
+- **根因②(没存)**:plus 本轮 0 次 remember_fact("说了不做")→ 西瓜根本没存到任何人(xx facts 为空)。
+- **修①(归属统一)**:新增 `st.turn_speaker_pid/name/at`(transcription 时由 speaker_window 定);记忆 存(`resp_snapshot`/`remember_fact`)+ 读(`update_memory`)统一改用 turn_speaker,与飘的 `current_person_id` 解耦(后者回归焦点/显示本职)。**不需要给 current_person_id 加守卫**:inject 只读不污染数据,且 d01 late-inject 本有 `in_flight==0` 守卫(回复在途不注入),fallback 切人只在两句之间且下一句自愈(曾加 TURN_LOCK 经审视为伪需求,已移除)。
+- **修②(每轮兜底)**:新增 `RealtimeDialog.extract_memory_async`,每轮 transcription 后**无条件**用 `EXTRACT_MODEL=qwen-plus`+最近5轮上下文抽"本句说话人"个人事实/姓名,`save_fact` 内置去重 → 兜底 realtime 漏调,与原生 remember_fact 并存。
+- **验证**:py_compile 4 文件全绿;**待实机验证**(说个人信息看是否存对人 + 多人/画外不串)。
+
+### 实时视频流送 Omni(1fps/720p,2026-06-27 实机验证通过)
+- d01 mic 循环每 1s 取 latest_frame→720p→JPEG q70→base64→`conv.append_video`;加 `📹 视频流已送 N 帧` 计数日志。
+- BASE_TOOLS 移除 take_snapshot/identify_pointed_object;INSTRUCTIONS 改"画面持续可见,直接答视觉问题不调工具"。
+- **实机验证**:模型能直接答"是一支笔/一部黑色手机/正在说话的是旁边那位女生/画面晃了一下" → 视觉问答与手势识别走通(720p 对小字/远物细节有极限,按用户要求不留高清兜底)。
+
 ### 人脸检测/跟踪/ReID 全量迁移(参考 face-tracker-demo,2026-06-26)
 完全替换旧 FaceSelector + 零散身份逻辑,落地 5 commit(3781515→9d46898):
 - **检测**:vision_worker 默认 InsightFace **SCRFD**(buffalo_sc/det_500m,子进程),输出 all_faces=[{u,v,h,box,kps5,conf}];保留 MediaPipe(手势)与 YuNet 作可选 backend(FACE_BACKEND 切换)。

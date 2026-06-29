@@ -19,7 +19,7 @@ from reachy_mini import ReachyMini
 
 from memory.safety import handle_clear_memory_intent, handle_confirm_clear
 from voice.config import (
-    MODEL, VOICE, SUMMARY_MODEL, CONNECT_TIMEOUT_S,
+    MODEL, VOICE, SUMMARY_MODEL, EXTRACT_MODEL, CONNECT_TIMEOUT_S,
     BYE_PHRASES, POINT_FRESH_S, OUT_SR, PLAY_SR,
     CONV_SUMMARY_THRESHOLD,
 )
@@ -48,6 +48,64 @@ _ACTION_TAG_RE = re.compile(
 def _extract_tag_action(match_str: str) -> str | None:
     s = match_str.strip("<>/()（）* \t").lower()
     return _TAG_TO_ACTION.get(s)
+
+
+# ── 命名 guard:命名是身份关键操作,统一过门(治脑补名/画外命名/反复改名)──
+_NAME_OK_RE = re.compile(r"^[一-龥A-Za-z·]{1,8}$")          # 1-8 中/英文字,无数字/标点/空格
+_RENAME_INTENT_RE = re.compile(r"改名|改个名|改成|其实叫|实际叫|叫错|应该叫|重新.{0,4}名|不叫")
+
+
+def _valid_name(name: str) -> bool:
+    if not name:
+        return False
+    n = name.strip()
+    return bool(_NAME_OK_RE.match(n)) and not n.startswith("?T") and n not in ("画外", "未知")
+
+
+def try_name_identity(*, memory_mgr, id_recognizer, face_pipeline, owner_mgr, st,
+                      pid, new_name, transcript, log_fn, allow_rename=True) -> bool:
+    """命名/改名统一 guard。返回是否真正写入了名字。
+    门1 名字合法;门2 名字必须出现在当轮转写里(防模型脑补);门3 已命名不静默覆盖(仅显式改名意图才改)。
+    pid 由调用方保证 = 本句说话人(画外/无归属时为 None,直接拒)。"""
+    if not pid or not new_name:
+        return False
+    n = new_name.strip()
+    # 门1 合法性
+    if not _valid_name(n):
+        log_fn(f"🚫 命名拒绝:名字不合法「{new_name}」")
+        return False
+    # 门2 必须来自当轮转写(防模型脑补:用户说毕夏、模型却记陛下)
+    if not (transcript and n in transcript):
+        log_fn(f"🚫 命名拒绝:「{n}」不在转写里(防脑补)← 「{(transcript or '')[:30]}」")
+        return False
+    # 门3 不静默改名
+    existing = memory_mgr.get_name(pid) if memory_mgr else None
+    if existing:
+        if existing == n:
+            return False                                   # 重复声明,no-op
+        if not (allow_rename and _RENAME_INTENT_RE.search(transcript)):
+            log_fn(f"🚫 改名拒绝:已是「{existing}」,无明确改名意图→不覆盖为「{n}」")
+            return False
+        log_fn(f"✏ 改名:「{existing}」→「{n}」(检测到改名意图)")
+    # 通过 → 写三处库 + gallery 落盘 + 认主
+    if memory_mgr:
+        memory_mgr.set_name(pid, n)
+    if id_recognizer is not None:
+        id_recognizer.db.set_name(pid, n)
+    if face_pipeline is not None:
+        try:
+            if face_pipeline.store.confirm_identity(pid, n):
+                face_pipeline.save_gallery()
+                log_fn(f"🏷 gallery 身份已确认并落盘: {n} ({pid[:12]})")
+        except Exception as _e:
+            log_fn(f"⚠ gallery 命名失败:{type(_e).__name__}: {_e}")
+    with st.lock:
+        if st.current_person_id == pid:
+            st.current_person_name = n
+    if owner_mgr is not None and not owner_mgr.has_owner():
+        if owner_mgr.try_claim(pid, n):
+            log_fn(f"👑 认主成功: {n} ({pid})")
+    return True
 
 
 class ChatCallback(OmniRealtimeCallback):
@@ -137,11 +195,15 @@ class ChatCallback(OmniRealtimeCallback):
                 _asp = None
                 _sw = (self.asd_engine.speaker_window(self._speech_start_t)
                        if (self.asd_engine is not None and self.asd_engine.available) else None)
-                if _sw is not None and self.face_pipeline is not None:
-                    _trk = self.face_pipeline.tracker.find_track(_sw[0])
-                    if _trk is not None:
-                        _asp = {"pid": _trk.identity_id, "name": _trk.identity_name,
-                                "track_id": _sw[0], "score": _sw[1], "at": now}
+                if _sw is not None:
+                    _key, _score = _sw                          # key = 身份键(person_id 或 t{track_id})
+                    if isinstance(_key, str) and _key.startswith("t"):
+                        _asp = {"pid": None, "name": None,         # 画面内但未识别身份
+                                "track_id": _key[1:], "score": _score, "at": now}
+                    else:                                         # 已识别:key 即 person_id
+                        _nm = self.memory_mgr.get_name(_key) if self.memory_mgr else None
+                        _asp = {"pid": _key, "name": _nm,
+                                "track_id": self.asd_engine.last_track(_key), "score": _score, "at": now}
                 if _asp is None:
                     with st.lock:
                         _hold = st.asd_speaker
@@ -150,12 +212,21 @@ class ChatCallback(OmniRealtimeCallback):
                 if _asp is not None:
                     _tid = _asp.get("track_id")
                     _log_pid = _asp.get("pid") or f"_track{_tid}"      # 在画面但未识别:临时 track 键
-                    _log_name = _asp.get("name") or f"?T{_tid}"
+                    _real_name = _asp.get("name")                      # 真名(未命名身份=None);注入/turn_speaker 只用它
+                    _log_name = _real_name or f"?T{_tid}"             # 带 ?T 的占位仅用于日志/dashboard 显示
                     _attr_tag = f"{_log_name} (T{_tid}, ASD{_asp.get('score', 0.0):+.1f})"
                 else:
                     _log_pid = "_offscreen"                            # 画外:专门归属标签(不张冠李戴)
+                    _real_name = None
                     _log_name = "画外"
                     _attr_tag = "画外(无画面说话人)"
+                # ── ① 本句说话人:记忆「存/读」唯一来源(稳),不再用飘的 current_person_id ──
+                _tspk_real = (_log_pid not in ("_unknown", "_offscreen")
+                              and not _log_pid.startswith("_track"))
+                with st.lock:
+                    st.turn_speaker_pid = _log_pid if _tspk_real else None
+                    st.turn_speaker_name = _real_name if _tspk_real else None   # 占位名 ?T 绝不入 turn_speaker
+                    st.turn_speaker_at = now
                 log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
                 if _transcript:
                     with st.lock:
@@ -178,6 +249,32 @@ class ChatCallback(OmniRealtimeCallback):
                                 threading.Thread(target=self.dialog.save_summary,
                                                  args=(_log_pid, _snap), daemon=True).start()
                             log(f"📝 上下文过长，自动触发 consolidation({_log_pid[:12]}, ~{int(_est_tok)} tok)")
+                        # ── ① 记忆注入跟「本句说话人」:回这句话前注入说话人的记忆,让回复称呼对人。
+                        #    不写 current_person_id(那是视觉稳定焦点,改它会和视觉循环打架→反复重注入竞态)。
+                        #    只在说话人 ≠ 上次已注入者时重注入,避免 update_session 抖动(治"归属对但叫错人")。
+                        if _tspk_real and self.dialog is not None and self.memory_mgr is not None:
+                            with st.lock:
+                                _need_inject = (st.identity_injected_pid != _log_pid)
+                                _busy = st.in_flight > 0
+                            if _need_inject and not _busy:
+                                self.dialog.update_memory(_log_pid, _real_name)
+                        elif (not _tspk_real) and self.dialog is not None:
+                            # 画外/未识别说话人:注入"看不到对方/不知道是谁"中性上下文,清掉上一个在场人身份,
+                            # 否则模型会拿上一个人的记忆回答(被问"我是谁"乱说"你是陛下")。
+                            with st.lock:
+                                _need_neu = (st.identity_injected_pid != "_neutral")
+                                _busy = st.in_flight > 0
+                            if _need_neu and not _busy:
+                                self.dialog.update_memory_neutral()
+                        # ── ② 每轮工具审视:无条件用 qwen-plus 抽「本句说话人」的记忆,兜底 realtime 漏调 remember_fact ──
+                        if _tspk_real and self.dialog is not None and self.memory_mgr is not None:
+                            with st.lock:
+                                _recent = [d for d in st.display_transcript
+                                           if d.get("role") in ("user", "assistant")][-10:]
+                            _ctx = [(d.get("role"), d.get("name"), d.get("text")) for d in _recent]
+                            threading.Thread(target=self.dialog.extract_memory_async,
+                                             args=(_log_pid, _real_name, _transcript, _ctx),
+                                             daemon=True).start()
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
@@ -185,8 +282,15 @@ class ChatCallback(OmniRealtimeCallback):
                     st.resp_audio_count = 0
                     st.fc_seen_this_resp = False
                     st.last_interaction_at = now
-                    st.resp_snapshot_pid = st.current_person_id
-                    st.resp_snapshot_name = st.current_person_name
+                    # 记忆保存键到「本句说话人」。本轮有用户说话(turn_speaker_at 新鲜)就用其结果——
+                    # 画外/未识别时 turn_speaker_pid=None → resp_snapshot=None → remember_fact 拿到 None 不存,
+                    # 绝不把画外的话张冠李戴给在场的人(治"大大被改名坤坤")。仅无近期说话(如招呼)才回退当前人。
+                    if (now - st.turn_speaker_at) < 8.0:
+                        st.resp_snapshot_pid = st.turn_speaker_pid
+                        st.resp_snapshot_name = st.turn_speaker_name
+                    else:
+                        st.resp_snapshot_pid = st.current_person_id
+                        st.resp_snapshot_name = st.current_person_name
                     _dt_seq = st.display_transcript_seq
                 if _st_mod._current_turn is not None:
                     _st_mod._current_turn["dt_seq"] = _dt_seq
@@ -239,9 +343,9 @@ class ChatCallback(OmniRealtimeCallback):
                     self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "judge"})
                 elif name in ("remember_fact", "forget_fact"):
                     with st.lock:
-                        pid = st.resp_snapshot_pid or st.current_person_id
+                        pid = st.resp_snapshot_pid     # 不再兜回在场人:画外/无归属→None→不存不命名(治张冠李戴)
                     if pid is None:
-                        result = "当前没有识别到用户身份,无法存储记忆。"
+                        result = "当前没有识别到用户身份(可能说话人不在画面里),无法存储记忆。"
                     else:
                         args_str = event.get("arguments", "{}")
                         try:
@@ -255,22 +359,13 @@ class ChatCallback(OmniRealtimeCallback):
                         if name == "remember_fact":
                             new_name = args_dict.get("name")
                             if new_name:
-                                self.memory_mgr.set_name(pid, new_name)
-                                if self.id_recognizer is not None:
-                                    self.id_recognizer.db.set_name(pid, new_name)
-                                # 命名 → gallery 确认(provisional→confirmed,带真名)并落盘
-                                if self.face_pipeline is not None:
-                                    try:
-                                        if self.face_pipeline.store.confirm_identity(pid, new_name):
-                                            self.face_pipeline.save_gallery()
-                                            log(f"🏷 gallery 身份已确认并落盘: {new_name} ({pid[:12]})")
-                                    except Exception as _e:
-                                        log(f"⚠ gallery 命名失败:{type(_e).__name__}: {_e}")
-                                with st.lock:
-                                    st.current_person_name = new_name
-                                if self.owner_mgr is not None and not self.owner_mgr.has_owner():
-                                    if self.owner_mgr.try_claim(pid, new_name):
-                                        log(f"👑 认主成功: {new_name} ({pid})")
+                                with st.lock:                  # 取当轮用户转写,供命名 guard 校验(防脑补)
+                                    _turn_text = next((d.get("text", "") for d in reversed(st.display_transcript)
+                                                       if d.get("role") == "user"), "")
+                                try_name_identity(
+                                    memory_mgr=self.memory_mgr, id_recognizer=self.id_recognizer,
+                                    face_pipeline=self.face_pipeline, owner_mgr=self.owner_mgr, st=st,
+                                    pid=pid, new_name=new_name, transcript=_turn_text, log_fn=log)
                         elif name == "forget_fact":
                             keyword = args_dict.get("keyword", "")
                             if "名" in keyword or "name" in keyword.lower():
@@ -342,6 +437,7 @@ class ChatCallback(OmniRealtimeCallback):
                             self.motion_q.put({"name": act})
                     _atext = _ACTION_TAG_RE.sub("", _atext).strip()
                 if _atext:
+                    log(f"💬 小艺:{_atext}")        # 模型回复入 log(网页 log 面板可见)
                     with st.lock:
                         _log_pid = st.resp_snapshot_pid or st.current_person_id or "_unknown"
                         _log_name = st.resp_snapshot_name or st.current_person_name
@@ -493,6 +589,11 @@ class RealtimeDialog:
             return False
         st = self.st
         mem_prompt = self.memory_mgr.get_prompt(pid, person_name=pname) if self.memory_mgr else None
+        # 已注册但未命名的说话人:绝不给占位名,明确告诉模型「还不知道名字、别编」(治 ?T 被读成名字)
+        if not pname and not (self.memory_mgr and self.memory_mgr.get_name(pid)):
+            _noname = ("【当前说话人】你还不知道对方叫什么名字,绝不要编名字或套用别人的名字;"
+                       "若想知道可以礼貌地问对方怎么称呼。")
+            mem_prompt = (mem_prompt + "\n" + _noname) if mem_prompt else _noname
         new_instr = self.instructions + ("\n\n" + mem_prompt if mem_prompt else "")
         c = self.conv
         if c is None:
@@ -530,6 +631,108 @@ class RealtimeDialog:
             self._last_inject_fail = time.monotonic()
             log(f"⚠ 记忆 update_session 失败:{e}")
             return False
+
+    def update_memory_neutral(self) -> bool:
+        """画外/未识别说话人:注入「看不到对方、不知道是谁」的中性上下文(不带任何人的记忆),
+        防止模型用上一个在场人的身份/记忆回答(如被问'我是谁'乱答别人名字)。"""
+        if time.monotonic() - self._last_inject_fail < 2.0:
+            return False
+        st = self.st
+        note = ("\n\n【当前说话人】对方不在摄像头画面里(或身份未识别),你看不到对方、不知道对方是谁。"
+                "若被问'我是谁/你认识我吗/我叫什么/我喜欢什么'等,如实说你看不到对方、不确定是谁,"
+                "绝不要套用其他人的名字或记忆来回答。")
+        new_instr = self.instructions + note
+        c = self.conv
+        if c is None:
+            return False
+        try:
+            c.update_session(
+                output_modalities=[MultiModality.AUDIO, MultiModality.TEXT],
+                voice=VOICE,
+                input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
+                output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
+                enable_input_audio_transcription=True,
+                enable_turn_detection=True,
+                turn_detection_type="semantic_vad",
+                instructions=new_instr,
+                tools=self.tools,
+            )
+            log("🫥 画外/未识别说话人 → 注入中性上下文(不认识对方,不套用他人身份)")
+            with st.lock:
+                st.identity_injected = True
+                st.identity_injected_pid = "_neutral"
+                st.dbg_memory_prompt = note
+                st.dbg_session_instructions = new_instr
+            return True
+        except Exception as e:
+            self._last_inject_fail = time.monotonic()
+            log(f"⚠ 中性 update_session 失败:{e}")
+            return False
+
+    def extract_memory_async(self, pid: str, pname: str | None,
+                             current_text: str, context_turns: list) -> None:
+        """每轮工具审视:用 EXTRACT_MODEL(qwen-plus)从最近对话抽取「本句说话人」的个人事实,
+        兜底 realtime 偶发漏调 remember_fact。context_turns=[(role,name,text),...] 最近 ~5 轮;
+        只抽取最后一句(current_text)说话人的信息;save_fact 内置去重,与 realtime 自调不冲突。"""
+        try:
+            if not current_text or len(current_text.strip()) < 2:
+                return
+            _ctx_str = "\n".join(
+                f"{'小艺' if r == 'assistant' else (nm or '用户')}: {t}"
+                for (r, nm, t) in context_turns if t and t.strip()
+            )
+            existing = self.memory_mgr.get_facts(pid)
+            existing_str = json.dumps(existing, ensure_ascii=False) if existing else "[]"
+            prompt = (
+                "你是记忆抽取助手。下面是最近几轮对话,最后一句是「当前说话人」刚说的。\n"
+                f"当前说话人:{pname or '未知'}。只抽取这个人关于他自己的信息,"
+                "不要抽别人或小艺(机器人)说的内容。\n"
+                f"已有记忆(不要重复):{existing_str}\n\n"
+                f"最近对话:\n{_ctx_str}\n\n"
+                f"当前这句(重点,可结合上文消解'它/那个/这个'等指代):{current_text}\n\n"
+                "任务:判断当前说话人这句有没有透露关于他本人的个人信息"
+                "(爱好/喜好/厌恶/职业/年龄/习惯/观点/重要的人或事)或本人姓名。\n"
+                "严格只输出 JSON,不要解释:\n"
+                '{"name": "本人说自己叫什么则填,否则 null",'
+                '"facts": ["中文短句", ...]}\n'
+                "没有任何可记的信息则 facts 为空数组、name 为 null;"
+                "不要把名字写进 facts;不要重复已有记忆。"
+            )
+            resp = self.oai.chat.completions.create(
+                model=EXTRACT_MODEL,
+                messages=[{"role": "system", "content": prompt},
+                          {"role": "user", "content": "请输出 JSON。"}],
+                temperature=0.1,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            result = json.loads(raw)
+            new_name = result.get("name")
+            new_facts = [f.strip() for f in (result.get("facts") or [])
+                         if isinstance(f, str) and f.strip()]
+            saved = 0
+            for f in new_facts:
+                r = self.memory_mgr.save_fact(pid, f)   # 内置去重
+                if "已记住" in r or "已更新" in r:
+                    saved += 1
+            _cb = self.callback
+            if new_name:
+                # 工具审视只做「首次命名」(allow_rename=False);改名只走模型直调路径。
+                # guard 统一过门(合法/来自转写/不覆盖已命名)。
+                if try_name_identity(
+                        memory_mgr=self.memory_mgr, id_recognizer=_cb.id_recognizer,
+                        face_pipeline=_cb.face_pipeline, owner_mgr=_cb.owner_mgr, st=self.st,
+                        pid=pid, new_name=new_name, transcript=current_text,
+                        log_fn=log, allow_rename=False):
+                    log(f"🧠 工具审视:补记名字「{new_name}」({pid[:12]})")
+            if saved:
+                with self.st.lock:
+                    if self.st.current_person_id == pid:
+                        self.st.identity_injected = False    # 触发重注入,让模型用上新记忆
+                log(f"🧠 工具审视:补存 {saved} 条记忆 → {pname or pid[:12]}")
+        except Exception as e:
+            log(f"⚠ 工具审视失败:{type(e).__name__}: {e}")
 
     def save_summary(self, pid: str, conv_log: list):
         """后台线程：会话后 consolidation — 一次 LLM 调用同时生成 entity memory + episodic memory。"""

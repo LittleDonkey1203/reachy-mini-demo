@@ -245,11 +245,13 @@ class AsdEngine:
         self.speak_thresh = speak_thresh
         self.stale_s = stale_s
         self.audio = AudioRing()
-        self._crops: dict[int, collections.deque] = {}
-        self._last_crop_t: dict[int, float] = {}
-        self._scores: dict[int, float] = {}
-        self._score_t: dict[int, float] = {}
-        self._last_pos_t: dict[int, float] = {}    # 每 track 最近一次"在说话"的时刻
+        # 键 = 说话人标识(调用方传 person_id 或 f"t{track_id}"):按身份聚合,抗 track churn
+        self._crops: dict = {}
+        self._last_crop_t: dict = {}
+        self._scores: dict = {}
+        self._score_t: dict = {}
+        self._last_pos_t: dict = {}     # 每 key 最近一次"在说话"的时刻
+        self._last_tid: dict = {}       # key → 最近 track_id(仅供显示/归属标签)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -261,22 +263,25 @@ class AsdEngine:
     def feed_audio(self, mono):
         self.audio.push(mono)
 
-    def feed_crop(self, track_id: int, full_rgb: np.ndarray, bbox_xyxy, now: float):
-        """对每个 confirmed track 喂一帧:从全分辨率帧按 SyncNet 几何裁脸(嘴居中)→112 灰度。
+    def feed_crop(self, key, full_rgb: np.ndarray, bbox_xyxy, now: float, track_id=None):
+        """对每个 confirmed 说话人喂一帧:从全分辨率帧按 SyncNet 几何裁脸(嘴居中)→112 灰度。
+        key = 说话人标识(person_id 或 f"t{track_id}"):按身份聚合,track churn 换 id 不丢累积。
         bbox_xyxy = 全分辨率 [x1,y1,x2,y2]。内部限到 ~crop_fps。"""
-        last = self._last_crop_t.get(track_id, 0.0)
+        last = self._last_crop_t.get(key, 0.0)
         if now - last < self.crop_dt:
             return
         g = syncnet_crop(full_rgb, bbox_xyxy)
         if g is None:
             return
         with self._lock:
-            dq = self._crops.get(track_id)
+            dq = self._crops.get(key)
             if dq is None:
                 dq = collections.deque(maxlen=self.win)
-                self._crops[track_id] = dq
+                self._crops[key] = dq
             dq.append((now, g))          # 存(时间戳, 灰度脸),供 25fps 重采样 + 音频对齐
-        self._last_crop_t[track_id] = now
+            if track_id is not None:
+                self._last_tid[key] = track_id
+        self._last_crop_t[key] = now
 
     def start(self):
         if self._thread is not None or not self.available:
@@ -287,17 +292,22 @@ class AsdEngine:
     def stop(self):
         self._stop.set()
 
-    def gc(self, active_ids):
-        """丢弃已消失 track 的状态。"""
-        alive = set(active_ids)
+    def gc(self, active_keys):
+        """丢弃已消失说话人(key)的状态。"""
+        alive = set(active_keys)
         with self._lock:
             for d in (self._crops, self._scores):
-                for tid in [k for k in d if k not in alive]:
-                    d.pop(tid, None)
-            for tid in [k for k in self._last_crop_t if k not in alive]:
-                self._last_crop_t.pop(tid, None)
-                self._score_t.pop(tid, None)
-                self._last_pos_t.pop(tid, None)
+                for k in [k for k in d if k not in alive]:
+                    d.pop(k, None)
+            for k in [k for k in self._last_crop_t if k not in alive]:
+                self._last_crop_t.pop(k, None)
+                self._score_t.pop(k, None)
+                self._last_pos_t.pop(k, None)
+                self._last_tid.pop(k, None)
+
+    def last_track(self, key):
+        """key 对应的最近 track_id(仅供显示/归属标签);无则 None。"""
+        return self._last_tid.get(key)
 
     def scores(self) -> dict[int, float]:
         with self._lock:
@@ -312,6 +322,14 @@ class AsdEngine:
         if not cand:
             return None
         return max(cand, key=lambda kv: kv[1])
+
+    def speaking_ids(self):
+        """当前确信在说话的 track 集合(>阈值且新鲜)——绿框用,带 speaker() 同款新鲜度门,
+        治"说完停了 EMA 残留正值绿框不灭"。不改任何参数(保持判断敏感)。"""
+        now = time.monotonic()
+        with self._lock:
+            return {tid for tid, s in self._scores.items()
+                    if s > self.speak_thresh and (now - self._score_t.get(tid, 0.0)) < self.stale_s}
 
     def speaker_window(self, t_start: float):
         """本句归属(耐 ASD 延迟):自 t_start 起任意时刻被判为说话的 track 中分最高者。

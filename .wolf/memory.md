@@ -153,3 +153,19 @@
 | 21:40 | Edited voice/d01_realtime_chat.py | 6→6 lines | ~86 |
 | 21:40 | Edited voice/realtime.py | 4→5 lines | ~68 |
 | 21:41 | Session end: 17 writes across 6 files (realtime.py, d01_realtime_chat.py, PROJECT_STATE.md, state.py, debug_server.py) | 7 reads | ~62273 tok |
+| 11:30 | 记忆归属统一(turn_speaker)+每轮工具审视兜底抽取(qwen-plus,5轮上下文) | voice/realtime.py, d01, state.py, config.py | bug-056 修复;py_compile 绿,待实机验证 | ~45k |
+| 13:30 | 头部转向平滑(二级EMA+黏滞+DOA保持,与归属解耦)+绿框新鲜度门+去蓝框+手改青+2位小数 | d01, asd.py, debug_server.py, config.py | bug-057;py_compile绿,待实机验证 | ~40k |
+| 15:30 | 头部/当前人改按身份(person_id)黏滞抗churn(治无人说话头晃+归属对叫错人thrash);realtime不再写current_person_id | d01, realtime.py, config.py | bug-057迭代+bug-058;py_compile绿,待实测 | ~38k |
+| 16:10 | DOA瞟头(TRACKING:侧面喊+画面无人说话→朝声源符号侧瞟≤15°找人,只动头;视觉/ASD锁到接管) | d01, config.py | 治'喊他不转';py_compile绿,待实测 | ~22k |
+| 16:30 | fps螺旋断路器(fps<8冻结身体跟随+瞟头,断churn死循环)+ resp_snapshot画外→None(画外不存给在场人) | d01, realtime.py, config.py | bug-059;数据由用户全清;py_compile绿,待实测 | ~30k |
+| 17:30 | #2注入只认turn_speaker(去焦点驱动)+#4 ASD按身份键聚合(治新人画外)+#1 DOA角度转头(封顶+身体跟随面对) | d01, realtime.py, asd.py, config.py | bug-060;#3同脸合并暂缓;py_compile绿,待实测 | ~55k |
+| 18:10 | 画外/未识别注入中性上下文(治问'我是谁'答陛下)+模型回复入log(💬小艺)+MJPEG断流静默 | realtime.py, debug_server.py | bug-061;py_compile绿,待测 | ~18k |
+| 18:40 | DOA转头重写为状态机:转到声源角度(上限75,转身放开fps冻结)→停那等说话→锁说话人→找不到不弹回原脸+冷却防来回转 | d01, config.py | 按用户逻辑;py_compile绿,待测 | ~25k |
+| 19:05 | DOA转头加'真说话'闸(user_speaking最近1.5s内才转,滤环境音)治无声慢慢左漂 | d01, config.py | py_compile绿,待测 | ~12k |
+| 19:30 | churn治本:ByteTracker Stage3 lost找回加IoU(方案B无embedding纯IoU/有则embedding),匈牙利;对照asd-demo webcam印证 | perception/face_tracker.py, tests | bug-062;27单测绿,待实测 | ~40k |
+| 10:10 | 决策:churn 治理保留 Stage3 IoU 召回(用户拍板,优于 ArcFace 重认,track_id+身份双不变 ASD 无缝) | .wolf/cerebrum.md | 已记决策日志,单测 21/21 绿 | ~1.5k |
+| 11:40 | 真机测试 churn 修复:2人+DOA fps稳14~18(修前崩2.4)、ArcFace身份召回正常→验证通过;发现 bug-063 画内未命名身份占位名?T4漏进模型回复 | (测试) .wolf/buglog.json | bug-062 validated + bug-063 已记(待修) | ~6k |
+| 12:30 | 命名/身份修复 CP1-5:占位名不进模型+画外不命名+命名guard(来自转写/不静默改名)+显示名实时取 | voice/realtime.py voice/d01_realtime_chat.py | py_compile 过;bug-063修复+bug-064/065新增;待真机测 | ~12k |
+| 13:30 | DOA瞟头修复 F1+F4:本地麦响度绕开门控触发+按符号转固定大角(治侧边喊不转/转不够) | voice/d01_realtime_chat.py config.py state.py | py_compile过;bug-066;待真机验+调GLANCE_LOCAL_RMS | ~8k |
+| 15:30 | 二次唤醒A方案:对话中喊小艺→打断+天线heard+转DOA找喊话人,保留会话(去掉close/reopen) | voice/d01_realtime_chat.py | py_compile过;须不带--no-wake启动;待真机测 | ~5k |
+| 15:35 | 二次唤醒A方案真机验证通过:5次对话中喊小艺全触发打断+转向找喊话人(4粗方向+1confident),保留会话 | PROJECT_STATE.md | 验证通过;DOA多为粗方向(近似) | ~3k |

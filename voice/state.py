@@ -234,6 +234,7 @@ class State:
         self.face_seen_at = 0.0
         self.face_locked = False
         self.user_speaking = False
+        self.local_speech_at = 0.0   # F1:本地麦(门控前)最近一次响度超阈时刻(monotonic);喂 DOA 瞟头,绕开方向门控
         self.last_interaction_at = 0.0
         self.sound_resid = None
         self.sound_at = 0.0
@@ -285,6 +286,10 @@ class State:
         self.identity_injected_pid: str | None = None
         self.resp_snapshot_pid: str | None = None
         self.resp_snapshot_name: str | None = None
+        # 本句说话人(speaker_window 归属,稳):记忆「存/读」专用,不用飘的 current_person_id
+        self.turn_speaker_pid: str | None = None
+        self.turn_speaker_name: str | None = None
+        self.turn_speaker_at: float = 0.0   # 判定时刻(monotonic),用于新鲜度
         self.vis_ready = False
         self.clear_workflow: dict | None = None
         self.clear_lock: bool = False

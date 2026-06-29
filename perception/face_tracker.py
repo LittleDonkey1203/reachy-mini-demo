@@ -317,12 +317,23 @@ class ByteTracker:
         for trk in [remaining_trks[i] for i in unmatched_trks_s2]:
             trk.mark_lost()
 
-        # ── Stage3:未匹配高置信 det ↔ lost track,纯 embedding ReID ──
+        # ── Stage3:未匹配高置信 det ↔ lost track,IoU 位置找回(匈牙利)+ embedding(有才叠加)──
+        #    治本:方案B 跟踪检测无 embedding,旧版纯 embedding ReID 永远找不回 lost(emb_dist 全 1.0)
+        #    → 漏检一帧就新建 track → churn。改为先按 IoU(预测框 vs 重检框)用匈牙利找回:
+        #    静止脸漏检一帧、下帧位置接近 → 找回保留 track_id;有 embedding 则叠加更稳。
         unmatched_high_dets = [high_dets[i] for i in unmatched_dets_s1]
         if len(self.lost) > 0 and len(unmatched_high_dets) > 0:
-            emb_cost = embedding_distance(self.lost, unmatched_high_dets)
-            matches_s3, _, unmatched_dets_s3 = linear_assignment(
-                emb_cost, threshold=self.cfg.embedding_threshold)
+            if all(d.embedding is None for d in unmatched_high_dets):
+                # 方案B 全无 embedding → 纯 IoU 位置找回(匈牙利):静止脸漏检一帧、下帧位置接近 → 找回(治 churn)
+                lost_bboxes = np.array([t.predicted_bbox for t in self.lost])
+                det_bboxes = np.array([d.bbox for d in unmatched_high_dets])
+                cost = 1.0 - iou_batch(lost_bboxes, det_bboxes)
+                thr = 1.0 - self.cfg.iou_threshold
+            else:
+                # 有 embedding → embedding ReID(可跨位置跳变找回,门 embedding_threshold)
+                cost = embedding_distance(self.lost, unmatched_high_dets)
+                thr = self.cfg.embedding_threshold
+            matches_s3, _, unmatched_dets_s3 = linear_assignment(cost, threshold=thr)
         else:
             matches_s3 = np.empty((0, 2), dtype=int)
             unmatched_dets_s3 = np.arange(len(unmatched_high_dets))
