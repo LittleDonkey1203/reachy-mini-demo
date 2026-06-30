@@ -62,6 +62,32 @@ def _valid_name(name: str) -> bool:
     return bool(_NAME_OK_RE.match(n)) and not n.startswith("?T") and n not in ("画外", "未知")
 
 
+# fact 若是"纯报名字句"(叫X / 名字是X),名字只能走 try_name_identity 过守卫,
+# 绝不能作为一条事实漏存(治 remember_fact 把"叫X"当 fact 存,守卫拒名后仍残留假事实)。
+_NAME_FACT_RE = re.compile(
+    r"^\s*(?:我)?\s*(?:"
+    r"(?:就)?(?:叫做|叫作|名叫|叫)\s*(?P<n1>[一-龥A-Za-z·]{1,8}?)"
+    r"|(?:的)?(?:名字|全名|姓名)\s*(?:就)?(?:是|叫做|叫|为)?\s*(?P<n2>[一-龥A-Za-z·]{1,8}?)"
+    r")\s*[。.!！~呀啦哦呢]*\s*$")
+
+
+def _name_only_fact(fact: str, name_hint: str | None = None) -> str | None:
+    """fact 是"纯报名字句"→ 返回其中名字;否则 None。
+    优先正则(叫X / 名字是X);name_hint 已知时兜底:去掉该名字+命名词后无残留也算纯名字句。
+    注意只认 叫/名字 类,不认裸"是X"(否则"是医生""是个程序员"会被误判成名字)。"""
+    if not fact:
+        return None
+    m = _NAME_FACT_RE.match(fact.strip())
+    if m:
+        return m.group("n1") or m.group("n2")
+    if name_hint and name_hint in fact:
+        residual = re.sub(r"(叫做|叫作|名叫|叫|名字是|名字|称呼|姓名|全名|就是|是|我|的)", "",
+                          fact.replace(name_hint, "")).strip(" 。.，,、!！~呀啦哦呢")
+        if not residual:
+            return name_hint
+    return None
+
+
 def try_name_identity(*, memory_mgr, id_recognizer, face_pipeline, owner_mgr, st,
                       pid, new_name, transcript, log_fn, allow_rename=True) -> bool:
     """命名/改名统一 guard。返回是否真正写入了名字。
@@ -352,21 +378,35 @@ class ChatCallback(OmniRealtimeCallback):
                             args_dict = json.loads(args_str)
                         except (json.JSONDecodeError, TypeError):
                             args_dict = {}
-                        result = self.memory_mgr.handle_tool_call(pid, name, args_dict)
-                        with st.lock:
-                            st.identity_injected = False
-                            st.identity_injected_pid = None
                         if name == "remember_fact":
-                            new_name = args_dict.get("name")
-                            if new_name:
+                            # 名字只走命名 guard,绝不作为 fact 漏存(治"叫X"假事实)
+                            _fact = (args_dict.get("fact") or "").strip()
+                            _name_arg = args_dict.get("name")
+                            _name_in_fact = _name_only_fact(_fact, _name_arg)
+                            _eff_name = _name_arg or _name_in_fact
+                            _fact_is_name_only = bool(_name_in_fact)   # fact 整句只是报名字 → 不存
+                            if _fact_is_name_only:
+                                result = "好的。"                       # 跳过 save_fact,名字交给下面守卫
+                            else:
+                                result = self.memory_mgr.handle_tool_call(pid, name, args_dict)
+                            with st.lock:
+                                st.identity_injected = False
+                                st.identity_injected_pid = None
+                            if _eff_name:
                                 with st.lock:                  # 取当轮用户转写,供命名 guard 校验(防脑补)
                                     _turn_text = next((d.get("text", "") for d in reversed(st.display_transcript)
                                                        if d.get("role") == "user"), "")
-                                try_name_identity(
+                                _named = try_name_identity(
                                     memory_mgr=self.memory_mgr, id_recognizer=self.id_recognizer,
                                     face_pipeline=self.face_pipeline, owner_mgr=self.owner_mgr, st=st,
-                                    pid=pid, new_name=new_name, transcript=_turn_text, log_fn=log)
-                        elif name == "forget_fact":
+                                    pid=pid, new_name=_eff_name, transcript=_turn_text, log_fn=log)
+                                if _fact_is_name_only:
+                                    result = "好的,记住你的名字啦。" if _named else "好的。"
+                        else:  # forget_fact
+                            result = self.memory_mgr.handle_tool_call(pid, name, args_dict)
+                            with st.lock:
+                                st.identity_injected = False
+                                st.identity_injected_pid = None
                             keyword = args_dict.get("keyword", "")
                             if "名" in keyword or "name" in keyword.lower():
                                 self.memory_mgr.set_name(pid, None)

@@ -484,6 +484,32 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-29T15:50:00.000Z"
+    },
+    {
+      "id": "bug-068",
+      "timestamp": "2026-06-30T18:30:00.000Z",
+      "error_message": "命名被守卫拒掉后,'我叫X'仍被 remember_fact 当成一条事实漏存进长期记忆(真机日志:🧠 已记住:叫毕夏)。",
+      "file": "voice/realtime.py + memory/manager.py",
+      "root_cause": "双重原因:①schema(manager.py:99)主动教模型 '我叫小明'→ name='小明' fact='叫小明',要求把名字也塞进 fact;②handler(realtime.py)先无条件 handle_tool_call 存 fact,再单独走 try_name_identity 处理 name,守卫只决定改不改 DB 里的名字,管不到那条已存的'叫X' fact → 名字被守卫拒(重名/画外/脑补)时,假事实'叫X'照样残留。本次因名字正好被接受+consolidation 收敛成 1 facts 而未造成可见错误,但漏存机制确凿。",
+      "fix": "原则:名字只走 try_name_identity 这一条路,绝不作为 fact 存。①新增 _name_only_fact(fact,name_hint):正则识别'纯报名字句'(叫X/名字是X,非贪婪去尾部语气词;只认叫/名字类,不认裸'是X'防'是医生/是个程序员'误判),name_hint 已知时去名+命名词无残留也算。②handler:remember_fact 若 fact 是纯名字句→跳过 save_fact、只把名字(参数或从 fact 抽出)交守卫;真事实照存;混合句保留。③schema 示例改为名字只放 name 参数。16 用例单测全过。",
+      "fix_pending": "真机复测:再说'我叫XX'看日志里还有没有 '🧠 已记住:叫XX';混合句'叫X且喜欢Y'仍会整条存(罕见,暂接受)。",
+      "tags": ["memory", "naming", "remember_fact", "guard", "schema", "fact-leak"],
+      "related_bugs": ["bug-063", "bug-064", "bug-058"],
+      "occurrences": 1,
+      "last_seen": "2026-06-30T18:30:00.000Z"
+    },
+    {
+      "id": "bug-069",
+      "timestamp": "2026-06-30T18:25:00.000Z",
+      "error_message": "服务端错误事件 invalid_request_error: 'Error append image before append audio.'(真机日志 18:22:16,唤醒后不久)",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "视频流送顺序竞态:append_video(d01:~2076)按固定每 1s 定时发一帧;但同会话的音频上送(append_audio,d01:~2049)受音频闸门控制——身份未确认/方向门控时音频被缓存(audio_gate)不上送服务端。于是出现:本会话服务端还没收到任何 audio,视频定时器却照发 → 图像先于音频到达 → 服务端拒(append image before append audio)。上次加实时视频流(commit 63c5f8e)引入,与命名/记忆无关。",
+      "fix": "未修(待审)。候选:append_video 增加门槛——本会话至少已成功 append_audio 一次(置 session 级标志,如 _audio_sent_this_session)才允许送视频;新会话/重连时清标志。或:闸门缓存期间也暂停视频发送。",
+      "fix_pending": "待与用户确认后实现 + 真机验证(唤醒后看 18:22 那类 ❌ 是否消失)。",
+      "tags": ["realtime", "video-stream", "append-video", "append-audio", "audio-gate", "ordering"],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-06-30T18:25:00.000Z"
     }
   ]
 }

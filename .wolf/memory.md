@@ -173,3 +173,5 @@
 | 17:40 | codegraph 全工程分析:建索引(56文件/1339节点)+ 量化结构热点(god函数/77字段State单锁/重复定义/吞异常) | d01/state/actions | 产出优化清单待审 | ~9k |
 | 17:53 | 第一步:codegraph 不认 .codegraphignore(只认 .gitignore)→删之改用 path 限定;5 处静默 catch 补日志 | d01/realtime/cerebrum | py_compile OK,待真机 | ~6k |
 | 18:08 | 真机测第一步:plus+唤醒,5min 干净跑,零报错/无 bug-067/5处新catch未触发;确认命名漏fact(已记住:叫毕夏)+ RMS 多在0.003-0.06 | d01/realtime | 第一步通过;关机catch因硬杀未验 | ~5k |
+| 18:20 | Step2 命名漏fact:名字只走守卫不存fact(_name_only_fact正则+handler重构+schema改),16用例单测过 | realtime/manager/buglog | py_compile OK,待真机复测 | ~7k |
+| 18:26 | Step2 真机复测通过:改名毕夏→吴继豪无 叫X 漏存(facts=[喜欢吃火锅],守卫两次防脑补);抓到无关 bug-069 视频先于音频 | realtime/manager/buglog | Step2 验证OK,待commit | ~6k |
