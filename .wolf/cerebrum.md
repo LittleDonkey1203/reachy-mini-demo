@@ -39,6 +39,7 @@
 - **头部/当前人必须按身份(person_id)黏滞,不能按 track_id 或瞬时 ASD(2026-06-27):** ByteTrack track churn 频繁换 id(同人 T14→T17→…),按 track_id 黏滞会"离场→重选→晃";瞬时 ASD 驱动 current_person_id 会在多人间疯狂切→`update_session` 反复重注入→竞态→**回复称呼错人**(归属对但叫错)。解法:`_head_key = person_id or t{track_id}`,churn 换 track 不算离场;current_person_id 跟稳定焦点走;realtime transcription 只 update_memory(本句说话人)不写 current_person_id。
 - **Dashboard 画框配色(2026-06-27 定稿):** 脸:🟩绿=正在说话(speaking_ids,>阈值且新鲜)/⬜灰=跟踪中;手:🟦青=有效/🟧橙=底部过滤/🟨黄=低置信。**绿只给说话脸**(有效手从绿改青,避免手框压脸误认);**蓝色全部去掉**(头部跟谁看机器人朝向/yaw,不用框色重复表达)。ASD 分显示 2 位小数(1 位会把 0.0x 显示成 +0.0)。
 - **记忆兜底抽取(2026-06-27):** `RealtimeDialog.extract_memory_async` 每轮 transcription 后无条件用 `EXTRACT_MODEL`(qwen-plus)+最近5轮上下文抽「本句说话人」个人事实,`save_fact` 内置去重 → 兜底 plus 偶发漏调 remember_fact("说了不做")。与 realtime 原生 remember_fact 并存不冲突。
+- **codegraph 按 `.gitignore` 过滤,不认 `.codegraphignore`(2026-06-30):** codegraph CLI(v0.9.6)无 exclude 选项;`.codegraphignore` 写了也无效(实测重建索引文件数不变)。它按 `.gitignore` 模式过滤(连已 git 跟踪但被 ignore 的 `_archive/` 16 文件都排掉 → 72 跟踪只索引 56)。生产代码 = `voice/ perception/ identity/ memory/` + `audio/sound_turn.py`;`_experiments/ tests/ healthcheck/ tools/ audio/_*` 是脚手架。要让结构分析只看生产,**不要污染 .gitignore**(会让 git 停跟踪 tests/ 等),改用查询的 `path` 参数限定(codegraph_files/context/explore 都支持)。
 - **Realtime function-calling:** flash-realtime 触发可靠性差(OmniGAIA flash≈33.9 vs plus≈57.2),会把工具"说成文本"不发 function_call → 记忆/动作丢失;记忆/动作场景必用 plus。Qwen-Omni-Realtime 不支持 tool_choice/parallel_tool_calls,无法强制调用。诊断:日志看 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记;动作全走"标签泄漏兜底"=模型在文本化工具。realtime.py:110 的"已注册"日志是写死文本,不反映真实 tools payload。
 
 ## Do-Not-Repeat
@@ -50,6 +51,8 @@
 - [2026-06-24] **记忆 = 人脸 + 事实**: clear_memory 必须同时清除 face_db 中的 person entry(`clear_person(pid)`) 和 memory facts。不能只清 facts 而留人脸。
 - [2026-06-24] **state.json 字段必须完整**: 前端 JS 引用 `s.is_owner` 时，后端 state dict 必须同步添加该字段，否则前端永远显示空。添加 Dashboard 功能后检查数据通路: State class → _build_frame/state dict → JS 渲染。
 - [2026-06-24] **不要新增 tab 展示调试信息**: 用户明确要求复用已有的 Conversation 面板 payload modal，不要加新的 tab 或按钮。
+- [2026-06-30] **别建 `.codegraphignore`**:codegraph 不认它(实测无效),只认 `.gitignore`。想缩小 codegraph 分析范围用查询的 `path` 参数,别为此动 .gitignore(副作用:git 停跟踪 tracked 目录新文件、status 藏改动,tests/ 尤其不能 ignore)。
+- [2026-06-30] **静默 catch 补日志要挑,不无脑全加**:`queue.Empty: continue`(正常轮询)、1fps 丢帧背压、退出时幂等清理 加日志只会刷屏。原则=「失败后用户/行为会受影响才记」。本次只补 5 处(--cue 解析/闸门 flush 送音频×2/退出回正/恢复 auto body yaw)。
 - [2026-06-24] **音频闸门不能每次 close_session 都触发**: 只在二次唤醒切人且 DOA 声源方向大幅变化(>SWITCH_AWAY_DEG)时关闸，避免常规断连重连时误拦截音频。
 - [2026-06-24] **必须遵循 CLAUDE.md 更新 wolf 文件**: 每次代码改动后必须更新 memory.md(行为日志)、cerebrum.md(学习)、anatomy.md(文件描述)。用户会检查。
 

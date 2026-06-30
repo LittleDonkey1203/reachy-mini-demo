@@ -1708,7 +1708,7 @@ def main() -> int:
                 try:
                     CUE[_ck] = float(_v)
                 except ValueError:
-                    pass
+                    log(f"⚠ 忽略非法 --cue 值:{_k}={_v}(需数字)")
     _nums = [a for a in _args if a.replace(".", "", 1).isdigit()]
     run_seconds = float(_nums[0]) if _nums else None    # 编排测试用:到时干净退出
 
@@ -2042,7 +2042,8 @@ def main() -> int:
                         for _gc in _gate_buf:
                             try:
                                 conv.append_audio(_gc)
-                            except Exception:
+                            except Exception as _e:
+                                log(f"⚠ 闸门 flush 送音频失败,中止剩余:{type(_e).__name__}")
                                 break
                     try:
                         conv.append_audio(_b64_audio)
@@ -2105,8 +2106,8 @@ def main() -> int:
                     mini.media.stop_playing()
                     # 身体可能转到 ±90°,回正给足时间
                     mini.goto_target(INIT_HEAD_POSE, antennas=INIT_ANTENNAS, duration=1.5, body_yaw=0.0)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    log(f"⚠ 退出回正失败(可能未归中):{type(_e).__name__}")
                 # M3-c 退出时被动 consolidation:分人做记忆复盘
                 if not no_memory and _memory_mgr:
                     with st.lock:
@@ -2131,8 +2132,8 @@ def main() -> int:
         finally:
             try:
                 mini.set_automatic_body_yaw(True)
-            except Exception:
-                pass
+            except Exception as _e:
+                log(f"⚠ 恢复 automatic_body_yaw 失败(身体可能仍为手动):{type(_e).__name__}")
     return 0
 
 

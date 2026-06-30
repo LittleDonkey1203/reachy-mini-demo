@@ -623,7 +623,8 @@ class RealtimeDialog:
                 for chunk in _buffered:
                     try:
                         c.append_audio(chunk)
-                    except Exception:
+                    except Exception as _e:
+                        log(f"⚠ flush 送音频失败,中止剩余:{type(_e).__name__}")
                         break
                 log(f"🔓 音频闸门开启，flush {len(_buffered)} 帧缓存")
             return True

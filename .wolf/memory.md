@@ -171,3 +171,5 @@
 | 15:35 | 二次唤醒A方案真机验证通过:5次对话中喊小艺全触发打断+转向找喊话人(4粗方向+1confident),保留会话 | PROJECT_STATE.md | 验证通过;DOA多为粗方向(近似) | ~3k |
 | 15:50 | 修 bug-067: 二次唤醒后用户接话→招呼create_response撞semantic_vad自动回复(active response报错);守卫加thinking+turn_speaker_at<2s | voice/d01_realtime_chat.py | py_compile过 | ~3k |
 | 17:40 | codegraph 全工程分析:建索引(56文件/1339节点)+ 量化结构热点(god函数/77字段State单锁/重复定义/吞异常) | d01/state/actions | 产出优化清单待审 | ~9k |
+| 17:53 | 第一步:codegraph 不认 .codegraphignore(只认 .gitignore)→删之改用 path 限定;5 处静默 catch 补日志 | d01/realtime/cerebrum | py_compile OK,待真机 | ~6k |
+| 18:08 | 真机测第一步:plus+唤醒,5min 干净跑,零报错/无 bug-067/5处新catch未触发;确认命名漏fact(已记住:叫毕夏)+ RMS 多在0.003-0.06 | d01/realtime | 第一步通过;关机catch因硬杀未验 | ~5k |
