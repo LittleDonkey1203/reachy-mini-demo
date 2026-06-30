@@ -94,7 +94,14 @@
 ## perception/
 
 - `fusion.py` — 声源-视觉感知融合 (~289 tok)
+- `gaze.py` — 三级级联注视估计: L0 HeadPoseFilter(5点几何) + L1 时间降频 + L2 GazeEstimator(L2CS-Net ONNX 448×448) (~1750 tok)
+- `gaze_behavior.py` — 注视行为状态机 GazeBehaviorFSM: IDLE/CURIOUS_LOOK/SCANNING/GLANCING 4态转移 (~850 tok)
+- `face_pipeline.py` — 人脸 ReID 集成层: ByteTracker + ArcFace + IdentityStore + Gaze 级联 (~2740 tok)
 - `vision_worker.py` — 视觉子进程: Face(YuNet/MediaPipe)+Hand(GestureRecognizer) (~5600 tok)
+
+## scripts/
+
+- `benchmark_gaze.py` — Gaze 估计 CPU benchmark: L0 + L2 latency p50/p95/p99 (~650 tok)
 
 ## tests/
 

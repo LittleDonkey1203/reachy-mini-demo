@@ -28,7 +28,7 @@ Embedder = Callable[[np.ndarray, tuple, Optional[list]], Optional[np.ndarray]]
 
 @dataclass
 class TrackView:
-    """对外暴露的单 track 视图(归一化坐标 + 身份)。"""
+    """对外暴露的单 track 视图(归一化坐标 + 身份 + 注视)。"""
     track_id: int
     u: float
     v: float
@@ -40,6 +40,11 @@ class TrackView:
     zone: str                 # known | unsure | unknown | ""
     confidence: float
     is_confirmed: bool = False   # gallery 身份是否已用户确认(命名)
+    gaze_yaw: float = 0.0       # L2 注视 yaw (度)
+    gaze_pitch: float = 0.0     # L2 注视 pitch (度)
+    mutual_gaze: bool = False   # 是否在看摄像头
+    head_yaw: float = 0.0       # L0 几何头姿 yaw (度)
+    head_pitch: float = 0.0     # L0 几何头姿 pitch (度)
 
 
 def _xywh_to_xyxy(box):
@@ -64,6 +69,7 @@ class FaceReIDPipeline:
         # per-track 状态:上次提特征时刻 / 连续 unknown 帧数
         self._last_emb: dict[int, float] = {}
         self._unknown_cnt: dict[int, int] = {}
+        self._gaze = None  # GazeModule; d01 注入
 
     def load_gallery(self) -> int:
         return self.store.load()
@@ -126,9 +132,24 @@ class FaceReIDPipeline:
 
         self._gc_state(active)
 
-        views = [self._view(t) for t in active if t.is_confirmed() or t.smooth_embedding is not None]
+        # ── per-track 注视估计(L0+L1+L2 级联) ──
+        _gaze_results: dict = {}
+        if self._gaze is not None and self._gaze.available and full_rgb is not None:
+            alive = {t.track_id for t in active}
+            self._gaze.gc(alive)
+            for trk in active:
+                if not trk.is_confirmed():
+                    continue
+                if trk.landmarks is None or not np.any(trk.landmarks):
+                    continue
+                gr = self._gaze.update(
+                    trk.track_id, trk.landmarks, full_rgb, trk.bbox, decimate)
+                _gaze_results[trk.track_id] = gr
+
+        views = [self._view(t, _gaze_results) for t in active
+                 if t.is_confirmed() or t.smooth_embedding is not None]
         prim = self.tracker.get_primary_target()
-        primary = self._view(prim) if (prim is not None and prim.is_confirmed()) else None
+        primary = self._view(prim, _gaze_results) if (prim is not None and prim.is_confirmed()) else None
         # 归一化:用检测帧 W,H
         return self._normalize(primary, W, H), [self._normalize(v, W, H) for v in views]
 
@@ -223,17 +244,23 @@ class FaceReIDPipeline:
             for tid in [k for k in d if k not in alive]:
                 d.pop(tid, None)
 
-    def _view(self, t: STrack) -> TrackView:
+    def _view(self, t: STrack, gaze_results: dict | None = None) -> TrackView:
         b = t.bbox
         _conf = bool(t.identity_id and t.identity_id in self.store.identities
                      and self.store.identities[t.identity_id].is_confirmed)
+        gr = (gaze_results or {}).get(t.track_id)
         return TrackView(
             track_id=t.track_id, u=0.0, v=0.0, h=0.0,
             bbox_px=(float(b[0]), float(b[1]), float(b[2]), float(b[3])),
             state="confirmed" if t.is_confirmed() else "tentative",
             person_id=t.identity_id, person_name=t.identity_name,
             zone=getattr(t, "identity_zone", ""), confidence=t.identity_confidence,
-            is_confirmed=_conf)
+            is_confirmed=_conf,
+            gaze_yaw=gr.gaze_yaw if gr else 0.0,
+            gaze_pitch=gr.gaze_pitch if gr else 0.0,
+            mutual_gaze=gr.mutual_gaze if gr else False,
+            head_yaw=gr.head_yaw if gr else 0.0,
+            head_pitch=gr.head_pitch if gr else 0.0)
 
     @staticmethod
     def _normalize(v: Optional[TrackView], W: int, H: int) -> Optional[TrackView]:

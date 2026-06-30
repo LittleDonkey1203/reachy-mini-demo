@@ -64,8 +64,8 @@
 └──────────────────┬───────────────────────────────────┘
                    ▼ (需推理的帧)
 ┌──────────────────────────────────────────────────────┐
-│  L2: L2CS-Net MobileNetV2 ONNX (~10-15ms/face)       │
-│  输入: 224×224 face crop (从 SCRFD bbox resize)        │
+│  L2: L2CS-Net MobileNetV2 ONNX (~35ms/face CPU)       │
+│  输入: 448×448 face crop (从 SCRFD bbox resize)        │
 │  输出: gaze_pitch, gaze_yaw (弧度)                    │
 │  Mutual gaze: |pitch| < 15° AND |yaw| < 12°          │
 └──────────────────┬───────────────────────────────────┘

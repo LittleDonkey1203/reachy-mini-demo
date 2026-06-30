@@ -171,3 +171,5 @@
 | 15:35 | 二次唤醒A方案真机验证通过:5次对话中喊小艺全触发打断+转向找喊话人(4粗方向+1confident),保留会话 | PROJECT_STATE.md | 验证通过;DOA多为粗方向(近似) | ~3k |
 | 15:50 | 修 bug-067: 二次唤醒后用户接话→招呼create_response撞semantic_vad自动回复(active response报错);守卫加thinking+turn_speaker_at<2s | voice/d01_realtime_chat.py | py_compile过 | ~3k |
 | 17:40 | codegraph 全工程分析:建索引(56文件/1339节点)+ 量化结构热点(god函数/77字段State单锁/重复定义/吞异常) | d01/state/actions | 产出优化清单待审 | ~9k |
+| 15:50 | 下载 L2CS-Net MobileNetV2 ONNX 模型(9.3MB) + benchmark: L0=0.02ms L2=35ms p50 CPU | models/l2csnet_mobilenetv2.onnx scripts/benchmark_gaze.py | 模型加载+推理正常 | ~2k |
+| 15:55 | 修正设计文档 224→448 输入尺寸 + 更新 anatomy.md 新增文件 | docs/GAZE_AWARE_INTERACTION_PLAN.md .wolf/anatomy.md | 文档与实现一致 | ~1k |

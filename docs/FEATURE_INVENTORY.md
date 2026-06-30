@@ -288,6 +288,38 @@
 
 ---
 
+### F24 — 注视感知(Gaze-Aware Interaction, Phase 1)
+
+**状态**: 已实现(观测层), 待真机验证
+**分支**: `feat/gaze-aware-interaction`
+
+三级级联估计在场人是否在看机器人:
+- **L0**: 5点 landmarks 几何头姿(yaw/pitch), 0.02ms, 过滤大角度侧脸
+- **L1**: 时间降频, NOT_LOOKING track 每 5 帧才跑 L2, 减少 ONNX 调用
+- **L2**: L2CS-Net MobileNetV2 ONNX (448×448), ~35ms/face macOS Intel CPU, 输出 gaze yaw/pitch
+- **Mutual gaze 判定**: |gaze_yaw| < 12° AND |gaze_pitch| < 15°
+
+注视行为状态机(GazeBehaviorFSM) 4 态:
+- **IDLE**: 无人 → 自主探索动画(未接入)
+- **CURIOUS_LOOK**: 1 人看我 → 好奇注视(输出 target_track_id)
+- **SCANNING**: 多人看我 → 视线扫过(轮换 scan_targets)
+- **GLANCING**: 有人但没看我 → 偶尔瞥最近的人
+
+| 子特性 | 代码位置 | 说明 |
+|--------|----------|------|
+| F24.1 L0 头姿预过滤 | `perception/gaze.py:HeadPoseFilter` | 5 点几何 yaw/pitch, 阈值 45°/35° |
+| F24.2 L1 时间降频 | `perception/gaze.py:GazeModule._TrackGazeState` | per-track 帧计数, 降频 5x |
+| F24.3 L2 ONNX 推理 | `perception/gaze.py:GazeEstimator` | L2CS-Net 448×448, softmax + weighted sum |
+| F24.4 行为 FSM | `perception/gaze_behavior.py:GazeBehaviorFSM` | IDLE/CURIOUS/SCANNING/GLANCING |
+| F24.5 Pipeline 集成 | `perception/face_pipeline.py:process()` | TrackView 增 gaze 字段 |
+| F24.6 状态写入 | `voice/d01_realtime_chat.py:vision_result_loop` | st.gaze_behavior + debug |
+| F24.7 优雅降级 | `perception/gaze.py:GazeModule` | 模型缺失 → available=False, 只跑 L0 |
+
+**依赖**: `models/l2csnet_mobilenetv2.onnx` (9.3MB, gitignored, 需从 yakhyo/gaze-estimation releases 下载)
+**Phase 2 规划**: FSM 驱动头部跟随(好奇回看/扫视/瞥一眼), 替代或增强当前 ASD 头部跟随
+
+---
+
 ## 二、测试方案
 
 ### 测试分层

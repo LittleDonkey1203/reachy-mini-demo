@@ -271,6 +271,8 @@ class State:
         self.register_request = None   # UI 注册请求 {track_id, name},vision_loop 消费(绕过"谁在说话")
         self.register_result = ""      # UI 注册结果回显
         self.asd_speaker = None        # 画面内 ASD 说话人 {pid,name,track_id,score,at}|None(画外);供 user query 归属
+        self.gaze_behavior: str = "IDLE"        # GazeBehaviorFSM 状态
+        self.gaze_target_id: int | None = None  # FSM 目标 track_id
         self.dbg_gate_open = True
         self.dbg_switching = False
         self.dbg_switch_phase = ""
