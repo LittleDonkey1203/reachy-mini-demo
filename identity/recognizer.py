@@ -165,7 +165,8 @@ class FaceDB:
         return pid
 
     def update_embedding(self, person_id: str, embedding: np.ndarray):
-        """追加新 embedding（不同角度），鼓励多样性。"""
+        """追加新 embedding（不同角度），鼓励多样性。
+        拒绝与其他人更相似的 embedding，防止交叉污染。"""
         info = self.persons.get(person_id)
         if not info:
             return
@@ -176,6 +177,18 @@ class FaceDB:
             return
         if max_sim < 0.20:
             return
+        # 交叉人物检查: 如果新 embedding 与其他人更像，拒绝追加
+        for other_pid, other_info in self.persons.items():
+            if other_pid == person_id:
+                continue
+            other_embs = other_info.get("embeddings", [])
+            if not other_embs:
+                continue
+            cross_sims = [float(np.dot(embedding, np.array(e, dtype=np.float32)))
+                          for e in other_embs]
+            cross_max = max(cross_sims)
+            if cross_max > max_sim:
+                return
         embs.append(embedding.tolist())
         if len(embs) > MAX_EMBEDDINGS_PER_PERSON:
             embs.pop(0)

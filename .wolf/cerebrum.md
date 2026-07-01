@@ -23,8 +23,8 @@
 - **语音协议:** Qwen-Omni-Realtime WebSocket, update_session 做记忆注入(整体替换), 非 create_item(只增不删)
 - **状态机:** 9 态 FSM, TRACKING 态是核心对话状态, 方向门控只在此状态生效
 - **记忆存储:** 认知记忆架构(Entity Memory + Episodic Memory + Working Memory 注入)
-- **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `list[str]` 中文短句
-- **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+draft facts 生成最终 entity memory + episodic memory
+- **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `dict[str,str]` KV 格式 + `summary` 叙事
+- **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+当前facts KV 生成最终 entity dict + summary + episodic memory
 - **清华镜像:** UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ 所有 pip/uv 安装必用
 - **归属有两套,别用混(2026-06-27):** ①转写显示归属 = `transcription.completed` 里 `speaker_window(speech_start)`,看整句谁在说,**稳**;②全局 `current_person_id` = vision loop 用瞬时 `asd.speaker()`+单人 fallback 持续刷,**飘**(会 fallback 切错人,只管头部跟随/显示)。**记忆「存(remember_fact/resp_snapshot)+ 读(update_memory)」必须用①**(新 `st.turn_speaker_pid`,transcription 时设),不能用②。**不需要给 current_person_id 加守卫**:inject 只读不污染数据;d01 late-inject 本就有 `in_flight==0` 守卫(回复在途不注入),fallback 切人只发生在两句之间且下一句自愈。曾加 TURN_LOCK 后判定是伪需求移除。
 - **ASD 有三个消费方,需求不同别用混(2026-06-27):** ①**归属/记忆保存**(speaker_window)= 敏感(原参数 ema=0.5/thresh=0,抓任意一瞬说话,不增延迟);②**头部转向 + 当前人焦点**(_head_view/current_person_id)= 稳(引擎 EMA 上叠二级重 EMA `HEAD_ASD_EMA=0.18` + 黏滞 `HEAD_SWITCH_MARGIN` + **按身份 person_id 黏滞、离场才释放**);③**绿框**(speaking_ids)= 敏感但带新鲜度门。
@@ -142,8 +142,9 @@
 
 ### 人脸误识别稳定性 (2026-06-24)
 - 问题: 低 sim 匹配(0.45-0.51)立即触发切人+记忆注入, 实际面前人没换
-- 修复: 当已跟踪 A 时, B 要 "接管" 需: sim>=0.65 立即; sim<0.65 连续 2 次确认
-- ID_SWITCH_HIGH_SIM=0.65, ID_SWITCH_CONFIRM_N=2
+- 修复: 当已跟踪 A 时, B 要 "接管" 需: sim>=0.72 立即; sim<0.72 连续 3 次确认
+- 首次识别也需 sim>=0.45(FIRST_DETECT_MIN_SIM), 防止低 sim 误注册
+- ID_SWITCH_HIGH_SIM=0.72, ID_SWITCH_CONFIRM_N=3
 - _id_switch_candidate / _id_switch_count 做连续匹配计数
 
 ### clear_memory 完整清除 + Dashboard 身份信息 (2026-06-24)
@@ -185,6 +186,14 @@
 - 旧数据自动迁移: load_memory 检测 facts 是 dict → _migrate_legacy_facts 翻译映射表
 - auto_merge → merge_memories: FaceDB.auto_merge 返回 {drop: keep}, d01 初始化遍历调用 merge_memories
 
+### Facts KV 重构 (2026-06-26)
+- 问题: list[str] 去重靠 replaces 子串匹配不可靠; 注入是扁平列举, 模型倾向背诵
+- facts 格式: `dict[str,str]` KV, 同 key 自动覆盖, 精确更新
+- 新增 summary: LLM consolidation 生成一句话叙事性认知描述, 注入时先放 summary 再列 KV 详情
+- remember_fact: `(key, value)` 替代 `(fact, replaces)`, QWEN_TOOLS required=["key","value"]
+- 注入格式: summary叙事 + KV详情(\n分隔) + episode topic + 使用指引
+- 旧数据兼容: 自动迁移 list[str](推断key) 和英文key dict(翻译映射) 两种旧格式
+
 ### 方向门控白名单化 (2026-06-25)
 - 问题: 黑名单门控(逐个豁免状态)导致唤醒时 DOA 残留关门 → 纯静音 → 服务端断连
 - 修复: 改为白名单: `state != ST_TRACKING` — 仅 TRACKING(面前有人在对话)时屏蔽范围外声音
@@ -198,3 +207,18 @@
 - DOA 选出的脸优先用于 ArcFace 身份识别(替代 FaceSelector 选择)
 - 仅在 all_faces > 1 且 doa_confident 时生效，单人脸或无 DOA 时 fallback FaceSelector
 - debug overlay: 选中=蓝色粗框+DOA标签, 非选中=灰色细框+序号
+
+### 身份切换会话重启 (2026-06-26)
+- 问题: update_session(instructions=...) 只替换系统指令, 不清除 conversation items; 切人后模型仍看到旧对话提到前人的爱好 → 记忆污染
+- 修复: 身份切换时先保存旧人 conv_log 做 consolidation, 然后 close + open_session 重建干净 WS
+- restart_session_for_switch(old_pid, new_pid, new_pname): 保存旧人日志→关闭WS→新建WS→注入新人记忆
+- pending_identity_restart flag 由视觉线程设置, 主循环在 in_flight==0 时执行重启
+
+### Qwen-Omni-Realtime 工具调用特性 (2026-06-26)
+- tool_choice 和 parallel_tool_calls 均不支持 — 工具调用完全由模型自主决定
+- 括号动作描述(（点头）/(nods))是 omni 端到端语音模型的固有特性, 无 API flag 可关闭
+- 工具定义用扁平风格(type/name/description/parameters), 非嵌套 Chat-Completions 风格
+- 情绪/语气控制没有 API 参数, 完全靠 instructions prompt 驱动("用开心的语气说")
+- voice 不支持情绪变体(如 Ethan-happy), 任何音色都能表达情绪
+- 缓解标签泄漏: prompt 禁令 + 引导用语气替代括号 + 已知标签→物理动作兜底
+- 正例/负例触发词模式是唯一可靠的工具触发杠杆(end_session 已有)

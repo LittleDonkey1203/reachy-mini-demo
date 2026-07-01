@@ -1,11 +1,15 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-25T13:40:55.546Z
-> Files: 54 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-06-27T03:28:12.795Z
+> Files: 58 tracked | Anatomy hits: 0 | Misses: 0
 
 ## ../../../../.claude/plans/
 
-- `rustling-booping-biscuit.md` — 小艺认知记忆架构重构 (~2123 tok)
+- `rustling-booping-biscuit.md` — Facts 格式重构：list[str] → dict[str,str] + summary (~768 tok)
+
+## ../../../../Library/Application Support/Code/User/
+
+- `settings.json` (~327 tok)
 
 ## ./
 
@@ -15,7 +19,7 @@
 - `CLAUDE.md` — OpenWolf (~180 tok)
 - `connect.py` — 连接 Reachy Mini daemon 的统一封装 (~269 tok)
 - `MACOS_SETUP.md` — macOS (Intel) 部署指南 (~1670 tok)
-- `PROJECT_STATE.md` — PROJECT_STATE (~813 tok)
+- `PROJECT_STATE.md` — PROJECT_STATE (~814 tok)
 - `pyproject.toml` — Python project configuration (~234 tok)
 - `README.md` — Project documentation (~1024 tok)
 - `start_daemon.sh` — daemon 启动脚本 (~634 tok)
@@ -65,10 +69,16 @@
 - `play01_hand_track.py` — PLAY-01-a:手部互动跟手走 (~3555 tok)
 - `vis01_face_track.py` — VIS-01:本地视觉看脸+转头 (~2798 tok)
 
+## data/memories/
+
+- `person_f4e8c43f.json` (~20 tok)
+
 ## docs/
 
-- `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7674 tok)
+- `COGNITIVE_MEMORY_ARCHITECTURE.md` — 小艺认知记忆架构重构 (~2175 tok)
+- `FEATURE_INVENTORY.md` — 小艺(Reachy Mini Lite) — 特性清单 & 测试方案 (~7692 tok)
 - `MULTI_PERSON_INTRO_PLAN.md` — 多人同框介绍朋友方案 (~2783 tok)
+- `QWEN_OMNI_TOOL_CALLING.md` — Qwen-Omni-Realtime 工具调用调研报告 (~1151 tok)
 - `WAKEWORD_PRIORITY_ANALYSIS.md` — 唤醒词 × 人脸锁定 × DOA 优先级分析 (~2615 tok)
 
 ## identity/
@@ -78,7 +88,7 @@
 
 ## memory/
 
-- `manager.py` — 认知记忆管理 — Entity Memory + Episodic Memory + Working Memory 注入。 (~5341 tok)
+- `manager.py` — 认知记忆管理 — Entity Memory + Episodic Memory + Working Memory 注入。 (~6068 tok)
 - `safety.py` — 记忆安全删除工作流(身份验证+二次确认) (~1023 tok)
 
 ## perception/
@@ -92,9 +102,9 @@
 
 ## voice/
 
-- `config.py` — 配置常量、工具元数据、prompt 模板。 (~3003 tok)
-- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25071 tok)
-- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17765 tok)
+- `config.py` — 配置常量、工具元数据、prompt 模板。 (~2775 tok)
+- `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25448 tok)
+- `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17876 tok)
 - `kws.py` — WAKE-01 唤醒词门控(sherpa-onnx) (~991 tok)
-- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7391 tok)
-- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2978 tok)
+- `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~9050 tok)
+- `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~3110 tok)

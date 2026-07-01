@@ -79,11 +79,12 @@
                                         └──────────────────────────────────────┘
 ```
 
-**会话中**：`remember_fact` 保留，作为 draft notes 实时记录模型认为重要的信息。这些 draft facts 立即存盘并刷新注入（保持现有 `identity_injected=False` 触发重注入的逻辑）。
+**会话中**：`remember_fact(key, value)` 保留，作为实时 KV 写入。同 key 自动覆盖旧值，立即存盘并刷新注入（保持现有 `identity_injected=False` 触发重注入的逻辑）。
 
-**会话后**：close_session 启动后台 consolidation 线程，输入 = 全量对话 + draft facts + 已有 facts，由 LLM 复盘生成：
-1. **最终 entity memory** — 合并 draft notes + 已有 facts + 对话中的新信息，去重去过时，输出干净的 facts list
-2. **episodic memory** — 从对话中提取结构化事件（topic + highlights + mood）
+**会话后**：close_session 启动后台 consolidation 线程，输入 = 全量对话 + 当前 facts KV + 已有 facts，由 LLM 复盘生成：
+1. **最终 entity memory** — 合并现有 facts + 对话中的新信息，KV 格式，去重去过时
+2. **summary** — 基于所有 facts 和对话理解的一句话叙事性描述
+3. **episodic memory** — 从对话中提取结构化事件（topic + highlights + mood）
 
 这样即使模型会话中漏调 `remember_fact`，consolidation 也能从全量对话中兜底捕获。
 
@@ -91,26 +92,29 @@
 
 | 方案 | 优点 | 缺点 | 结论 |
 |------|------|------|------|
-| dict 英文 key + 英文 value | upsert 一致 | 注入读起来像机器码 | ❌ 现状，要改 |
+| dict 英文 key + 英文 value | upsert 一致 | 注入读起来像机器码 | ❌ 旧格式v1 |
 | dict 英文 key + 中文 value | upsert 一致、注入可读 | 更新时模型需完整复述旧值 | ❌ 复述慢且易漏 |
 | dict 中文 key | 注入可读 | 中文同义词多导致 key 不一致 | ❌ upsert 命中率低 |
-| **list[str] + replaces 参数** | **原子操作、注入自然、无需复述** | 需 replaces 关键词匹配 | **✅ 采用** |
+| list[str] + replaces 参数 | 原子操作、注入自然、无需复述 | 需 replaces 关键词匹配，去重不可靠 | ❌ 旧格式v2 |
+| **dict[str,str] 中文KV + summary** | **精确更新(同key覆盖) + 叙事理解** | 中文 key 可能不完全一致 | **✅ 采用** |
 
-每条 fact 是独立的中文短句，增删改都是单次 function call：
-- 新增：`remember_fact(fact="喜欢打羽毛球")`
-- 更新：`remember_fact(fact="喜欢打羽毛球", replaces="篮球")` → 找含"篮球"的旧 fact 替换
-- 删除：`forget_fact(keyword="篮球")`
+`dict[str,str]` KV 格式解决精确更新（同 key 覆盖），`summary` 给模型叙事性理解：
+
+- 新增：`remember_fact(key="喜欢的动物", value="猫")`
+- 更新（同key覆盖）：`remember_fact(key="喜欢的动物", value="狗")` → 自动覆盖旧值
+- 删除：`forget_fact(keyword="猫")` → 模糊匹配 key 或 value
 
 ## 数据格式
 
 ```json
 {
-  "name": "大大",
-  "facts": [
-    "喜欢打羽毛球",
-    "喜欢吃西瓜",
-    "是程序员"
-  ],
+  "name": "坤坤",
+  "summary": "坤坤喜欢打篮球和看科幻小说，最近在关注《黑暗森林》上线",
+  "facts": {
+    "爱好": "打篮球",
+    "喜欢的书": "《三体》",
+    "近期关注": "《黑暗森林》二要上线"
+  },
   "episodes": [
     {
       "ts": "2026-06-25T15:18:00",
@@ -121,6 +125,19 @@
   ],
   "history": [...]
 }
+```
+
+### 注入格式
+
+```
+[记忆]
+你面前的人叫坤坤。
+坤坤喜欢打篮球和看科幻小说，最近在关注《黑暗森林》上线。
+- 爱好：打篮球
+- 喜欢的书：《三体》
+- 近期关注：《黑暗森林》二要上线
+你们上次聊过：介绍自己的功能。
+这些是你对这个人的了解，作为背景知识自然运用，不要主动背诵或列举。
 ```
 
 ## 实施计划
@@ -139,19 +156,18 @@
 **API 变更**:
 
 ```python
-# Entity Memory — 会话中 draft notes
-save_fact(pid, fact: str, replaces: str = None)
-    # replaces=None → 追加
-    # replaces="篮球" → 找含"篮球"的旧 fact 删掉，加入新 fact
+# Entity Memory — 会话中 KV 存储
+save_fact(pid, key: str, value: str)
+    # 同 key 自动覆盖旧值
 
 forget_fact(pid, keyword: str)
-    # 在 facts list 中模糊匹配删除
+    # 模糊匹配 key 或 value 删除
 
-get_facts(pid) → list[str]  # 原来返回 dict
+get_facts(pid) → dict[str, str]  # KV 格式
 
 # Entity Memory — 会话后 consolidation 整体替换
-consolidate_facts(pid, new_facts: list[str], new_name: str = None)
-    # 整体替换 facts 列表（consolidation 输出）
+consolidate_facts(pid, new_facts: dict[str,str], new_name: str = None, new_summary: str = None)
+    # 整体替换 facts dict + summary
     # 如果 new_name 与当前不同，同步更新 name
 
 # Episodic Memory
@@ -163,12 +179,14 @@ set_name(pid, name) / get_name(pid)
 
 # Working Memory 注入
 get_prompt(pid, person_name=None) → str
-    # "你面前的人叫大大。"
-    # "你记得：喜欢打羽毛球；喜欢吃西瓜；是程序员。"
+    # "你面前的人叫坤坤。"
+    # "坤坤喜欢打篮球和看科幻小说..."  (summary)
+    # "- 爱好：打篮球"
+    # "- 喜欢的书：《三体》"
     # "你们上次聊过：介绍自己的功能。"
-    # "自然地运用这些记忆，但不要主动背诵。"
+    # "这些是你对这个人的了解..."
 
-# 合并（适配 list facts 去重）
+# 合并（适配 dict facts 合并）
 merge_memories(keep_pid, drop_pid)
 ```
 
@@ -178,86 +196,67 @@ merge_memories(keep_pid, drop_pid)
 
 ```python
 remember_fact:
-    fact: str      # 中文短句，如"喜欢猫"
-    replaces: str  # 可选，替换含此关键词的旧记忆
+    key: str       # 信息类别，如"爱好""职业""喜欢的食物"
+    value: str     # 具体内容，如"打篮球""程序员""火锅"
     name: str      # 可选，仅用户自报姓名时传
 
 forget_fact:
-    keyword: str   # 中文关键词模糊匹配
+    keyword: str   # 中文关键词模糊匹配 key 或 value
 
 # clear_memory / confirm_clear 不变
 ```
 
 ### Task 4: Session Consolidation — 会话后复盘
 
-**文件**: `voice/d01_realtime_chat.py`
+**文件**: `voice/realtime.py` (RealtimeDialog.save_summary)
 
-替代原 `_save_conversation_summary`，改为 `_consolidate_session`：
+会话后 consolidation 现在生成 KV facts + summary + episode：
 
 ```python
-def _consolidate_session(pid, conv_log, current_facts, current_name):
-    """后台线程：会话结束后 LLM 复盘，生成 entity + episodic memory。"""
-
-    transcript = format_transcript(conv_log)
-
-    # 一次 LLM 调用同时生成两层记忆
-    prompt = f"""你是记忆管理助手。根据以下对话内容和已有记忆，生成更新后的记忆。
-
-已有记忆：{json.dumps(current_facts, ensure_ascii=False)}
-当前用户名字：{current_name or "未知"}
-
-对话内容：
-{transcript}
-
-输出JSON：
-{{
-  "name": "用户名字(如果对话中提到或更正了名字则更新，否则保留原名)",
-  "facts": ["关于这个人的事实短句列表，合并已有记忆和对话新信息，去掉过时的"],
-  "episode": {{
-    "topic": "一句话说这次聊了什么",
-    "highlights": ["关键信息点"],
-    "mood": "engaged/casual/emotional/tense"
-  }}
-}}
-只输出JSON。"""
-
-    resp = oai.chat.completions.create(model=SUMMARY_MODEL, ...)
-    result = json.loads(resp)
-
-    _memory_mgr.consolidate_facts(pid, result["facts"], result.get("name"))
-    _memory_mgr.save_episode(pid, result["episode"])
+def save_summary(self, pid, conv_log):
+    """后台线程：会话后 consolidation — entity memory + episodic memory。"""
+    # ... 组装 prompt ...
+    # LLM 输出 JSON:
+    # {
+    #   "name": "用户名字",
+    #   "summary": "一句话认知描述",
+    #   "facts": {"类别1": "内容1", "类别2": "内容2"},
+    #   "episode": {"topic": "...", "highlights": [...], "mood": "..."}
+    # }
+    self.memory_mgr.consolidate_facts(pid, new_facts, new_name, new_summary)
+    self.memory_mgr.save_episode(pid, episode)
 ```
 
 **关键点**：
-- 输入 = 全量对话 transcript + 当前 facts（含会话中 draft notes）+ 当前 name
-- LLM 做合并/去重/去过时，输出干净的 facts list
+- 输入 = 全量对话 transcript + 当前 facts KV（含会话中实时写入）+ 当前 name
+- LLM 做合并/去重/去过时，输出干净的 facts dict + summary 叙事
+- summary 体现对用户的**整体理解**，不是列举属性
 - 同时提取 episodic memory（事件，不是摘要）
-- 一次 LLM 调用完成两层记忆的生成
+- 一次 LLM 调用完成 entity memory + summary + episodic memory
 
 ### Task 5: 迁移现有数据
 
 **文件**: `memory/manager.py` (load_memory 中自动迁移)
 
-检测旧格式（`facts` 是 dict）→ 自动转换：
+检测旧格式 → 自动转换为 `dict[str,str]`：
 
-| 旧 | 新 |
+| 旧格式 | 新格式 |
 |---|---|
+| `list[str]` 中文短句 | 推断 key（"喜欢X"→喜欢的东西），无法推断用"备注N"兜底 |
+| `dict` 英文 key (likes_X) | 翻译映射表转中文 KV |
 | `name: "大大"` | 顶层 `name` |
 | `is_owner: "true"` | 丢弃（在 owner.json） |
-| `likes_X: "true"` | 翻译映射表转中文短句 |
-| `job: "X"` | `"是X"` |
 | `weather_*` | 丢弃（临时信息） |
-| 其他 `k: v` | `"k: v"` fallback |
 | `conversation_summaries` | → `episodes`（text→topic） |
 
 ### Task 6: d01 工具调用适配
 
-**文件**: `voice/d01_realtime_chat.py` (~L442-482)
+**文件**: `voice/realtime.py` (ChatCallback.on_event)
 
-- `remember_fact`: `(key, value)` → `(fact, replaces?, name?)`
-- `name` 参数同步 FaceDB.set_name + OwnerManager.try_claim
-- `forget_fact`: `key` → `keyword`
-- close_session: 调 `_consolidate_session` 替代 `_save_conversation_summary`
+- `remember_fact`: args 从 `fact`+`replaces` → `key`+`value`（由 handle_tool_call 处理）
+- `name` 参数同步 FaceDB.set_name + OwnerManager.try_claim（不变）
+- `forget_fact`: `keyword` 模糊匹配 key 或 value（不变）
+- close_session → save_summary 触发 consolidation（不变）
 - `identity_injected` 重置逻辑不变
 
 ## 不在本次范围
@@ -268,10 +267,11 @@ def _consolidate_session(pid, conv_log, current_facts, current_name):
 ## 验证
 
 1. 启动 → auto_merge 后 memory 文件正确合并
-2. 现有 4 个 memory 文件自动迁移新格式
-3. 对话说"我喜欢吃火锅" → draft fact 立即写入 `"喜欢吃火锅"`
-4. 说"我不喜欢火锅了，喜欢烧烤" → replaces 替换生效
-5. 说"忘掉烧烤" → keyword 模糊匹配删除
-6. 结束对话 → consolidation 生成最终 facts + episode
-7. 检查 consolidation 后的 facts 是否合并了 draft notes + 对话新信息 + 去掉过时项
-8. 重新对话 → prompt 注入自然语言
+2. 现有 memory 文件自动迁移 `dict[str,str]` 格式
+3. 对话说"我喜欢猫" → facts 写入 `{"喜欢的动物": "猫"}`
+4. 说"我不喜欢猫了喜欢狗" → 同 key 覆盖为 `{"喜欢的动物": "狗"}`
+5. 说"忘掉猫" → keyword 匹配删除
+6. 结束对话 → consolidation 生成 facts dict + summary + episode
+7. 检查 consolidation 后的 facts 是否合并了实时写入 + 对话新信息 + 去掉过时项
+8. 下次对话 → 注入格式正确（summary + KV 列表 + episode）
+9. 模型不主动背诵记忆，只在用户提起相关话题时自然运用

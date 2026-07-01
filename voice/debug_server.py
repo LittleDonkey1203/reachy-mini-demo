@@ -1012,23 +1012,27 @@ function scrollToTlNode(node){
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function openModal(e){
   $('pb-title').textContent=e.type;
-  // 找到该事件所属的 turn，获取 dt_seq 快照点
+  // 找到该事件所属的 turn，用下一个 turn 的 dt_seq 作为上界（包含本轮 tool call/output）
   let _modalDtSeq=Infinity;
-  for(const t of allTurns){
-    if(t.events&&t.events.includes(e.seq)&&t.dt_seq!=null){_modalDtSeq=t.dt_seq;break;}
+  const turnIdx=allTurns.findIndex(t=>t.events&&t.events.includes(e.seq));
+  if(turnIdx>=0&&turnIdx+1<allTurns.length){
+    const nextT=allTurns[turnIdx+1];
+    if(nextT.dt_seq!=null)_modalDtSeq=nextT.dt_seq;
   }
   // 构建内容：事件 payload + session context
   let html='<div style="margin-bottom:12px"><div style="color:#9ca3af;font-size:10px;margin-bottom:4px">Event Payload</div>';
   html+='<pre style="color:#d1d5db;margin:0">'+esc(JSON.stringify(e.payload,null,2))+'</pre></div>';
   // ── 模型视角：完整上下文重建 ──
-  if(_lastSessionInstr||(_lastDisplayTranscript&&_lastDisplayTranscript.length)){
+    if(_lastSessionInstr||(_lastDisplayTranscript&&_lastDisplayTranscript.length)){
     html+='<div style="border-top:1px solid #374151;padding-top:8px">';
     html+='<div style="color:#a78bfa;font-size:10px;margin-bottom:6px;font-weight:bold">Model Context (模型视角完整上下文)</div>';
-    // [System] instructions
+    // [System] instructions + tool definitions
     if(_lastSessionInstr){
       html+='<div style="margin-bottom:6px;padding:6px 8px;background:#1e1b2e;border-radius:4px;border-left:3px solid #a78bfa">';
       html+='<div style="color:#a78bfa;font-size:9px;margin-bottom:2px">[System]</div>';
-      html+='<pre style="color:#c4b5fd;margin:0;white-space:pre-wrap;font-size:11px">'+esc(_lastSessionInstr)+'</pre></div>';
+      html+='<pre style="color:#c4b5fd;margin:0;white-space:pre-wrap;font-size:11px">'+esc(_lastSessionInstr)+'</pre>';
+      html+='<div style="color:#6b7280;font-size:9px;margin-top:4px">[Tools] nod, shake_head, look_left/right/up/down, wiggle_antennas, tilt_head, end_session, take_snapshot, identify_pointed_object, remember_fact, forget_fact, clear_memory, confirm_clear</div>';
+      html+='</div>';
     }
     // 对话历史
     if(_lastDisplayTranscript&&_lastDisplayTranscript.length){
@@ -1043,6 +1047,10 @@ function openModal(e){
           html+='<div style="margin-bottom:4px;padding:4px 8px;background:#1a1a1a;border-radius:4px;border-left:3px solid #f59e0b">';
           html+='<div style="color:#f59e0b;font-size:9px">[ToolCall] <span style="color:#6b7280">'+esc(e.ts)+'</span></div>';
           html+='<div style="color:#fbbf24;font-size:11px;font-family:monospace">'+esc(e.text)+'</div></div>';
+        }else if(e.role==='tool_output'){
+          html+='<div style="margin-bottom:4px;padding:4px 8px;background:#1a1a0a;border-radius:4px;border-left:3px solid #a3e635">';
+          html+='<div style="color:#a3e635;font-size:9px">[ToolOutput] <span style="color:#6b7280">'+esc(e.ts)+'</span></div>';
+          html+='<div style="color:#d9f99d;font-size:10px;font-family:monospace">'+esc(e.text)+'</div></div>';
         }else{
           html+='<div style="margin-bottom:4px;padding:4px 8px;background:#0f2922;border-radius:4px;border-left:3px solid #34d399">';
           html+='<div style="color:#34d399;font-size:9px">[Assistant] <span style="color:#6b7280">'+esc(e.ts)+'</span></div>';
@@ -1050,10 +1058,6 @@ function openModal(e){
         }
       }
     }
-    // 工具定义摘要
-    html+='<div style="margin-top:6px;padding:4px 8px;background:#1a1a2e;border-radius:4px;border-left:3px solid #6b7280">';
-    html+='<div style="color:#6b7280;font-size:9px">[Tools]</div>';
-    html+='<div style="color:#9ca3af;font-size:10px">nod, shake_head, look_left/right/up/down, wiggle_antennas, tilt_head, end_session, take_snapshot, identify_pointed_object, remember_fact, forget_fact, clear_memory, confirm_clear</div></div>';
     html+='</div>';
   }
   $('pb-body').innerHTML=html;
