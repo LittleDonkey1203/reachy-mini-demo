@@ -204,3 +204,4 @@
 | 20:29 | Q1动作找回:文本入模式模型少主动做动作→inject_context(cascade)每轮system条目补动作提示;基础人设已有但静态提示不够 | voice/realtime.py | 待真机测动作回没回 | ~6k |
 | 20:38 | 修双-response致💬/助手记忆丢失:语音响应A是孤儿(无audio_transcript.done)→累积deltas+response.done兜底flush(_emit_assistant_text) | voice/realtime.py | 待复测💬显示+记忆入库 | ~10k |
 | 20:47 | 补回自然打断(级联丢的VAD功能):ASR partial+机器人正说话→_do_barge_in;Reachy麦近乎无回声(日志证)故干净;去抖1s+CASCADE_NO_BARGE开关 | voice/d01_realtime_chat.py | 待真机测打断 | ~10k |
+| 20:58 | 延迟优化:turn_gap 0.7→0.5;inject_context去重(上下文文本没变跳过delete+create,同一人连聊省2WS/轮)+open_session重置基线 | realtime.py,d01 | 待复测延迟 | ~8k |

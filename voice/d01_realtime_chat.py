@@ -1911,7 +1911,7 @@ def main() -> int:
                             except Exception as _bge:
                                 log(f"⚠ [ASR]打断失败:{type(_bge).__name__}: {_bge}")
                 try:
-                    _tg = 0.7 if _cascade else 1.2     # cascade turn_gap(真延迟大头是 in_flight 泄漏致每轮 cancel,不是聚轮;调回小值降端点延迟)
+                    _tg = 0.5 if _cascade else 1.2     # cascade turn_gap:0.5s(降端点延迟;in_flight 漏计根因已修,不靠聚轮)
                     _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
                     _asr_stream = AsrStream(on_sentence=_asr_agg.add, on_partial=(_asr_on_partial if _cascade else None))
                     _asr_stream.start()

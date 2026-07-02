@@ -750,6 +750,7 @@ class RealtimeDialog:
         # 级联(CASCADE=1):Omni 文本入 + 中和音频(关转写/关服务端VAD),回复由本地 ASR 轮驱动。
         # 默认关 = 原 S2S。见 docs/ASR_CASCADE_REDESIGN.md 阶段2。
         self.cascade = os.environ.get("CASCADE") == "1"
+        self._ctx_last_text = None   # 上次注入的上下文文本;内容没变则跳过重发(省 delete+create 两个 WS,降延迟)
 
     def open_session(self, timeout: float = CONNECT_TIMEOUT_S):
         """新建 WS + update_session,timeout 内未就绪 → None。"""
@@ -785,6 +786,8 @@ class RealtimeDialog:
         if st.session_updated.wait(timeout):
             self.callback.conv = c
             self.conv = c
+            self._ctx_item_id = None      # 新会话:旧上下文条目失效,清掉(下次注入不删旧)
+            self._ctx_last_text = None     # 强制新会话首轮重注入(去重基线清空)
             with st.lock:
                 st.in_flight = 0
                 st.active_resp_id = None      # 新会话:清"忙"状态(级联忙判据)
@@ -862,6 +865,12 @@ class RealtimeDialog:
                     "别套用其他人的名字或记忆。")
         if self.cascade:                               # 文本入模式模型少主动做动作 → 每轮 system 条目补一句提示
             text += "。回答时边说边自然配合动作工具(点头/歪头/摆天线/摇头等),别只说话不动。"
+        # 去重:说话人/记忆/在场没变 → 上下文文本没变 → 跳过重发(省 delete+create 两个 WS,降 📝→💭 延迟)
+        if text == self._ctx_last_text and self._ctx_item_id is not None:
+            with st.lock:
+                st.identity_injected = True
+                st.identity_injected_pid = cur_pid if cur_pid else "_ctx"
+            return True
         # 保洁:发新条目前先删上一条(客户端指定 id 便于下次删)
         if self._ctx_item_id:
             try:
@@ -879,6 +888,7 @@ class RealtimeDialog:
             self._ctx_use_item = False
             return False
         self._ctx_item_id = _iid
+        self._ctx_last_text = text
         with st.lock:
             st.identity_injected = True
             st.identity_injected_pid = cur_pid if cur_pid else "_ctx"
