@@ -3,6 +3,7 @@
 
 import base64
 import json
+import os
 import queue
 import re
 import threading
@@ -559,7 +560,10 @@ class ChatCallback(OmniRealtimeCallback):
                     ):
                         fire_rc = True
                     # A:空闲(in_flight==0)下若"已注入身份" ≠ "最近说话人" → 补回那次被 _busy 跳过的注入
+                    #   cascade:注入只走 handle_asr_turn 的 inject_context(create_item),绝不能在这里回退 update_session
+                    #   (会把关掉的 turn_detection/转写又打开 → 破坏级联)。
                     if (st.in_flight == 0 and not st.no_memory
+                            and not (self.dialog is not None and self.dialog.cascade)
                             and self.memory_mgr is not None and self.conv is not None):
                         _tsp = st.turn_speaker_pid
                         if _tsp is not None and st.identity_injected_pid != _tsp:
@@ -583,6 +587,84 @@ class ChatCallback(OmniRealtimeCallback):
                 log(f"❌ 服务端错误事件:{event}")
         except Exception as e:
             log(f"❌ on_event 处理异常:{type(e).__name__}: {e}\n   原始事件:{str(event)[:300]}")
+
+    def handle_asr_turn(self, transcript: str, start_mono: float) -> None:
+        """CASCADE(阶段2):本地 ASR 一轮 → 归属 → 带说话人标签 user item + 记忆注入 + 手动 create_response。
+        镜像 transcription.completed 的归属/turn_speaker/记忆逻辑,但文本由本地 ASR 给,
+        且从源头给 user 轮打「name」标签(根治多人张冠李戴:模型天生区分多人 + 记忆走 inject_context 不串)。"""
+        st = self.st
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        now = time.monotonic()
+        # ── 归属:speaker_window(start_mono),与 S2S 同引擎同逻辑(耐 ASD 延迟)──
+        _asp = None
+        _sw = (self.asd_engine.speaker_window(start_mono)
+               if (self.asd_engine is not None and self.asd_engine.available) else None)
+        if _sw is not None:
+            _key, _score = _sw
+            if isinstance(_key, str) and _key.startswith("t"):
+                _asp = {"pid": None, "name": None, "track_id": _key[1:], "score": _score, "at": now}
+            else:
+                _nm = self.memory_mgr.get_name(_key) if self.memory_mgr else None
+                _asp = {"pid": _key, "name": _nm,
+                        "track_id": self.asd_engine.last_track(_key), "score": _score, "at": now}
+        if _asp is None:
+            with st.lock:
+                _hold = st.asd_speaker
+            if _hold is not None and (now - _hold.get("at", 0.0)) < 2.0:
+                _asp = _hold
+        if _asp is not None:
+            _tid = _asp.get("track_id")
+            _log_pid = _asp.get("pid") or f"_track{_tid}"
+            _real_name = _asp.get("name")
+        else:
+            _log_pid = "_offscreen"
+            _real_name = None
+        if _real_name in ("未知", ""):          # get_name 对无名者返回字面"未知"→当无名(shadow 学习⑤)
+            _real_name = None
+        _tspk_real = (_log_pid not in ("_unknown", "_offscreen")
+                      and not _log_pid.startswith("_track"))
+        with st.lock:
+            st.turn_speaker_pid = _log_pid if _tspk_real else None
+            st.turn_speaker_name = _real_name if _tspk_real else None
+            st.turn_speaker_at = now
+        _label = _real_name or "访客"           # 已命名用名;未命名/画外用"访客"(不空缺、绝不套别人名)
+        log(f"📝 [ASR]听到:「{transcript}」→ 🗣 归属:{_label}({_log_pid})")
+        # conversation_log(consolidation/兜底抽取)+ dashboard 显示,键 = 归属 pid
+        if not st.no_memory:
+            with st.lock:
+                st.conversation_log.setdefault(_log_pid, []).append(("user", transcript))
+        with st.lock:
+            st.display_transcript_seq += 1
+            st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"),
+                                          "role": "user", "text": transcript, "pid": _log_pid, "name": _label})
+            if len(st.display_transcript) > 100:
+                st.display_transcript = st.display_transcript[-80:]
+        c = self.conv
+        if c is None:
+            return
+        # ① 带说话人标签的 user item 入历史(根治多人区分——update_session 做不到的"重标历史")
+        try:
+            c.create_item({"type": "message", "role": "user",
+                           "content": [{"type": "input_text", "text": f"「{_label}」:{transcript}"}]})
+        except Exception as e:
+            log(f"⚠ [ASR]create_item(user) 失败:{type(e).__name__}: {e}")
+            return
+        # ② 易变记忆/消歧:复用 inject_context(system item·简洁,不进持久历史)
+        if self.dialog is not None and self.memory_mgr is not None:
+            _cur_pid = _log_pid if _tspk_real else None
+            self.dialog.inject_context(_cur_pid, _real_name)
+        # ③ 手动 create_response(in_flight==0 守卫,防和唤醒招呼双答)
+        with st.lock:
+            _busy = st.in_flight > 0
+        if not _busy:
+            try:
+                c.create_response()
+            except Exception as e:
+                log(f"⚠ [ASR]create_response 失败:{type(e).__name__}: {e}")
+        else:
+            log(f"⏭ [ASR]跳过 create_response(in_flight={st.in_flight},招呼/旧回复在途)")
 
 
 class RealtimeDialog:
@@ -609,6 +691,9 @@ class RealtimeDialog:
         self._ctx_use_item = True    # create_item 路是否可用;Qwen 拒 system item 时回退 update_session
         self._last_connect_at = 0.0
         self._min_connect_gap = 1.0
+        # 级联(CASCADE=1):Omni 文本入 + 中和音频(关转写/关服务端VAD),回复由本地 ASR 轮驱动。
+        # 默认关 = 原 S2S。见 docs/ASR_CASCADE_REDESIGN.md 阶段2。
+        self.cascade = os.environ.get("CASCADE") == "1"
 
     def open_session(self, timeout: float = CONNECT_TIMEOUT_S):
         """新建 WS + update_session,timeout 内未就绪 → None。"""
@@ -628,13 +713,16 @@ class RealtimeDialog:
                     voice=VOICE,
                     input_audio_format=AudioFormat.PCM_16000HZ_MONO_16BIT,
                     output_audio_format=AudioFormat.PCM_24000HZ_MONO_16BIT,
-                    enable_input_audio_transcription=True,
-                    enable_turn_detection=True,
+                    # 级联:关 Omni 转写(音频只当视频锚点,真转写走本地 ASR)+ 关服务端 VAD(永不据音频自动回复)
+                    enable_input_audio_transcription=(not self.cascade),
+                    enable_turn_detection=(not self.cascade),
                     turn_detection_type="semantic_vad",
-                    turn_detection_param={"create_response": False},   # VAD 只断句、不自动回复:回复由我方注入后手动 create_response(保时序)
+                    turn_detection_param={"create_response": False},   # (非级联)VAD 只断句、不自动回复:回复由我方注入后手动 create_response(保时序)
                     instructions=self.instructions,
                     tools=self.tools,
                 )
+                if self.cascade:
+                    log("🔀 CASCADE=1:Omni 文本入模式(转写关/服务端VAD关;回复由本地 ASR 轮驱动)")
             except Exception as e:
                 holder["err"] = e
         threading.Thread(target=_w, daemon=True).start()

@@ -175,7 +175,7 @@ memory/
 
 - ✅ **阶段 0 完成**:`voice/omni_text_driver.py` 骨架 + 连续帧静音锚点真机验证(3 轮切图全命中最新帧/clear 无缝/0 报错)。
 - ✅ **阶段 1 完成**:`voice/asr_stream.py`(AsrStream + TurnAggregator)+ TTS 端到端 smoke 通过;已在 d01 mic 循环 **shadow 接线**(env `ASR_SHADOW=1`,默认关,只打日志 `🧾 ASR轮[...]` 对拍)。**待真机跑多人语音验证** ASR 断句/热词/ASD 归属对齐。
-1. **阶段 2**(下一步):切换驱动——停送真实音频改静音锚点、`turn_detection=None`/转写关,由轮次聚合触发带标签 create_item + 带记忆 create_response(用 `OmniTextDriver.speak_turn`)。
-2. **阶段 3**:barge-in(ASR partial 起始)+回声门(播放期不喂 ASR)+热词表(`VocabularyService` 灌在场人名)+buffer clear 节流+参数调优。
+- ✅ **阶段 2 完成(待真机验证)**:`CASCADE=1` 门控的切换驱动。realtime.py:`RealtimeDialog.cascade`、`open_session` 关转写/关VAD、`ChatCallback.handle_asr_turn`(归属+带标签 user item+inject_context+create_response)、`response.done` 补注入加 cascade 护栏(防 update_session 破坏级联)。d01:静音锚点替真音频、ASR feed 门控(engaged+非播放)、周期 buffer clear、招呼改 inject_context。**CASCADE 未设=S2S 逐条不变**。ASR feed 已含回声门(播放期不喂)+ turn_gap 压到 0.6s。
+1. **阶段 3**(下一步):真机跑 `CASCADE=1` 验证张冠白戴是否根治;barge-in(ASR partial 起始,cascade 下 Omni 无 speech_started)+热词表(`VocabularyService` 灌在场人名,治小艺→小一)+ `fun-asr-realtime` A/B + 参数调优(turn_gap/清理周期)。
 4. 旁支待办(重构后再理):PR#10 摘 `47b1372`(embedding 交叉检查);group-framing/naming 真机验;FEATURE_INVENTORY 补账。
 5. 检查点提交已落 `c289c87`(create_item+turn-taking 那批);ASR 级联为全新架构,基于此检查点开分支推进。

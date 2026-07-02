@@ -78,6 +78,7 @@
 - 决策:让 Omni **只读我方文本**。每条用户轮从源头带 `「name」:` 标签入历史(天生区分多人)、易变记忆走单次 `create_response(instructions=)` 不进历史(无跨轮串味)、先集齐文本+说话人再手动 create_response(无时序竞态)。回复粒度**聚合成轮次**(更长静音/说话人切换才触发),非每句即答。
 - **ASR 必须是独立第二条连接**(2026-07-02 由用户给的官方 ASR 脚本确认):主 Omni 脑连接绝不能吃真实音频——`enable_input_audio_transcription` 会把用户音频变成**无标签 history user item**,又回张冠李戴。真实音频只喂 ASR 连接(推荐 `dashscope.audio.asr.Recognition`,model `fun-asr-realtime`/`paraformer-realtime-v2`:`send_audio_frame(裸PCM)`+`get_sentence()`+`is_sentence_end`,有 `begin/end` 时间戳对齐 ASD、`phrase_id` 热词灌人名);备选脚本2 = `OmniRealtimeConversation`+`TranscriptionParams`(model `qwen3-asr-flash-realtime`)。ASD 归属对齐 ASR 时间戳(或本句首 partial 的 monotonic 戳)。
 - **级联新引入回声风险**:独立 ASR 会转写机器人自己 TTS(S2S 时 Omni 内部处理了)→ 播放期间门掉 ASR 输入(`playback_end_estimate` 外才喂帧),播放中超阈值才当主动打断。
+- **阶段1 shadow 真机对拍发现(2026-07-02)**:①ASR(paraformer-realtime-v2)转写比 Omni 自带糙——小艺→"小一"、吧→"来"、碎片"他不/是在" → **热词必上**,值得 A/B `fun-asr-realtime`;②**无门控 → 抓进环境背景音**("没有会议室")→ 阶段2 ASR 输入必须门控(方向门 + engaged 门);③回声这轮**没想象严重**(机器人自己"在呢/好的"没进 🧾),背景音才是主患;④ASR 轮比 S2S **晚 ~4s**(turn_gap 1.2 + 端点 + RTT)→ 切换后是回复地板,**太慢,压 turn_gap / 单句快发**;⑤`memory_mgr.get_name(pid)` 对**无名者返回字面 "未知"**(非 None)→ 阶段2 建 `「name」:` 标签要把 "未知" 当无名(用"访客");⑥**shadow 永远测不出"修复"**——它不驱动 Omni,回复仍旧 S2S 出,shadow 只验证 ASR 输入质量/归属/时机。
 - 关键约束(spike 实测):视频帧必须挂音频后 → 不移除音频、改**静音锚点** + `turn_detection=None` + 转写关(见 Key Learnings)。TTS下行/视觉/工具/记忆/唤醒/ASD/ReID 全不变。
 - 否决:纯文本入完全去音频(视频报 append-image-before-audio,不可行);继续 create_item 注入(压不住历史);按人 close+reopen 会话隔离(丢跨人上下文、复杂,留作最后退路)。
 - 详见 `docs/ASR_CASCADE_REDESIGN.md`,分 4 阶段实现。

@@ -1843,11 +1843,16 @@ def main() -> int:
             greet_sent_at = 0.0
             prev_gate_open = True   # M1.5-a 门控状态(只在切换时打日志)
             last_switch = -1e9      # M1.5-b 上次切换时刻(冷却)
-            # ── ASR 级联 shadow(阶段1):ASR_SHADOW=1 时并行跑独立 ASR,只打日志不驱动 S2S ──
+            # ── ASR 级联(阶段1 shadow / 阶段2 cascade)──
+            #   ASR_SHADOW=1:并行跑 ASR 只打日志(不驱动 S2S,对拍用)。
+            #   CASCADE=1   :ASR 轮驱动 Omni(handle_asr_turn:带标签文本 + 记忆 + create_response);
+            #                 Omni 侧转写/服务端VAD 已在 open_session 关掉,音频送静音锚点。
             _asr_shadow = os.environ.get("ASR_SHADOW") == "1"
+            _cascade = os.environ.get("CASCADE") == "1"
+            _cascade_clear_t = time.monotonic()   # cascade:周期清空静音 buffer 防膨胀
             _asr_stream = None
             _asr_agg = None
-            if _asr_shadow:
+            if _asr_shadow or _cascade:
                 def _asr_resolve_spk(t0):
                     if _asd_engine is not None and _asd_engine.available:
                         sw = _asd_engine.speaker_window(t0)
@@ -1855,6 +1860,17 @@ def main() -> int:
                             return sw[0]
                     return None
                 def _asr_on_turn(t):
+                    if _cascade:                       # 阶段2:ASR 轮驱动 Omni
+                        _c = dialog.callback
+                        if _c is not None and _c.conv is not None:
+                            try:
+                                _c.handle_asr_turn(t.text, t.start_mono)
+                            except Exception as _he:
+                                log(f"⚠ handle_asr_turn 失败:{type(_he).__name__}: {_he}")
+                        else:
+                            log(f"🧾 ASR轮[{t.reason}](未连 Omni,丢弃):{t.text}")
+                        return
+                    # 阶段1 shadow:只打日志对拍
                     pid = _asr_resolve_spk(t.start_mono)
                     name = None
                     if pid is not None and _memory_mgr is not None and not str(pid).startswith("t"):
@@ -1865,12 +1881,13 @@ def main() -> int:
                     who = name or (f"?{str(pid)[-6:]}" if pid else "画外")
                     log(f"🧾 ASR轮[{t.reason}] 归属={who} 句数={t.n_sentences} :: {t.text}")
                 try:
-                    _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk)
+                    _tg = 0.6 if _cascade else 1.2     # cascade 压 turn_gap 降延迟(shadow 学习④:S2S 比 ASR 快 ~4s)
+                    _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
                     _asr_stream = AsrStream(on_sentence=_asr_agg.add)
                     _asr_stream.start()
-                    log("🎙 ASR shadow 已启动(ASR_SHADOW=1;独立 ASR + 轮次聚合,只打日志对拍)")
+                    log(f"🎙 ASR 已启动({'CASCADE 驱动 Omni' if _cascade else 'shadow 对拍'};独立 ASR + 轮次聚合 gap={_tg}s)")
                 except Exception as _e:
-                    log(f"⚠ ASR shadow 启动失败,禁用:{type(_e).__name__}: {_e}")
+                    log(f"⚠ ASR 启动失败,禁用:{type(_e).__name__}: {_e}")
                     _asr_stream = None
                     _asr_agg = None
             try:
@@ -1885,16 +1902,21 @@ def main() -> int:
                     mono = chunk[:, 0]
                     if _asd_engine is not None:
                         _asd_engine.feed_audio(mono)   # ASD 同步音频(谁在说话)
-                    if _asr_stream is not None:        # ASR 级联 shadow:同一路 mono 喂独立 ASR(不受门控,含回声,供阶段2 取证)
-                        try:
-                            _asr_stream.feed(np.clip(mono * 32767.0, -32768, 32767).astype(np.int16).tobytes())
-                        except Exception:
-                            pass
                     # WAKE-01:同一份 16k mono 始终喂 KWS(本地);engaged 才扇出给 Qwen
                     wake = kws_gate.feed(mono, chunk) if kws_gate is not None else False
                     with st.lock:
                         state = st.state
                         woke_pending = st.wake_ok
+                    if _asr_stream is not None:        # ASR 级联:同一路 mono 喂独立 ASR
+                        _feed_asr = True
+                        if _cascade:                   # cascade:engaged + 非播放才喂(治环境音/回声,shadow 学习①③)
+                            with st.lock:
+                                _feed_asr = (state != ST_ARMED) and (time.monotonic() >= st.playback_end_estimate)
+                        if _feed_asr:                  # shadow:恒喂(观测全部,含回声取证)
+                            try:
+                                _asr_stream.feed(np.clip(mono * 32767.0, -32768, 32767).astype(np.int16).tobytes())
+                            except Exception:
+                                pass
                     if state == ST_ARMED:
                         if conv is not None and not woke_pending:
                             dialog.close_session()
@@ -1980,7 +2002,10 @@ def main() -> int:
                             _g_pid = st.current_person_id
                             _g_pname = st.current_person_name
                         if _g_pid and _memory_mgr is not None:
-                            dialog.update_memory(_g_pid, _g_pname)   # 招呼是一次性事件,注入被招呼者记忆
+                            if _cascade:
+                                dialog.inject_context(_g_pid, _g_pname)   # cascade:走 create_item,不 update_session(免破坏级联)
+                            else:
+                                dialog.update_memory(_g_pid, _g_pname)   # 招呼是一次性事件,注入被招呼者记忆
                         _phrase = GREET_PHRASES[greet_i % len(GREET_PHRASES)]
                         greet_i += 1
                         try:
@@ -2013,14 +2038,14 @@ def main() -> int:
                         prev_gate_open = gate_open
                         with st.lock:
                             st.dbg_gate_open = gate_open
-                    if gate_open:
+                    if gate_open and not _cascade:
                         pcm16 = np.clip(mono * 32767.0, -32768, 32767).astype(np.int16)
                     else:
-                        pcm16 = np.zeros(len(mono), dtype=np.int16)   # 范围外:静音占位
+                        pcm16 = np.zeros(len(mono), dtype=np.int16)   # 范围外/级联:静音占位(级联恒送静音锚点,真音频只喂 ASR)
                     _b64_audio = base64.b64encode(pcm16.tobytes()).decode("ascii")
-                    # 音频闸门：身份未确认时缓存音频，不送模型
+                    # 音频闸门：身份未确认时缓存音频，不送模型(级联恒送静音锚点,不走闸门,免视频失锚)
                     with st.lock:
-                        if st.audio_gate_closed:
+                        if st.audio_gate_closed and not _cascade:
                             st.audio_gate_buffer.append(_b64_audio)
                             # 超时兜底
                             if (time.monotonic() - st.audio_gate_closed_at) > AUDIO_GATE_TIMEOUT_S:
@@ -2039,6 +2064,12 @@ def main() -> int:
                             except Exception as _e:
                                 log(f"⚠ 闸门 flush 送音频失败,中止剩余:{type(_e).__name__}")
                                 break
+                    if _cascade and (time.monotonic() - _cascade_clear_t) > 30.0:
+                        try:
+                            conv.clear_appended_audio()   # 周期清 buffer 防膨胀;紧接着 append 静音重锚(先音频后视频,不失锚)
+                        except Exception:
+                            pass
+                        _cascade_clear_t = time.monotonic()
                     try:
                         conv.append_audio(_b64_audio)
                     except Exception as _ae:
