@@ -1887,11 +1887,29 @@ def main() -> int:
                             name = None
                     who = name or (f"?{str(pid)[-6:]}" if pid else "画外")
                     log(f"🧾 ASR轮[{t.reason}] 归属={who} 句数={t.n_sentences} :: {t.text}")
+                _barge_t = [0.0]     # 上次插话打断时刻(去抖)
+                _asr_no_barge = os.environ.get("CASCADE_NO_BARGE") == "1"   # =1 关闭自然打断(回声调不好时兜底)
                 def _asr_on_partial(_txt):
-                    # 级联:用户正在说(ASR 出中间稿)→ 刷新互动时间,防 15s 空闲计时器把正说话的用户误判冷场断连
-                    if _cascade:
-                        with st.lock:
-                            st.last_interaction_at = time.monotonic()
+                    # 级联:用户正在说(ASR 出中间稿)→ ①刷新互动时间防误判冷场断连 ②机器人正说话时=自然打断
+                    if not _cascade:
+                        return
+                    now = time.monotonic()
+                    with st.lock:
+                        st.last_interaction_at = now
+                        _playing = now < st.playback_end_estimate
+                        _active = st.active_resp_id is not None and not st.active_resp_done
+                    # 自然打断:机器人正说话(播放中/在途回复)时用户开口 → 停播+取消(ASR 基本听不到机器人自己,回声≈无)
+                    if (not _asr_no_barge) and (_playing or _active) and (now - _barge_t[0]) > 1.0:
+                        _barge_t[0] = now
+                        _c = dialog.callback
+                        if _c is not None and _c.conv is not None:
+                            try:
+                                _c._do_barge_in(_active)
+                                with st.lock:
+                                    st.active_resp_done = True   # 已取消在途回复 → 标记不忙,后续该轮直接答不走接管
+                                log(f"⛔ [ASR]插话打断(检测到你开口):{_txt[:12]}…")
+                            except Exception as _bge:
+                                log(f"⚠ [ASR]打断失败:{type(_bge).__name__}: {_bge}")
                 try:
                     _tg = 0.7 if _cascade else 1.2     # cascade turn_gap(真延迟大头是 in_flight 泄漏致每轮 cancel,不是聚轮;调回小值降端点延迟)
                     _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
