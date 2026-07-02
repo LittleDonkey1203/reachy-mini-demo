@@ -1887,10 +1887,15 @@ def main() -> int:
                             name = None
                     who = name or (f"?{str(pid)[-6:]}" if pid else "画外")
                     log(f"🧾 ASR轮[{t.reason}] 归属={who} 句数={t.n_sentences} :: {t.text}")
+                def _asr_on_partial(_txt):
+                    # 级联:用户正在说(ASR 出中间稿)→ 刷新互动时间,防 15s 空闲计时器把正说话的用户误判冷场断连
+                    if _cascade:
+                        with st.lock:
+                            st.last_interaction_at = time.monotonic()
                 try:
                     _tg = 0.6 if _cascade else 1.2     # cascade 压 turn_gap 降延迟(shadow 学习④:S2S 比 ASR 快 ~4s)
                     _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
-                    _asr_stream = AsrStream(on_sentence=_asr_agg.add)
+                    _asr_stream = AsrStream(on_sentence=_asr_agg.add, on_partial=(_asr_on_partial if _cascade else None))
                     _asr_stream.start()
                     log(f"🎙 ASR 已启动({'CASCADE 驱动 Omni' if _cascade else 'shadow 对拍'};独立 ASR + 轮次聚合 gap={_tg}s)")
                 except Exception as _e:

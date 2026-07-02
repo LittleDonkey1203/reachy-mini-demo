@@ -573,6 +573,18 @@
       "related_bugs": ["bug-073"],
       "occurrences": 1,
       "last_seen": "2026-07-02T19:27:00.000Z"
+    },
+    {
+      "id": "bug-075",
+      "timestamp": "2026-07-02T19:35:00.000Z",
+      "error_message": "CASCADE=1:用户正说话('你知道我是谁吗')时机器人突然断连回待命,像直接退出;日志 💤 15s 无说话互动 → 回 armed 待命 + 🔌 连接关闭",
+      "file": "voice/realtime.py, voice/d01_realtime_chat.py",
+      "root_cause": "空闲计时器(NO_INTERACT_S 无说话互动→回armed,d01:1336)判据 st.last_interaction_at 在 S2S 靠 Omni 的 input_audio_buffer.speech_started 事件(realtime.py:226)刷新;cascade 关了服务端 VAD → 该事件不再触发 → 用户说话根本不刷新互动时间 → 对话中被误判 15s 冷场,断开 Omni 回待命。",
+      "fix": "①handle_asr_turn 里刷新 st.last_interaction_at=now(每个用户轮重置计时)。②AsrStream 加 on_partial 回调,cascade 下用户一开口(出中间稿)即刷新 last_interaction_at(说话全程保活,不等轮次)。",
+      "tags": ["cascade", "idle-timeout", "last_interaction_at", "disconnect", "speech_started", "阶段2"],
+      "related_bugs": ["bug-073", "bug-074"],
+      "occurrences": 1,
+      "last_seen": "2026-07-02T19:35:00.000Z"
     }
   ]
 }

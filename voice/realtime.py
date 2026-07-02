@@ -629,6 +629,7 @@ class ChatCallback(OmniRealtimeCallback):
             st.turn_speaker_pid = _log_pid if _tspk_real else None
             st.turn_speaker_name = _real_name if _tspk_real else None
             st.turn_speaker_at = now
+            st.last_interaction_at = now   # 级联:用户开口即刷新互动时间,防空闲计时器误判冷场断连(bug-075)
         _label = _real_name or "访客"           # 已命名用名;未命名/画外用"访客"(不空缺、绝不套别人名)
         log(f"📝 [ASR]听到:「{transcript}」→ 🗣 归属:{_label}({_log_pid})")
         # conversation_log(consolidation/兜底抽取)+ dashboard 显示,键 = 归属 pid
