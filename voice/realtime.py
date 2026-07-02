@@ -337,6 +337,8 @@ class ChatCallback(OmniRealtimeCallback):
                 with st.lock:
                     st.in_flight += 1
                     st.resp_created_at = now          # 级联:记回复起始时刻(判"年龄"→接管 or 排队)
+                    st.active_resp_id = event.get("response", {}).get("id")   # 级联忙判据:最新 response 取代前者为 active
+                    st.active_resp_done = False
                     st.drop_audio = False
                     st.resp_audio_count = 0
                     st.fc_seen_this_resp = False
@@ -549,12 +551,15 @@ class ChatCallback(OmniRealtimeCallback):
                 fire_rc = False
                 _fire_pending = False   # 级联:当前回复结束,补发被"排队"的 ASR 轮(智能接管的排队分支)
                 _reinject = None     # A:回复结束、模型空闲 → 补注入(治多人忙时注入被 in_flight 门冻住→身份钉死)
+                _done_id = event.get("response", {}).get("id")
                 with st.lock:
                     st.in_flight = max(0, st.in_flight - 1)
+                    if _done_id is not None and _done_id == st.active_resp_id:
+                        st.active_resp_done = True     # 级联:最新 response 完成 → 空闲(孤儿旧 response 的 done 到不到都无所谓)
                     st.resp_snapshot_pid = None
                     st.resp_snapshot_name = None
                     st.last_interaction_at = now
-                    if (st.in_flight == 0 and st.pending_resp_at > 0
+                    if (st.active_resp_done and st.pending_resp_at > 0
                             and self.dialog is not None and self.dialog.cascade):
                         st.pending_resp_at = 0.0
                         _fire_pending = True
@@ -672,7 +677,9 @@ class ChatCallback(OmniRealtimeCallback):
         #    (不能沿用 S2S 的"in_flight>0 就跳过":会因招呼/首轮双回复卡 in_flight 致后续全被跳过。)
         _TAKEOVER_MIN_AGE = 1.5
         with st.lock:
-            _busy = st.in_flight > 0
+            # 忙判据用 active_resp_id(最新 response 未 done)而非 in_flight 计数器(工具调用致其永久漏+1)
+            _busy = (st.active_resp_id is not None and not st.active_resp_done
+                     and (now - st.resp_created_at) < 20.0)   # 20s 兜底:再久也不认它还在忙(防卡)
             _age = (now - st.resp_created_at) if st.resp_created_at > 0 else 999.0
             _stale_pending = st.pending_resp_at > 0 and (now - st.pending_resp_at) > 3.0
         _fire = False
@@ -685,6 +692,7 @@ class ChatCallback(OmniRealtimeCallback):
                 log(f"⚠ [ASR]cancel_response 失败:{type(e).__name__}: {e}")
             with st.lock:
                 st.in_flight = 0
+                st.active_resp_done = True
                 st.pending_resp_at = 0.0
             log("↩ [ASR]接管:取消在途旧回复,答新一轮")
             _fire = True
@@ -763,6 +771,9 @@ class RealtimeDialog:
             self.conv = c
             with st.lock:
                 st.in_flight = 0
+                st.active_resp_id = None      # 新会话:清"忙"状态(级联忙判据)
+                st.active_resp_done = True
+                st.pending_resp_at = 0.0
                 st.resp_audio_count = 0
                 st.fc_seen_this_resp = False
                 st.drop_audio = False

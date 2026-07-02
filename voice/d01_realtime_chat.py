@@ -1893,7 +1893,7 @@ def main() -> int:
                         with st.lock:
                             st.last_interaction_at = time.monotonic()
                 try:
-                    _tg = 1.5 if _cascade else 1.2     # cascade:turn_gap 1.5s 把连续说话聚成少数完整轮,减少接管/cancel 抖动(见延迟诊断)
+                    _tg = 0.7 if _cascade else 1.2     # cascade turn_gap(真延迟大头是 in_flight 泄漏致每轮 cancel,不是聚轮;调回小值降端点延迟)
                     _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
                     _asr_stream = AsrStream(on_sentence=_asr_agg.add, on_partial=(_asr_on_partial if _cascade else None))
                     _asr_stream.start()

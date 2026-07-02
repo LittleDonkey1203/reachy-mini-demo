@@ -585,6 +585,18 @@
       "related_bugs": ["bug-073", "bug-074"],
       "occurrences": 1,
       "last_seen": "2026-07-02T19:35:00.000Z"
+    },
+    {
+      "id": "bug-076",
+      "timestamp": "2026-07-02T20:10:00.000Z",
+      "error_message": "CASCADE=1 反应慢 ~5s;每轮 create_response→response.created 隔 ~3s(cancel 收尾),turn_gap 调大无效",
+      "file": "voice/realtime.py, voice/state.py",
+      "root_cause": "诊断日志(💭带 in_flight/resp_id)证实:模型每次调动作工具(nod/tilt_head)会产生两个独立 response——A=语音(created 但永无 response.done,孤儿)、B=工具(created+done)。in_flight 计数器每个工具轮漏 +1 → 永久卡 >0 → handle_asr_turn 的忙判据(in_flight>0)每轮为真 → 每轮 cancel_response,而 Omni 取消在途回复要 ~3s → 延迟叠加到 5s。不带工具的轮则干净(in_flight 归 0)。",
+      "fix": "忙判据由 in_flight 计数器改为 active_resp_id 追踪:response.created 记 active_resp_id=id/active_resp_done=False;response.done 若 id==active 则 active_resp_done=True(孤儿 A 被 B 取代为 active,B done 即空闲)。handle_asr_turn 用 active_resp_done 判忙 → 轮间几乎总不忙 → 直接 create_response(无 cancel,~1s)。open_session/接管处重置 active。in_flight 保留供 barge-in/fire_rc,不再用于级联忙判。",
+      "tags": ["cascade", "latency", "in_flight", "leak", "tool-call", "response-lifecycle", "阶段2"],
+      "related_bugs": ["bug-073"],
+      "occurrences": 1,
+      "last_seen": "2026-07-02T20:10:00.000Z"
     }
   ]
 }

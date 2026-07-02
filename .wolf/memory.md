@@ -200,3 +200,4 @@
 | 19:32 | 治CASCADE ASR饿死(bug-074):待命时不喂→NO_VALID_AUDIO断连;改恒喂保活+门控移on_turn+AsrStream自动重连 | voice/asr_stream.py, d01, buglog | 修复待复测 | ~15k |
 | 19:40 | 治CASCADE说话中误断连(bug-075):空闲计时靠speech_started刷新而cascade关了VAD→用户轮/partial刷new last_interaction_at | realtime.py,d01,buglog | 修复待复测;核心机制已跑通(识别/接管/答问/视觉OK) | ~12k |
 | 19:55 | 延迟优化:诊断慢在接管cancel(~3-4s空档);修=turn_gap 0.6→1.5s聚轮 + 智能接管(旧回复<1.5s排队不打断,done后补发;真长/卡死才cancel) | realtime.py,d01,state.py | 延迟优化待复测 | ~18k |
+| 20:16 | 诊断+修延迟根因(bug-076):动作工具产生孤儿语音response(created无done)致in_flight永久漏→每轮cancel(3s);忙判据改active_resp_id追踪 | realtime.py,state.py,buglog | 待复测(应从5s降到~2s) | ~22k |

@@ -218,6 +218,10 @@ class State:
         self.in_flight = 0
         self.resp_created_at = 0.0    # 级联:最近一次 response.created 时刻(判在途回复"年龄",决定接管 or 排队)
         self.pending_resp_at = 0.0    # 级联:有 ASR 轮在排队等当前回复完成(0=无);智能接管避免频繁 cancel
+        # 级联"忙"判据用 resp_id 而非 in_flight 计数器:工具调用会留"有头无尾"的语音 response(created 无 done)
+        # 使 in_flight 永久漏 +1。改追踪"最新 response 是否已完成":后来的 response 取代前者为 active,不受孤儿影响。
+        self.active_resp_id = None    # 最新 response.created 的 id
+        self.active_resp_done = True  # 该 id 是否已 response.done(True=空闲不忙)
         self.playback_end_estimate = 0.0
         self.resp_audio_count = 0
         self.fc_seen_this_resp = False
