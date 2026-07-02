@@ -607,6 +607,8 @@ class ChatCallback(OmniRealtimeCallback):
         if not _atext:
             return
         log(f"💬 小艺:{_atext}")        # 模型回复入 log(网页 log 面板可见)
+        if self.dialog is not None:
+            self.dialog._ctx_add("assistant", _atext)
         with st.lock:
             _log_pid = st.resp_snapshot_pid or st.current_person_id or "_unknown"
             _log_name = st.resp_snapshot_name or st.current_person_name
@@ -681,10 +683,14 @@ class ChatCallback(OmniRealtimeCallback):
         except Exception as e:
             log(f"⚠ [ASR]create_item(user) 失败:{type(e).__name__}: {e}")
             return
+        if self.dialog is not None:
+            self.dialog._ctx_add("user", f"「{_label}」:{transcript}")
         # ② 易变记忆/消歧:复用 inject_context(system item·简洁,不进持久历史)
         if self.dialog is not None and self.memory_mgr is not None:
             _cur_pid = _log_pid if _tspk_real else None
             self.dialog.inject_context(_cur_pid, _real_name)
+        if self.dialog is not None:
+            self.dialog._ctx_dump(f"(本轮说话人={_label} pid={_log_pid})")
         # ③ 手动 create_response。级联智能接管(降延迟):
         #    - 无在途回复 → 直接答;
         #    - 在途回复"刚起"(<TAKEOVER_MIN_AGE)且非卡死 → **排队**:不 cancel(省 3-4s cancel 开销),
@@ -751,6 +757,28 @@ class RealtimeDialog:
         # 默认关 = 原 S2S。见 docs/ASR_CASCADE_REDESIGN.md 阶段2。
         self.cascade = os.environ.get("CASCADE") == "1"
         self._ctx_last_text = None   # 上次注入的上下文文本;内容没变则跳过重发(省 delete+create 两个 WS,降延迟)
+        self._ctx_mirror = []        # 端侧镜像:忠实复刻 Omni 对话(user 带标签轮/assistant 回复/当前 system 条目);CTX_DEBUG=1 打印
+        self._ctx_debug = os.environ.get("CTX_DEBUG") == "1"
+
+    def _ctx_add(self, role, text, iid=None):
+        if not self._ctx_debug:
+            return
+        self._ctx_mirror.append({"id": iid, "role": role, "text": text})
+        if len(self._ctx_mirror) > 80:
+            self._ctx_mirror = self._ctx_mirror[-60:]
+
+    def _ctx_del(self, iid):
+        if self._ctx_debug and iid is not None:
+            self._ctx_mirror = [it for it in self._ctx_mirror if it.get("id") != iid]
+
+    def _ctx_dump(self, tag=""):
+        if not self._ctx_debug:
+            return
+        lines = [f"╔══ 喂给模型的完整上下文 {tag} ══"]
+        for it in self._ctx_mirror:
+            lines.append(f"║ [{it['role']:<9}] {it['text']}")
+        lines.append("╚═══════════════════════════ → create_response")
+        log("\n".join(lines))
 
     def open_session(self, timeout: float = CONNECT_TIMEOUT_S):
         """新建 WS + update_session,timeout 内未就绪 → None。"""
@@ -788,6 +816,7 @@ class RealtimeDialog:
             self.conv = c
             self._ctx_item_id = None      # 新会话:旧上下文条目失效,清掉(下次注入不删旧)
             self._ctx_last_text = None     # 强制新会话首轮重注入(去重基线清空)
+            self._ctx_mirror = []          # 新会话:上下文镜像清空
             with st.lock:
                 st.in_flight = 0
                 st.active_resp_id = None      # 新会话:清"忙"状态(级联忙判据)
@@ -873,6 +902,7 @@ class RealtimeDialog:
             return True
         # 保洁:发新条目前先删上一条(客户端指定 id 便于下次删)
         if self._ctx_item_id:
+            self._ctx_del(self._ctx_item_id)
             try:
                 c.send_raw(json.dumps({"type": "conversation.item.delete",
                                        "item_id": self._ctx_item_id}))
@@ -889,6 +919,7 @@ class RealtimeDialog:
             return False
         self._ctx_item_id = _iid
         self._ctx_last_text = text
+        self._ctx_add("system·当前", text, _iid)
         with st.lock:
             st.identity_injected = True
             st.identity_injected_pid = cur_pid if cur_pid else "_ctx"
