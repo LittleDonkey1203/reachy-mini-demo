@@ -561,6 +561,18 @@
       "related_bugs": ["bug-067"],
       "occurrences": 1,
       "last_seen": "2026-07-02T19:15:00.000Z"
+    },
+    {
+      "id": "bug-074",
+      "timestamp": "2026-07-02T19:27:00.000Z",
+      "error_message": "CASCADE=1:唤醒后 ASR 一句都识别不到;日志 ⚠ ASR 错误 NO_VALID_AUDIO_ERROR + 🎙 ASR 连接已关(早于唤醒 17s)",
+      "file": "voice/d01_realtime_chat.py, voice/asr_stream.py",
+      "root_cause": "ASR 在启动时(state=ARMED 待命)就连上,但 cascade 的喂帧门是 'engaged+非播放才喂' → 连上后 23s 没喂任何音频 → paraformer NO_VALID_AUDIO_ERROR 超时断连,且无重连 → 用户唤醒说话时 ASR 早已死。喂帧门加错层了。",
+      "fix": "①喂帧改恒喂(保活,不因待命静默饿死);engaged+非播放门控移到 on_turn(只在 engaged 且非播放时才驱动 handle_asr_turn,滤 idle 环境音/回声)。②AsrStream 加自动重连:on_close/on_error 置 _alive=False,feed() 检测到死连接则节流(3s)重建 Recognition;主动 stop() 置 _stopping 不触发重连。",
+      "tags": ["cascade", "asr", "NO_VALID_AUDIO", "starvation", "reconnect", "阶段2"],
+      "related_bugs": ["bug-073"],
+      "occurrences": 1,
+      "last_seen": "2026-07-02T19:27:00.000Z"
     }
   ]
 }

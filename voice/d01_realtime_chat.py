@@ -1860,15 +1860,22 @@ def main() -> int:
                             return sw[0]
                     return None
                 def _asr_on_turn(t):
-                    if _cascade:                       # 阶段2:ASR 轮驱动 Omni
+                    if _cascade:                       # 阶段2:ASR 轮驱动 Omni(门控在此:仅 engaged + 非播放才驱动,
+                                                       # 滤 idle 环境音/回声;ASR 保活靠恒喂,不靠喂帧门)
                         _c = dialog.callback
+                        with st.lock:
+                            _eng = st.state != ST_ARMED
+                            _playing = time.monotonic() < st.playback_end_estimate
+                        if not _eng or _playing:
+                            log(f"🧾 ASR轮(忽略·{'idle' if not _eng else '播放中'}):{t.text}")
+                            return
                         if _c is not None and _c.conv is not None:
                             try:
                                 _c.handle_asr_turn(t.text, t.start_mono)
                             except Exception as _he:
                                 log(f"⚠ handle_asr_turn 失败:{type(_he).__name__}: {_he}")
                         else:
-                            log(f"🧾 ASR轮[{t.reason}](未连 Omni,丢弃):{t.text}")
+                            log(f"🧾 ASR轮(未连 Omni,丢弃):{t.text}")
                         return
                     # 阶段1 shadow:只打日志对拍
                     pid = _asr_resolve_spk(t.start_mono)
@@ -1907,16 +1914,12 @@ def main() -> int:
                     with st.lock:
                         state = st.state
                         woke_pending = st.wake_ok
-                    if _asr_stream is not None:        # ASR 级联:同一路 mono 喂独立 ASR
-                        _feed_asr = True
-                        if _cascade:                   # cascade:engaged + 非播放才喂(治环境音/回声,shadow 学习①③)
-                            with st.lock:
-                                _feed_asr = (state != ST_ARMED) and (time.monotonic() >= st.playback_end_estimate)
-                        if _feed_asr:                  # shadow:恒喂(观测全部,含回声取证)
-                            try:
-                                _asr_stream.feed(np.clip(mono * 32767.0, -32768, 32767).astype(np.int16).tobytes())
-                            except Exception:
-                                pass
+                    if _asr_stream is not None:        # ASR 级联:同一路 mono **恒喂**(保活——ASR 连上后长时间无音频会
+                                                       # NO_VALID_AUDIO_ERROR 断连;engaged/播放门控移到 on_turn,不在喂帧处)
+                        try:
+                            _asr_stream.feed(np.clip(mono * 32767.0, -32768, 32767).astype(np.int16).tobytes())
+                        except Exception:
+                            pass
                     if state == ST_ARMED:
                         if conv is not None and not woke_pending:
                             dialog.close_session()

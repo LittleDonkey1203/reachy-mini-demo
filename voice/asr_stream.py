@@ -72,10 +72,11 @@ class AsrStream:
         self._cb = self._Cb(self)
         self._cur_start_mono: float | None = None   # 当前句起点(首 partial 时记)
         self._started = False
+        self._alive = False        # 连接是否活着(on_close/on_error 置 False → feed 时节流重连)
+        self._stopping = False     # 主动 stop 中(区别于错误断连,不触发重连)
+        self._last_restart = 0.0
 
-    def start(self):
-        if self._started:
-            return
+    def _open(self):
         if self.set_ws_url:
             dashscope.base_websocket_api_url = _ASR_WS_URL
         self._rec = Recognition(
@@ -90,14 +91,37 @@ class AsrStream:
             self._rec.start(phrase_id=self.phrase_id)
         else:
             self._rec.start()
+        self._alive = True
+
+    def start(self):
+        if self._started:
+            return
+        self._open()
         self._started = True
 
     def feed(self, pcm16_bytes: bytes):
-        """送一帧裸 PCM16(即 d01 里 base64 前那份 `pcm16.tobytes()`)。"""
-        if self._rec is not None and self._started:
+        """送一帧裸 PCM16(即 d01 里 base64 前那份 `pcm16.tobytes()`)。连接死了则节流重连。"""
+        if not self._started or self._stopping:
+            return
+        if not self._alive:
+            now = time.monotonic()
+            if now - self._last_restart > 3.0:   # 节流:最多 3s 重连一次
+                self._last_restart = now
+                try:
+                    self._open()
+                    log("🎙 ASR 自动重连")
+                except Exception as e:
+                    log(f"⚠ ASR 重连失败:{type(e).__name__}: {e}")
+            if not self._alive:
+                return
+        try:
             self._rec.send_audio_frame(pcm16_bytes)
+        except Exception:
+            self._alive = False   # 发帧异常 → 标记断连,下次 feed 触发重连
 
     def stop(self):
+        self._stopping = True
+        self._alive = False
         if self._rec is not None and self._started:
             try:
                 self._rec.stop()
@@ -117,12 +141,14 @@ class AsrStream:
             log("🎙 ASR 连接已开")
 
         def on_close(self):
-            log("🎙 ASR 连接已关")
+            self.o._alive = False
+            log("🎙 ASR 连接已关" + ("" if self.o._stopping else "(非主动→将自动重连)"))
 
         def on_complete(self):
             log("🎙 ASR 识别完成")
 
         def on_error(self, message):
+            self.o._alive = False
             log(f"⚠ ASR 错误 req={getattr(message, 'request_id', '?')}: "
                 f"{getattr(message, 'message', message)}")
 

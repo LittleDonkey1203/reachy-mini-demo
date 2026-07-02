@@ -197,3 +197,4 @@
 | 16:50 | 阶段1:d01 mic循环 shadow 接线(ASR_SHADOW=1 门控,默认关);ASR并行只打日志🧾对拍,S2S零影响 | voice/d01_realtime_chat.py, PROJECT_STATE.md | 阶段1接线完成 | ~15k |
 | 19:06 | 阶段2:CASCADE=1 切换驱动(handle_asr_turn 带标签item+inject+create_response;静音锚点替真音频;response.done/招呼加cascade护栏防update_session破坏级联;周期clear;feed回声门) | voice/realtime.py, voice/d01_realtime_chat.py, PROJECT_STATE.md | 阶段2完成待真机 | ~40k |
 | 19:19 | 真机跑CASCADE=1:定位in_flight卡死(招呼/首轮抢跑双回复只回一个done)致机器人只招呼不答问;修为接管(cancel+清in_flight+create)bug-073 | voice/realtime.py, buglog.json | bug修复待复测 | ~20k |
+| 19:32 | 治CASCADE ASR饿死(bug-074):待命时不喂→NO_VALID_AUDIO断连;改恒喂保活+门控移on_turn+AsrStream自动重连 | voice/asr_stream.py, d01, buglog | 修复待复测 | ~15k |
