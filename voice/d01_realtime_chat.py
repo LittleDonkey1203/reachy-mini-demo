@@ -188,6 +188,7 @@ from voice.actions import (
 from voice.audio import doa_sensor_loop, _fresh_sound, player_loop
 from voice.realtime import RealtimeDialog
 from voice.kws import KwsGate
+from voice.asr_stream import AsrStream, TurnAggregator   # ASR 级联 shadow(env ASR_SHADOW=1,阶段1 只打日志)
 from memory.safety import inject_clear_msg
 from perception.fusion import select_face_by_doa
 
@@ -1842,6 +1843,36 @@ def main() -> int:
             greet_sent_at = 0.0
             prev_gate_open = True   # M1.5-a 门控状态(只在切换时打日志)
             last_switch = -1e9      # M1.5-b 上次切换时刻(冷却)
+            # ── ASR 级联 shadow(阶段1):ASR_SHADOW=1 时并行跑独立 ASR,只打日志不驱动 S2S ──
+            _asr_shadow = os.environ.get("ASR_SHADOW") == "1"
+            _asr_stream = None
+            _asr_agg = None
+            if _asr_shadow:
+                def _asr_resolve_spk(t0):
+                    if _asd_engine is not None and _asd_engine.available:
+                        sw = _asd_engine.speaker_window(t0)
+                        if sw is not None:
+                            return sw[0]
+                    return None
+                def _asr_on_turn(t):
+                    pid = _asr_resolve_spk(t.start_mono)
+                    name = None
+                    if pid is not None and _memory_mgr is not None and not str(pid).startswith("t"):
+                        try:
+                            name = _memory_mgr.get_name(pid)
+                        except Exception:
+                            name = None
+                    who = name or (f"?{str(pid)[-6:]}" if pid else "画外")
+                    log(f"🧾 ASR轮[{t.reason}] 归属={who} 句数={t.n_sentences} :: {t.text}")
+                try:
+                    _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk)
+                    _asr_stream = AsrStream(on_sentence=_asr_agg.add)
+                    _asr_stream.start()
+                    log("🎙 ASR shadow 已启动(ASR_SHADOW=1;独立 ASR + 轮次聚合,只打日志对拍)")
+                except Exception as _e:
+                    log(f"⚠ ASR shadow 启动失败,禁用:{type(_e).__name__}: {_e}")
+                    _asr_stream = None
+                    _asr_agg = None
             try:
                 while True:
                     if run_seconds is not None and time.monotonic() - t_run0 >= run_seconds:
@@ -1854,6 +1885,11 @@ def main() -> int:
                     mono = chunk[:, 0]
                     if _asd_engine is not None:
                         _asd_engine.feed_audio(mono)   # ASD 同步音频(谁在说话)
+                    if _asr_stream is not None:        # ASR 级联 shadow:同一路 mono 喂独立 ASR(不受门控,含回声,供阶段2 取证)
+                        try:
+                            _asr_stream.feed(np.clip(mono * 32767.0, -32768, 32767).astype(np.int16).tobytes())
+                        except Exception:
+                            pass
                     # WAKE-01:同一份 16k mono 始终喂 KWS(本地);engaged 才扇出给 Qwen
                     wake = kws_gate.feed(mono, chunk) if kws_gate is not None else False
                     with st.lock:
@@ -2090,6 +2126,16 @@ def main() -> int:
                         log(f"💾 gallery 已持久化({len(_face_pipeline.store.identities)} 身份)")
                     except Exception as _e:
                         log(f"⚠ gallery 落盘失败:{type(_e).__name__}")
+                if _asr_stream is not None:
+                    try:
+                        _asr_stream.stop()
+                    except Exception:
+                        pass
+                if _asr_agg is not None:
+                    try:
+                        _asr_agg.close()
+                    except Exception:
+                        pass
                 if _asd_engine is not None:
                     _asd_engine.stop()
         finally:

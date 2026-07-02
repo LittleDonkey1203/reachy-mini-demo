@@ -173,8 +173,9 @@ memory/
 
 ## 下一步建议
 
-1. **ASR 级联重构阶段 0**:抽 `OmniTextDriver`(封装 create_item/create_response/静音锚点/视频),不改现有 S2S 行为,先真机验证静音锚点在连续视频帧下稳定。详见 `docs/ASR_CASCADE_REDESIGN.md` §6。
-2. **阶段 1**:接 Paraformer 流式 ASR(独立线程,与 ASD 同一路 mono),打通 sentence_end + 时间戳 + 轮次聚合,先只打日志不驱动。
-3. **阶段 2**:切换驱动——停送真实音频改静音锚点、`turn_detection=None`/转写关,由轮次聚合触发带标签 create_item + 带记忆 create_response。**阶段 3**:barge-in(ASR partial 起始)+热词表+buffer clear 节流+参数调优。
+- ✅ **阶段 0 完成**:`voice/omni_text_driver.py` 骨架 + 连续帧静音锚点真机验证(3 轮切图全命中最新帧/clear 无缝/0 报错)。
+- ✅ **阶段 1 完成**:`voice/asr_stream.py`(AsrStream + TurnAggregator)+ TTS 端到端 smoke 通过;已在 d01 mic 循环 **shadow 接线**(env `ASR_SHADOW=1`,默认关,只打日志 `🧾 ASR轮[...]` 对拍)。**待真机跑多人语音验证** ASR 断句/热词/ASD 归属对齐。
+1. **阶段 2**(下一步):切换驱动——停送真实音频改静音锚点、`turn_detection=None`/转写关,由轮次聚合触发带标签 create_item + 带记忆 create_response(用 `OmniTextDriver.speak_turn`)。
+2. **阶段 3**:barge-in(ASR partial 起始)+回声门(播放期不喂 ASR)+热词表(`VocabularyService` 灌在场人名)+buffer clear 节流+参数调优。
 4. 旁支待办(重构后再理):PR#10 摘 `47b1372`(embedding 交叉检查);group-framing/naming 真机验;FEATURE_INVENTORY 补账。
 5. 检查点提交已落 `c289c87`(create_item+turn-taking 那批);ASR 级联为全新架构,基于此检查点开分支推进。
