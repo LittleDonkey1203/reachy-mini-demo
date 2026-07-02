@@ -165,13 +165,15 @@ memory/
 
 ## 遗留问题
 
-1. **YuNet 无 blendshapes**: smile/frown 恒 0.0, 可用 insightface 2D106 估算
+0. **【最高优先】多人长时聊天上下文注入 bug**: 真机验证根因 = ①ASD 归属跟不上视觉(人在画面 present=1 却 tsp=None/画外)②bug-070 A done-空闲补注入把真身份翻成中性"看不见你"③保留会话→历史污染,注入对了也被历史带跑。**换注入通道治不了"来不及知道注谁"**。方案定稿见 `docs/CONTEXT_INJECTION_REDESIGN.md`:READ=注入在场名单(roster)让多模态模型自己归属;WRITE+转头=事后 ASD;system prompt 冻结,易变身份走 create_item(通道B)/create_response(通道C)。分 4 阶段落地(阶段0 三处止血已设计待改)。埋点已加(⏭跳过/💭tsp≠inj/🔁补注入/🧠含present)。
+1. **YuNet 无 blendshapes**: smile/frown 恒 0.0, 可用 insightface 2D106 估算(注:已迁 SCRFD,此条基本过时)
 2. **多人同框介绍**: 指着他人说"这是XX" → 关联名字(方案见 docs/MULTI_PERSON_INTRO_PLAN.md)
 3. **end_session 乱码**: 模型偶尔把 function_call_output 当文字朗读
 4. **Semantic Memory**: 需 Consolidation Engine 从多条 episode 回放抽象知识(未来)
 
 ## 下一步建议
 
-1. 真机测试验证认知记忆架构
-2. 继续 todo.md 未完成项(#1 DOA / #7 身份优化 / #9 对话质量 / #20 take_snapshot 时延)
-3. Semantic Memory 层 — 从 episodes 抽象知识 + GraphDB
+1. **注入重构阶段 0(止血)**:`realtime.py` 三处小改(bug-070 A neu 护栏 + 中性门控 present>0 + 中性文案拆分),复现验证后再往阶段 1 推。详见 `docs/CONTEXT_INJECTION_REDESIGN.md` §6。
+2. **注入重构阶段 1**:落 roster 状态(perception/fusion 收敛在场名单),只读打日志和 ASD 并行对拍。
+3. 待办:PR#10 摘 `47b1372`(embedding 交叉检查,防误写)+ prompt 精简;flush-on-write(硬杀丢当轮记忆);group-framing/glance 真机验;PROJECT_STATE/FEATURE_INVENTORY 补账。
+4. 未提交批次(bug-069v2/070/glance/group-framing/启动脚本/埋点)——注入重构阶段0改完一起理清再提交。

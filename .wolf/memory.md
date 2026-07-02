@@ -175,3 +175,19 @@
 | 18:08 | 真机测第一步:plus+唤醒,5min 干净跑,零报错/无 bug-067/5处新catch未触发;确认命名漏fact(已记住:叫毕夏)+ RMS 多在0.003-0.06 | d01/realtime | 第一步通过;关机catch因硬杀未验 | ~5k |
 | 18:20 | Step2 命名漏fact:名字只走守卫不存fact(_name_only_fact正则+handler重构+schema改),16用例单测过 | realtime/manager/buglog | py_compile OK,待真机复测 | ~7k |
 | 18:26 | Step2 真机复测通过:改名毕夏→吴继豪无 叫X 漏存(facts=[喜欢吃火锅],守卫两次防脑补);抓到无关 bug-069 视频先于音频 | realtime/manager/buglog | Step2 验证OK,待commit | ~6k |
+| 18:30 | bug-069 修复:append_video 以 conv 对象身份守门(本会话送过audio才发),治 image-before-audio | d01 | py_compile OK,待真机 | ~4k |
+| 18:45 | 砍掉 DOA 声音转头(glance #2):删触发/FSM/_glance_*/F1盖戳,留#1唤醒转向+#3视觉跟随;治"周边噪声引发转头" | d01/cerebrum | py_compile OK,无残留引用,待真机 | ~8k |
+| 19:10 | 多脸 keep-in-frame:空闲兜全场(尺寸闸 h≥0.12 + 跨度≤0.7 居中,夹住主角不出框,兜不住锚主角) | config/d01 | py_compile OK,待真机调参 | ~6k |
+| 19:30 | bug-070 多人注入冻死(in_flight门跳过→身份钉死):A response.done补注入 + B present_count>1多人叮嘱 | realtime/d01/state/buglog | py_compile OK,待真机 | ~7k |
+| 20:50 | bug-069 v2:update_session 后抑制视频1.2s(治重注入重置服务端缓冲→image-before-audio);v1 conv守门治不了 | realtime/d01/state | py_compile OK,待真机 | ~4k |
+| 14:50 | daemon_logs=服务端 only,d01 前台stdout未落盘;给 start_xiaoyi.ps1 加 Tee-Object -> tools/d01_logs/ | start_xiaoyi.ps1 | 补日志洞 | ~1k |
+| 15:32 | 按 start_mac.sh 重写 start_xiaoyi.ps1:stop子命令+log/main.log(每次清)+端口清理+--face-mp+VIS自动开Dashboard;d01 仍前台(保 finally flush),daemon 仍走 daemon_up | start_xiaoyi.ps1 | parse OK,待跑 | ~4k |
+| 16:14 | 注入bug P0-1 埋点:realtime.py 4处(⏭跳过busy/🧠含who+present/🔁done补注入/💭tsp≠inj告警)照多人注入冻结链 | voice/realtime.py | py_compile OK,待复现 | ~3k |
+| 17:04 | 上下文注入重构方案定稿:partner=在场名单(非单人),READ=roster让模型归属/WRITE+转头=事后ASD,注入走通道B/C不改systemprompt,分4阶段 | docs/CONTEXT_INJECTION_REDESIGN.md, PROJECT_STATE.md | 方案文档建成 | ~6k |
+| 17:25 | 阶段0止血:present>0绝不翻中性(a)response.done neu门+ (b)transcription未归属有人保留身份🙈;文档补账本+delete时机;bug-071 | voice/realtime.py, docs/CONTEXT_INJECTION_REDESIGN.md, buglog | py_compile OK,待复测 | ~7k |
+| 17:38 | 相机无帧根因=多daemon抢相机(gst -5),taskkill /IM杀不到python托管daemon→僵尸累积;daemon_up.kill_existing 补PowerShell按命令行清扫;当场手动清释放相机 | tools/daemon_up.py, buglog | py_compile OK,待重启验 | ~4k |
+| 19:51 | 相机无帧根因=Reachy相机USB出流挂了(枚举/列格式OK但MF+DShow都取不到帧);硬杀daemon/断机器人电不复位(USB总线供电),拔USB冷复位+直连USB3才好。诊断法:ffmpeg -f dshow -i video="Reachy Mini Camera" 抓帧 + cv2 MSMF idx frame=YES/no | (硬件) | 已恢复,cv2 MSMF 1080p出帧 | ~2k |
+| 20:46 | #1日志歧义(pid[:8]同秒撞车)→_idtag(名/尾6位);#2易变注入从 update_session 挪到 create_item(inject_context:roster+带标签近史+规则,发新删旧,失败回退);st.roster vision每帧写 | realtime.py d01 state.py docs | py_compile OK,待真机(重点看📌成功还是create_item失败回退) | ~12k |
+| 21:06 | ASD归属掉画外根因=积分(EMA0.5)把短句拖到阈值下→speaker_window None→画外;修:候选门=EMA翻正 OR 本窗原始分>attr_raw_thresh(0.3,防噪声误闯)+按原始分排序;离场清_last_pos_sc。+命名兜底(画外但有焦点人→名字落焦点人) | perception/asd.py voice/realtime.py | py_compile OK,待真机 | ~6k |
+| 21:19 | 两人测大大被贴到两张脸(unknown2也归大大):命名兜底焦点≠说话人+多轮echo→漏名。修:①兜底只present==1(单人无歧义)②防漏名闸=名字被在场另一身份占用即拒(重名走dashboard) | voice/realtime.py | py_compile OK,待真机 | ~3k |
+| 21:35 | 针对2怀疑:①时序—收回turn-taking(turn_detection create_response:false×3处+转写门注入后手动create_response,in_flight守卫)保注入一定被本轮参考;②内容—inject_context简化成"当前说话人是谁"(去整段历史噪声) | voice/realtime.py | py_compile OK,待真机 | ~7k |

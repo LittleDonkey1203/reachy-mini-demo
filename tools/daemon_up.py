@@ -55,16 +55,33 @@ def rest_alive(timeout: float = 3.0) -> bool:
 
 
 def kill_existing() -> bool:
-    """杀掉所有 reachy daemon 进程;返回是否真的杀了。"""
+    """杀掉所有 reachy daemon 进程;返回是否真的杀了。
+
+    坑:daemon 常由 python 托管启动(镜像名=python.exe,不是 reachy-mini-daemon.exe),
+    `taskkill /IM reachy-mini-daemon.exe` 杀不到 → 僵尸 daemon 累积、多实例抢相机
+    (media_server: gst 'Internal data stream error -5' → 无帧)。故再按命令行清扫一遍。
+    """
     r = subprocess.run(
         ["taskkill", "/F", "/IM", "reachy-mini-daemon.exe"],
         capture_output=True, text=True,
     )
     killed = r.returncode == 0
-    if killed:
-        log(f"已强杀旧实例,等 {KILL_SETTLE_S:.0f}s 让 WASAPI/COM3 释放…")
+    # 按命令行清扫 python 托管的 daemon(排除 powershell 启动窗口与本进程,避免误伤)
+    ps_cmd = (
+        "Get-CimInstance Win32_Process | Where-Object { "
+        "$_.CommandLine -and $_.CommandLine -match 'reachy-mini-daemon' "
+        "-and $_.Name -ne 'powershell.exe' -and $_.ProcessId -ne $PID "
+        "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; 'killed ' + $_.ProcessId }"
+    )
+    r2 = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", ps_cmd],
+        capture_output=True, text=True,
+    )
+    swept = bool((r2.stdout or "").strip())
+    if killed or swept:
+        log(f"已强杀旧实例,等 {KILL_SETTLE_S:.0f}s 让 WASAPI/COM3/相机 释放…")
         time.sleep(KILL_SETTLE_S)
-    return killed
+    return killed or swept
 
 
 def start_once() -> tuple[str, str]:

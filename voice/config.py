@@ -99,6 +99,12 @@ GLANCE_COOLDOWN_S = 3.0     # 超时后冷却,避免对着错方向反复转
 GLANCE_SPEECH_GRACE_S = 1.5 # 转头触发必须"最近有人真说话"在此窗口内;否则纯环境音/DOA幻觉不转(治无声左漂)
 GLANCE_MIN_TURN_DEG = 50.0  # F4:DOA 角度不可信(只信符号)→ 朝符号方向至少转这么多,把宽角度的人转进视野(治"转向不够");上限仍是 GLANCE_MAX_DEG
 GLANCE_LOCAL_RMS = 0.006    # F1:本地麦克风(门控前)响度超此值即算"有人在说话",喂给瞟头触发,绕开方向门控对>55°声音的静音死锁。麦增益低可调小(正常说话约0.003)
+# 注:DOA 声音转头(glance #2)已于 2026-06-30 移除(易被环境噪声误触发);上面 GLANCE_*/DOA_GLANCE_DEG 现为 dead,保留不删免动 import。
+# ── 多脸取景(group framing):空闲(无人明确说话)时把"够大+稳定"的脸尽量都框进画面,夹住保证主角不出框 ──
+GROUP_FRAMING_ENABLED = True
+GROUP_MIN_H = 0.12          # 合格脸最小归一化高度(滤远/小/半脸,免被边缘脸带偏);真机调
+GROUP_EDGE_MARGIN = 0.15    # 画面左右安全边距(每边):合格脸尽量保持在 [0.15, 0.85]
+GROUP_FIT_SPAN = 1.0 - 2 * GROUP_EDGE_MARGIN   # =0.70 可容纳的最大左右跨度;超了=兜不住→锚主角(远端靠喊「小艺」)
 FPS_FREEZE_BELOW = 8.0      # 检测 fps(EMA)低于此值→冻结身体跟随/瞟头,断"相机甩→churn→fps更低"死循环
 ASD_MAX_TRACKS = 3          # ASD 每帧最多喂最大的 N 个 track(churn 出一堆 ghost 时逐个裁剪+打分会拖垮 CPU/GPU→fps崩)
 TRACK_YAW_LIMIT = 25.0

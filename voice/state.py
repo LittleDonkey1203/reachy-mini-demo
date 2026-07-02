@@ -262,6 +262,9 @@ class State:
         self.register_request = None   # UI 注册请求 {track_id, name},vision_loop 消费(绕过"谁在说话")
         self.register_result = ""      # UI 注册结果回显
         self.asd_speaker = None        # 画面内 ASD 说话人 {pid,name,track_id,score,at}|None(画外);供 user query 归属
+        self.present_count = 0         # 画面内不同身份数(vision 每帧写 len(_key2view));B:多人在场时注入加"别乱报名字"叮嘱
+        self.roster: list = []         # 在场身份名单 [(pid, name)](vision 每帧写);create_item 注入 roster + 带标签近史用
+        self.video_suppress_until = 0.0  # bug-069:update_session 后抑制视频发送到此刻(让新音频先到,防 image-before-audio)
         self.dbg_gate_open = True
         self.dbg_switching = False
         self.dbg_switch_phase = ""

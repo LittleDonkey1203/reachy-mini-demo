@@ -504,12 +504,51 @@
       "error_message": "服务端错误事件 invalid_request_error: 'Error append image before append audio.'(真机日志 18:22:16,唤醒后不久)",
       "file": "voice/d01_realtime_chat.py",
       "root_cause": "视频流送顺序竞态:append_video(d01:~2076)按固定每 1s 定时发一帧;但同会话的音频上送(append_audio,d01:~2049)受音频闸门控制——身份未确认/方向门控时音频被缓存(audio_gate)不上送服务端。于是出现:本会话服务端还没收到任何 audio,视频定时器却照发 → 图像先于音频到达 → 服务端拒(append image before append audio)。上次加实时视频流(commit 63c5f8e)引入,与命名/记忆无关。",
-      "fix": "未修(待审)。候选:append_video 增加门槛——本会话至少已成功 append_audio 一次(置 session 级标志,如 _audio_sent_this_session)才允许送视频;新会话/重连时清标志。或:闸门缓存期间也暂停视频发送。",
-      "fix_pending": "待与用户确认后实现 + 真机验证(唤醒后看 18:22 那类 ❌ 是否消失)。",
-      "tags": ["realtime", "video-stream", "append-video", "append-audio", "audio-gate", "ordering"],
+      "fix": "v1(不够):用 conv 对象身份守门——_audio_conv=conv(append_audio 后置),video 门 `conv is _audio_conv`。治了'新会话首帧'但治不了 update_session。v2(真机 run5 复现 4 次后):根因升级——update_session(重注入)会重置服务端'先音频后图像'状态,而 conv 对象没变→门照放→注入后 1s 内 video 又先于 audio;bug-070 的 A(每轮补注入)让 update_session 更频繁、放大触发。修法=时间抑制窗:update_memory/update_memory_neutral 里 update_session 成功后置 st.video_suppress_until=now+1.2s;d01 video 门加 `and now>=st.video_suppress_until`。注入后抑制 1.2s>视频间隔1s,期间音频每帧照送→恢复发图时服务端必已有新音频。比标志位稳(标志位每轮 append_audio 会置回=TOCTOU)。新增 state.video_suppress_until。",
+      "fix_pending": "真机复测:多人对话(频繁补注入)下不再出现 ❌ 'append image before append audio';视频流(📹)照常。残留极小 TOCTOU(gate 与 append_video 之间微秒级)可忽略。",
+      "tags": ["realtime", "video-stream", "append-video", "append-audio", "update-session", "ordering", "race"],
+      "related_bugs": ["bug-070"],
+      "occurrences": 2,
+      "last_seen": "2026-06-30T20:43:00.000Z"
+    },
+    {
+      "id": "bug-070",
+      "timestamp": "2026-06-30T19:20:00.000Z",
+      "error_message": "多人对话中,一个未命名(Unknown)的人问'我是谁/你认识我吗',小艺答'你是吴继豪'(把别人的身份安到他头上)。",
+      "file": "voice/realtime.py + voice/d01_realtime_chat.py + voice/state.py",
+      "root_cause": "身份注入被 in_flight 门冻住:每轮按本句说话人重注入(realtime transcription.completed),但有 `not _busy`(in_flight==0)门防 update_session 回复中竞态。多人连续对话模型几乎一直在回话(in_flight>0)→ 说话人从吴继豪切到 Unknown-1 时重注入每次被跳过 → session instructions 从唤醒那刻起钉死'你面前的人叫吴继豪'(全场仅注入1次,日志可证)→ 谁问'我是谁'都按这唯一上下文答吴继豪。非本次改动引入(注入逻辑未动),多脸取景让多人同框更常见而暴露。",
+      "fix": "A 延迟补注入:response.done 里 in_flight 归零时,若 identity_injected_pid≠最近 turn_speaker → 立刻补注入(idle 安全,不碰'回复中不 update_session'底线),不再永久冻住、一轮自愈。B 多人叮嘱:update_memory 里若 st.present_count>1(vision 每帧写 len(_key2view))且有名字,追加'画面里可能不止一个人,不确定是不是X在说话就别喊名字'→ 即使补注入滞后一轮也不自信张冠李戴。新增 state.present_count。",
+      "fix_pending": "真机复测:多人轮流问'我是谁'各得对的答案/或'还不知道你名字';重叠抢话最多滞后一轮不再持续答错。",
+      "tags": ["memory", "injection", "identity", "multi-person", "update-session", "in-flight", "race"],
+      "related_bugs": ["bug-058", "bug-060", "bug-061"],
+      "occurrences": 1,
+      "last_seen": "2026-06-30T19:20:00.000Z"
+    },
+    {
+      "id": "bug-071",
+      "timestamp": "2026-07-01T16:40:00.000Z",
+      "error_message": "多人长聊后,人整个在画面里、dashboard 稳定标着'大大',模型却反复答'哎呀我看不太清你的脸,不太确定你是谁呢'(实际看得到)。",
+      "file": "voice/realtime.py",
+      "root_cause": "三层:①ASD 归属跟不上视觉——唤醒/短句 ASD 没给该 track 打分→turn_speaker=None/归属画外,尽管 present=1 已识别;②bug-070 A 的 done-空闲补注入一看 tsp=None 就把刚注入的真身份翻成中性'看不见你'(present>0 时也翻);③保留会话→历史污染:一旦说出'看不见你',update_session 换不掉已说出口的历史,后面即使正确注入(tsp==inj==大大,埋点证)也顺着历史继续说。埋点(💭tsp/inj、🔁补注入、🙈)首轮即定位。",
+      "fix": "阶段0 止血(见 docs/CONTEXT_INJECTION_REDESIGN.md):present_count>0 时绝不注入/翻中性'看不见'。(a) response.done 补注入 neu 分支加 st.present_count==0 门;(b) transcription 归属门:not _tspk_real 且 present>0 → 不翻中性、保留上次真身份(日志 🙈),仅 present==0 才走 update_memory_neutral。两个 neutral 调用点都已 present==0 门控。根治留后续阶段(roster 注入+事后 ASD)。",
+      "fix_pending": "真机复测同场景:🔁补注入 neu 消失、不再冒'看不见你';出现 🙈 表示 present>0 未归属被兜住。",
+      "tags": ["memory", "injection", "identity", "asd", "vision", "neutral", "history-pollution", "multi-person"],
+      "related_bugs": ["bug-070", "bug-060", "bug-061"],
+      "occurrences": 1,
+      "last_seen": "2026-07-01T16:40:00.000Z"
+    },
+    {
+      "id": "bug-072",
+      "timestamp": "2026-07-01T17:35:00.000Z",
+      "error_message": "Dashboard 'waiting for a frame' / d01 '摄像头:⚠ Ns 无帧';daemon 日志 media_server ERROR gst-stream-error 'Internal data stream error (-5)' /GstMFVideoSrc:mfvideosrc1 streaming stopped。-Restart 也没救活。",
+      "file": "tools/daemon_up.py",
+      "root_cause": "同时跑着多个 reachy daemon 实例(实测 3 个)抢同一相机,Windows MediaFoundation 独占→后来的 mfvideosrc 拿不到相机报 -5、无帧。累积原因:daemon 常由 python 托管启动(镜像名=python.exe),kill_existing 只 `taskkill /IM reachy-mini-daemon.exe` 杀不到 python 托管的那些→每次 -Restart 只杀掉 .exe 名的、又新起一个→僵尸 daemon 越堆越多。",
+      "fix": "kill_existing 补一条 PowerShell 按命令行清扫:`Get-CimInstance Win32_Process | Where CommandLine -match 'reachy-mini-daemon' -and Name≠powershell -and PID≠$PID | Stop-Process -Force`,杀掉 python 托管的 daemon(排除 powershell 启动窗口与自身)。当场先手动同款清扫释放相机。若单实例仍 -5→相机硬件层,断电重开机器人。",
+      "fix_pending": "重启后单 daemon:media_server 无 gst -5、d01 无'无帧'、Dashboard 出画面。",
+      "tags": ["daemon", "camera", "mediafoundation", "gstreamer", "windows", "taskkill", "multi-instance", "hardware"],
       "related_bugs": [],
       "occurrences": 1,
-      "last_seen": "2026-06-30T18:25:00.000Z"
+      "last_seen": "2026-07-01T17:35:00.000Z"
     }
   ]
 }

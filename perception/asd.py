@@ -234,7 +234,8 @@ class AsdEngine:
     def __init__(self, detector: "SpeakerDetector | None" = None,
                  win_frames: int = 48, min_frames: int = 12, win_seconds: float = 1.3,
                  score_interval_s: float = 0.16, crop_fps: int = VIDEO_FPS,
-                 ema: float = 0.5, speak_thresh: float = 0.0, stale_s: float = 1.0):
+                 ema: float = 0.5, speak_thresh: float = 0.0, stale_s: float = 1.0,
+                 attr_raw_thresh: float = 0.3):
         self.detector = detector or SpeakerDetector()
         self.win = win_frames
         self.win_seconds = win_seconds
@@ -243,6 +244,7 @@ class AsdEngine:
         self.crop_dt = 1.0 / float(crop_fps)
         self.ema = ema
         self.speak_thresh = speak_thresh
+        self.attr_raw_thresh = attr_raw_thresh   # 归属候选:本窗原始分>此门(比EMA门0高,滤0附近噪声防误闯)
         self.stale_s = stale_s
         self.audio = AudioRing()
         # 键 = 说话人标识(调用方传 person_id 或 f"t{track_id}"):按身份聚合,抗 track churn
@@ -251,6 +253,7 @@ class AsdEngine:
         self._scores: dict = {}
         self._score_t: dict = {}
         self._last_pos_t: dict = {}     # 每 key 最近一次"在说话"的时刻
+        self._last_pos_sc: dict = {}    # 该时刻的本窗原始分(归属按它排,不用被 EMA 拖累的分)
         self._last_tid: dict = {}       # key → 最近 track_id(仅供显示/归属标签)
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -303,6 +306,7 @@ class AsdEngine:
                 self._last_crop_t.pop(k, None)
                 self._score_t.pop(k, None)
                 self._last_pos_t.pop(k, None)
+                self._last_pos_sc.pop(k, None)
                 self._last_tid.pop(k, None)
 
     def last_track(self, key):
@@ -335,11 +339,11 @@ class AsdEngine:
         """本句归属(耐 ASD 延迟):自 t_start 起任意时刻被判为说话的 track 中分最高者。
         即使'说完才出分',只要这句话期间检测到在说就能归对。返回 (track_id, score)|None。"""
         with self._lock:
-            cand = [(tid, self._scores.get(tid, -9.9))
+            cand = [(tid, self._last_pos_sc.get(tid, self._scores.get(tid, -9.9)))
                     for tid, t in self._last_pos_t.items() if t >= t_start]
         if not cand:
             return None
-        return max(cand, key=lambda kv: kv[1])
+        return max(cand, key=lambda kv: kv[1])   # 按本窗原始分排,真在说的赢(不用被 EMA 拖累的分)
 
     def _loop(self):
         while not self._stop.is_set():
@@ -375,5 +379,8 @@ class AsdEngine:
                     prev = self._scores.get(tid)
                     self._scores[tid] = sc if prev is None else (self.ema * sc + (1 - self.ema) * prev)
                     self._score_t[tid] = _nowm
-                    if self._scores[tid] > self.speak_thresh:
+                    # 归属候选:EMA 翻正(稳,持续说话)或本窗原始分明确为正(治短句被 EMA 拖死→掉画外)。
+                    # 原始分用更高门槛 attr_raw_thresh(0.3>EMA门0)过滤 0 附近噪声 → 不引入误闯。
+                    if self._scores[tid] > self.speak_thresh or sc > self.attr_raw_thresh:
                         self._last_pos_t[tid] = _nowm           # 最近一次"在说话"的时刻(供归属耐延迟)
+                        self._last_pos_sc[tid] = sc             # 本窗原始分,speaker_window 按它排(不用被拖累的 EMA)

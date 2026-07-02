@@ -98,3 +98,4 @@
 - `kws.py` — WAKE-01 唤醒词门控(sherpa-onnx) (~991 tok)
 - `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7391 tok)
 - `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2978 tok)
+- start_xiaoyi.ps1 — PowerShell 启动脚本(仿 start_mac.sh):daemon_up 上电 + 前台跑 d01(默认 plus/带唤醒,Ctrl+C 干净退出=回正+落盘;前台而非后台是为保 finally flush);输出 tee 到 log/main.log(每次清);参数 -NoWake / -Seconds N / -Restart / -FaceMp;子命令 `stop`=硬杀 main+daemon;端口7654占用清理;VIS_DEBUG 自动开 Dashboard :7654。 (~0.5k tok)

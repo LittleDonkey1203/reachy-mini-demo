@@ -32,10 +32,11 @@
 - **track churn 是多个问题的共同根(2026-06-27):** 相机自运动(头/身大幅转,如 DOA 瞟头+身体跟随追侧面人甩到 -77°)→ 运动模糊+大角度 → SCRFD 检测碎裂 → ByteTrack 疯狂换 track(id 冲到 104)→ 同时存活 track 多 → ASD 每 track crop+打分负载飙 → 抢 CPU/GPU → 子进程 SCRFD wall-time 40→390ms → **fps 崩→跟踪更差→更多 churn 死亡螺旋**。同时 churn 让新人(坤坤)ASD 按 track_id 攒不够帧→没说话分→画外。**断路器**:`FPS_FREEZE_BELOW=8`,vision 循环 fps EMA 低于此→冻结身体跟随+不瞟头(身体甩=最大相机自运动),断螺旋(日志 🧊)。根治待办:ASD/识别按身份(person_id)聚合。
 - **记忆注入只认「本句说话人」,绝不挂 current_person_id/焦点(2026-06-27,bug-060):** 焦点(头看谁)在多人交替时本就该翻,若注入跟着焦点翻→每翻一次 update_session 重注入→竞态→回复用错人记忆。唯一注入源 = realtime transcription 按 turn_speaker。视觉循环焦点变化**不重置 identity_injected、不注入**;d01 late-inject 已删。
 - **ASD 必须按身份键(person_id 或 t{track_id})聚合,不能按 track_id(2026-06-27,bug-060):** ByteTrack churn 换 id,按 track_id 则每次从空缓冲攒、攒不够 12帧/1.3s→新人一直没说话分→画外。改按身份键后 churn 换 track 喂同一缓冲→能激活。引擎(asd.py)键本就通用,只需调用方传 key;`last_track(key)` 侧表供显示/归属。speaker/speaker_window 返回的是 key:`t` 开头=未识别(画面内未绑定),否则=person_id 直接当 pid。
-- **DOA 转头找人 = 状态机(2026-06-27 定稿,bug-060):** 正确逻辑(用户明确):转到 DOA 角度 → **停那等说话** → 锁说话人 → 找不到**不弹回原来的大人脸**。实现:`_glance_phase` 0/1/2。①触发=DOA偏>20°+确信+画面无人说话+fps够+冷却过+持续0.3s。②进入时**锁定一次**目标 `body_yaw+clip(resid,±75°)`(=声源世界角,**不 live 追→平滑不来回转**)+ **清 _head_key**(忘原焦点)。③phase1 转向(头到 DOA;**resid 是身体系,必须转身体才减小**,所以身体跟随必须放开 fps 冻结 `_cam_ok or phase in(1,2)`,否则 churn 掉 fps 身体就停、够不到 45°+ 的人)。④到位(头距目标<8°)→phase2 停那等。⑤phase2 有人说话(head_ema>阈值)→锁定跟随;超 `GLANCE_TIMEOUT_S`(5s)没人→放弃+冷却(保持朝向,不弹回原脸)。**关键认知:转头(颈限±23°)永远够不到侧面 45°+ 的人,必须转身体;身体转会引发 churn,得在"找人"这个有意动作里临时放开 fps 冻结。** **触发必须加"真说话"闸**(`user_speaking` 麦 VAD,最近 `GLANCE_SPEECH_GRACE_S=1.5s` 内):光 DOA 确信会把环境音/反射当声源 → 身体右转时 resid 常报负(左)→ 触发左转 + "放弃不弹回" → **累积无声左漂**;加了说话闸,纯环境音不转。 身份合并只能按 embedding 同脸,绝不按名字(两人可能重名)。
+- **⚠️[已移除 2026-06-30] DOA 声音转头(glance #2)整体删除:** 用户决策——已有「小艺」唤醒+DOA转向(#1)+视觉ASD看人说话转(#3),声音转头(侧方有声→转去找)既靠不可信的 DOA 角度大小、又被环境噪声误触发(防环境音闸用固定 RMS 0.006 挡不住、doa_confident 判角度一致性也挡不住稳定噪声),性价比低。已删触发/FSM/`_glance_*` 变量/F1 本地响度盖戳,改纯视觉跟随。下面这条是**历史实现**,glance 现已不存在,勿据此以为还在 ↓
+- **[历史] DOA 转头找人 = 状态机(2026-06-27 定稿,bug-060):** 正确逻辑(用户明确):转到 DOA 角度 → **停那等说话** → 锁说话人 → 找不到**不弹回原来的大人脸**。实现:`_glance_phase` 0/1/2。①触发=DOA偏>20°+确信+画面无人说话+fps够+冷却过+持续0.3s。②进入时**锁定一次**目标 `body_yaw+clip(resid,±75°)`(=声源世界角,**不 live 追→平滑不来回转**)+ **清 _head_key**(忘原焦点)。③phase1 转向(头到 DOA;**resid 是身体系,必须转身体才减小**,所以身体跟随必须放开 fps 冻结 `_cam_ok or phase in(1,2)`,否则 churn 掉 fps 身体就停、够不到 45°+ 的人)。④到位(头距目标<8°)→phase2 停那等。⑤phase2 有人说话(head_ema>阈值)→锁定跟随;超 `GLANCE_TIMEOUT_S`(5s)没人→放弃+冷却(保持朝向,不弹回原脸)。**关键认知:转头(颈限±23°)永远够不到侧面 45°+ 的人,必须转身体;身体转会引发 churn,得在"找人"这个有意动作里临时放开 fps 冻结。** **触发必须加"真说话"闸**(`user_speaking` 麦 VAD,最近 `GLANCE_SPEECH_GRACE_S=1.5s` 内):光 DOA 确信会把环境音/反射当声源 → 身体右转时 resid 常报负(左)→ 触发左转 + "放弃不弹回" → **累积无声左漂**;加了说话闸,纯环境音不转。 身份合并只能按 embedding 同脸,绝不按名字(两人可能重名)。
 - **画外/未识别说话人要注入「中性上下文」,不能残留上一个在场人的身份(2026-06-27,bug-061):** 否则模型拿上一个在场人(陛下)的记忆回答画外的人,被问"我是谁"会乱答"你是陛下"。`update_memory_neutral()` 注入"看不到对方/不知道是谁/别套用他人名字",`identity_injected_pid='_neutral'` 防抖;在场人再开口自动重注入其记忆。模型回复要 `log('💬 小艺:...')` 才进网页 log 面板(否则只 print 到 stdout)。Dashboard MJPEG 断流在 Windows 是 ConnectionAbortedError(10053),_mjpeg 要 catch 它(+OSError)。
 - **画外的话绝不能存给在场的人(2026-06-27,bug-058/059):** resp_snapshot 在"本轮有用户说话(turn_speaker_at 新鲜)"时必须用 turn_speaker_pid(画外=None=不存),**不能回退 current_person_id**——否则画外说"我叫X"会被 remember_fact 张冠李戴给在场人(实测把大大改名坤坤)。仅"无近期用户说话(如系统招呼)"才回退当前人。
-- **DOA 角度不可信,只信符号(项目老教训,2026-06-27 再确认):** `doa_resid_stable=90−中值角`(身体系,符号=左/右,`confident=IQR<25°`,10Hz)。ARCHITECTURE/CALIBRATION §14:角度/spread 都不准(镜像错),SEEK/瞟头只用 **resid 符号**定方向、视觉见脸才锁。**DOA 瞟头**(TRACKING 态,侧面有人喊但画面没人说话→朝声源侧瞟 ≤15°找人,`DOA_GLANCE_DEG/GLANCE_MAX_DEG/GLANCE_MIN_HOLD_S`):只在 vision 循环 TRACKING 写头(不和 behavior_loop 抢);GLANCE_MAX_DEG=15 < 颈限23×0.7=16.1 保证只动头不甩身;找到说话人(ASD)→按身份黏滞立即锁(新 key EMA 以瞬时分起步,无弹回)。
+- **DOA 角度不可信,只信符号(项目老教训,2026-06-27 再确认):** `doa_resid_stable=90−中值角`(身体系,符号=左/右,`confident=IQR<25°`,10Hz)。ARCHITECTURE/CALIBRATION §14:角度/spread 都不准(镜像错),SEEK/瞟头只用 **resid 符号**定方向、视觉见脸才锁。~~**DOA 瞟头**(TRACKING 态…glance)~~ **已于 2026-06-30 移除**(见上方「DOA 声音转头整体删除」)。"DOA 角度不可信只信符号"这点仍有效——现仅用于 #1 唤醒后的 DOA 转向(符号定方向)。
 - **头部/当前人必须按身份(person_id)黏滞,不能按 track_id 或瞬时 ASD(2026-06-27):** ByteTrack track churn 频繁换 id(同人 T14→T17→…),按 track_id 黏滞会"离场→重选→晃";瞬时 ASD 驱动 current_person_id 会在多人间疯狂切→`update_session` 反复重注入→竞态→**回复称呼错人**(归属对但叫错)。解法:`_head_key = person_id or t{track_id}`,churn 换 track 不算离场;current_person_id 跟稳定焦点走;realtime transcription 只 update_memory(本句说话人)不写 current_person_id。
 - **Dashboard 画框配色(2026-06-27 定稿):** 脸:🟩绿=正在说话(speaking_ids,>阈值且新鲜)/⬜灰=跟踪中;手:🟦青=有效/🟧橙=底部过滤/🟨黄=低置信。**绿只给说话脸**(有效手从绿改青,避免手框压脸误认);**蓝色全部去掉**(头部跟谁看机器人朝向/yaw,不用框色重复表达)。ASD 分显示 2 位小数(1 位会把 0.0x 显示成 +0.0)。
 - **记忆兜底抽取(2026-06-27):** `RealtimeDialog.extract_memory_async` 每轮 transcription 后无条件用 `EXTRACT_MODEL`(qwen-plus)+最近5轮上下文抽「本句说话人」个人事实,`save_fact` 内置去重 → 兜底 plus 偶发漏调 remember_fact("说了不做")。与 realtime 原生 remember_fact 并存不冲突。
@@ -69,6 +70,22 @@
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->
+
+### 砍掉 DOA 声音转头(glance #2),只留 #1 唤醒转向 + #3 视觉跟随 (2026-06-30)
+- 背景:真机测出"周边有噪声会引发转头"。glance 的防环境音闸(固定 RMS `GLANCE_LOCAL_RMS=0.006` + `doa_confident` 角度一致性)都挡不住稳定方向的环境噪声(尤其电视/旁人语音)。
+- 决策(用户选 A=直接砍):删除 glance 触发/FSM/`_glance_*`/F1 本地响度盖戳。"看哪"只剩两路可靠信号:#3 视觉ASD看人说话转(有脸才转)、#1 喊「小艺」唤醒后 DOA 转向(符号可靠 + 主动意图)。
+- 否决:B 极保守 glance(请回调参负担)、C 加开关默认关(用户要彻底干净,且外部噪声不好解决)、自适应SNR闸(治标且仍可能被电视人声骗)。
+- 哲学一致性:TRACKING 态本就有方向门控(不听>55°侧方声),再"朝侧方声转头"自相矛盾;砍后策略统一=只跟看得见的人 / 侧面叫我喊小艺,纯侧方噪声既不听也不转。
+- 代价:画面外不喊小艺、直接说话不再自动转过去(最自然但最易误判);退路=喊小艺。桌面机器人用户多在正前方,代价小。
+
+### 多脸 keep-in-frame:空闲兜全场 + 锚主角 (2026-06-30)
+- 需求(用户):多人时尽量让每张脸都在画面里,头转到多脸中间。
+- 关键认知(用户提出):**半脸/边缘脸正是 ASD 盲区**(看不清嘴唇→打不出说话分),所以不能按"尺寸小就压低/忽略"——那样边缘的人一说话系统反而听不见、又不去兜他=死结。**过滤要按尺寸闸(滤掉太小/远/sliver),但合格的边缘脸要兜进来**让 ASD 有机会看清。
+- 实现(单点注入,`d01` 焦点定完 `u_raw=_head_view.u` 之后):空闲(`_cand` 说话分≤HEAD_SPK_ON)+ ≥2 张 `h≥GROUP_MIN_H` 的脸 → 瞄准点 = 合格脸 u 的中点(装得下,跨度≤GROUP_FIT_SPAN=0.7)或主角 u(兜不住);再 `np.clip` 到 `_head_view.u ± (0.5-GROUP_EDGE_MARGIN)` 保证**主角永不出框**。有人说话→不进此块=看说话人;单人/无合格脸→落回看主角。下游 OneEuro+err_yaw 积分不变。
+- 主角 = 复用现成 `_head_view`(说话人黏滞→最大脸),不新造判定。
+- 兜不住(跨度>FOV):锚主角、远端掉出靠喊「小艺」——和已删的 glance 退路一致。
+- 收敛性:头转时全场一起平移,组中心单调趋向画面中心,不追移动目标→不来回甩。
+- 待真机调:`GROUP_MIN_H=0.12`(看该兜的人脸高多少)、`GROUP_EDGE_MARGIN=0.15`;若边缘脸闪进闪出带头微抖,再加"track 持续≥1s"年龄闸(v1 先靠尺寸闸+ByteTrack 确认挡)。可 `GROUP_FRAMING_ENABLED` 开关 A/B。
 
 ### 二次唤醒 A 方案:打断+转向找喊话人,保留会话 (2026-06-29)
 - 需求:对话中喊"小艺"→ 打断 + 天线动一下 + 转到 DOA 方向找喊话人。
