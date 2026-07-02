@@ -201,3 +201,4 @@
 | 19:40 | 治CASCADE说话中误断连(bug-075):空闲计时靠speech_started刷新而cascade关了VAD→用户轮/partial刷new last_interaction_at | realtime.py,d01,buglog | 修复待复测;核心机制已跑通(识别/接管/答问/视觉OK) | ~12k |
 | 19:55 | 延迟优化:诊断慢在接管cancel(~3-4s空档);修=turn_gap 0.6→1.5s聚轮 + 智能接管(旧回复<1.5s排队不打断,done后补发;真长/卡死才cancel) | realtime.py,d01,state.py | 延迟优化待复测 | ~18k |
 | 20:16 | 诊断+修延迟根因(bug-076):动作工具产生孤儿语音response(created无done)致in_flight永久漏→每轮cancel(3s);忙判据改active_resp_id追踪 | realtime.py,state.py,buglog | 待复测(应从5s降到~2s) | ~22k |
+| 20:29 | Q1动作找回:文本入模式模型少主动做动作→inject_context(cascade)每轮system条目补动作提示;基础人设已有但静态提示不够 | voice/realtime.py | 待真机测动作回没回 | ~6k |
