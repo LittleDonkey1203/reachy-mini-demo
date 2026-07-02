@@ -216,6 +216,8 @@ class State:
         self.play_gen = 0
         self.drop_audio = False
         self.in_flight = 0
+        self.resp_created_at = 0.0    # 级联:最近一次 response.created 时刻(判在途回复"年龄",决定接管 or 排队)
+        self.pending_resp_at = 0.0    # 级联:有 ASR 轮在排队等当前回复完成(0=无);智能接管避免频繁 cancel
         self.playback_end_estimate = 0.0
         self.resp_audio_count = 0
         self.fc_seen_this_resp = False

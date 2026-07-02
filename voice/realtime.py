@@ -336,6 +336,7 @@ class ChatCallback(OmniRealtimeCallback):
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
+                    st.resp_created_at = now          # 级联:记回复起始时刻(判"年龄"→接管 or 排队)
                     st.drop_audio = False
                     st.resp_audio_count = 0
                     st.fc_seen_this_resp = False
@@ -546,12 +547,17 @@ class ChatCallback(OmniRealtimeCallback):
                 self.play_q.put((gen, f16k))
             elif etype == "response.done":
                 fire_rc = False
+                _fire_pending = False   # 级联:当前回复结束,补发被"排队"的 ASR 轮(智能接管的排队分支)
                 _reinject = None     # A:回复结束、模型空闲 → 补注入(治多人忙时注入被 in_flight 门冻住→身份钉死)
                 with st.lock:
                     st.in_flight = max(0, st.in_flight - 1)
                     st.resp_snapshot_pid = None
                     st.resp_snapshot_name = None
                     st.last_interaction_at = now
+                    if (st.in_flight == 0 and st.pending_resp_at > 0
+                            and self.dialog is not None and self.dialog.cascade):
+                        st.pending_resp_at = 0.0
+                        _fire_pending = True
                     if (
                         st.fc_seen_this_resp
                         and st.resp_audio_count == 0
@@ -581,7 +587,9 @@ class ChatCallback(OmniRealtimeCallback):
                         self.dialog.update_memory(_reinject[1], _reinject[2])
                     else:
                         self.dialog.update_memory_neutral()
-                if fire_rc and self.conv is not None:
+                if (fire_rc or _fire_pending) and self.conv is not None:
+                    if _fire_pending:
+                        log("▶ [ASR]排队回复出:当前回复已完成,答排队的那轮")
                     self.conv.create_response()
             elif etype == "error":
                 log(f"❌ 服务端错误事件:{event}")
@@ -656,23 +664,39 @@ class ChatCallback(OmniRealtimeCallback):
         if self.dialog is not None and self.memory_mgr is not None:
             _cur_pid = _log_pid if _tspk_real else None
             self.dialog.inject_context(_cur_pid, _real_name)
-        # ③ 手动 create_response。级联:新 ASR 轮 = 用户开口 → **接管**:取消在途旧回复 + 硬清
-        #    in_flight 再答。不能沿用 S2S 的"in_flight>0 就跳过"——招呼/首轮 create_response 与
-        #    response.created 异步递增有空窗,易起双回复卡 in_flight,导致之后全被跳过(机器人只招呼不答问)。
+        # ③ 手动 create_response。级联智能接管(降延迟):
+        #    - 无在途回复 → 直接答;
+        #    - 在途回复"刚起"(<TAKEOVER_MIN_AGE)且非卡死 → **排队**:不 cancel(省 3-4s cancel 开销),
+        #      待其 response.done 时再答(user item/注入已就位);
+        #    - 在途回复"已播一会儿"(真长回复/真打断)或排队卡死太久 → **接管**:cancel + 硬清 in_flight 立即答。
+        #    (不能沿用 S2S 的"in_flight>0 就跳过":会因招呼/首轮双回复卡 in_flight 致后续全被跳过。)
+        _TAKEOVER_MIN_AGE = 1.5
         with st.lock:
             _busy = st.in_flight > 0
-        if _busy:
+            _age = (now - st.resp_created_at) if st.resp_created_at > 0 else 999.0
+            _stale_pending = st.pending_resp_at > 0 and (now - st.pending_resp_at) > 3.0
+        _fire = False
+        if not _busy:
+            _fire = True
+        elif _age >= _TAKEOVER_MIN_AGE or _stale_pending:
             try:
                 c.cancel_response()
             except Exception as e:
                 log(f"⚠ [ASR]cancel_response 失败:{type(e).__name__}: {e}")
             with st.lock:
                 st.in_flight = 0
+                st.pending_resp_at = 0.0
             log("↩ [ASR]接管:取消在途旧回复,答新一轮")
-        try:
-            c.create_response()
-        except Exception as e:
-            log(f"⚠ [ASR]create_response 失败:{type(e).__name__}: {e}")
+            _fire = True
+        else:
+            with st.lock:
+                st.pending_resp_at = now
+            log("⏳ [ASR]排队:旧回复刚起,待其完成再答(免频繁打断)")
+        if _fire:
+            try:
+                c.create_response()
+            except Exception as e:
+                log(f"⚠ [ASR]create_response 失败:{type(e).__name__}: {e}")
 
 
 class RealtimeDialog:

@@ -1893,7 +1893,7 @@ def main() -> int:
                         with st.lock:
                             st.last_interaction_at = time.monotonic()
                 try:
-                    _tg = 0.6 if _cascade else 1.2     # cascade 压 turn_gap 降延迟(shadow 学习④:S2S 比 ASR 快 ~4s)
+                    _tg = 1.5 if _cascade else 1.2     # cascade:turn_gap 1.5s 把连续说话聚成少数完整轮,减少接管/cancel 抖动(见延迟诊断)
                     _asr_agg = TurnAggregator(on_turn=_asr_on_turn, resolve_speaker=_asr_resolve_spk, turn_gap_s=_tg)
                     _asr_stream = AsrStream(on_sentence=_asr_agg.add, on_partial=(_asr_on_partial if _cascade else None))
                     _asr_stream.start()

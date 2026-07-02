@@ -199,3 +199,4 @@
 | 19:19 | 真机跑CASCADE=1:定位in_flight卡死(招呼/首轮抢跑双回复只回一个done)致机器人只招呼不答问;修为接管(cancel+清in_flight+create)bug-073 | voice/realtime.py, buglog.json | bug修复待复测 | ~20k |
 | 19:32 | 治CASCADE ASR饿死(bug-074):待命时不喂→NO_VALID_AUDIO断连;改恒喂保活+门控移on_turn+AsrStream自动重连 | voice/asr_stream.py, d01, buglog | 修复待复测 | ~15k |
 | 19:40 | 治CASCADE说话中误断连(bug-075):空闲计时靠speech_started刷新而cascade关了VAD→用户轮/partial刷new last_interaction_at | realtime.py,d01,buglog | 修复待复测;核心机制已跑通(识别/接管/答问/视觉OK) | ~12k |
+| 19:55 | 延迟优化:诊断慢在接管cancel(~3-4s空档);修=turn_gap 0.6→1.5s聚轮 + 智能接管(旧回复<1.5s排队不打断,done后补发;真长/卡死才cancel) | realtime.py,d01,state.py | 延迟优化待复测 | ~18k |
