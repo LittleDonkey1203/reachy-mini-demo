@@ -96,6 +96,7 @@
 - `d01_realtime_chat.py` — Reachy Mini × Qwen3.5-Omni-Realtime 语音对话(D-01+O-01a+V-01+F-01+FUSION-03+PLAY-01:完整体)。 (~25071 tok)
 - `debug_server.py` — VIS_DEBUG MJPEG HTTP 调试预览服务 + Conversation Dashboard。 (~17765 tok)
 - `kws.py` — WAKE-01 唤醒词门控(sherpa-onnx) (~991 tok)
+- `asr_stream.py` — ASR 级联重构阶段1:独立流式 ASR(dashscope Recognition)。AsrStream(PCM→带时间戳句子)+ TurnAggregator(句子→轮次,gap/超长/说话人切换触发)。不依赖 ASD/memory/Omni。 (~1400 tok)
 - `omni_text_driver.py` — ASR 级联重构阶段0骨架:Omni"文本入+中和音频"驱动(静音锚点+视频+带标签文本轮次)。独立未接线,不改现有 S2S。 (~1100 tok)
 - `realtime.py` — Qwen-Omni-Realtime 对话协议层 — 回调 + 会话生命周期管理。 (~7391 tok)
 - `state.py` — 共享状态容器、日志、对话事件录制、One Euro 滤波器。 (~2978 tok)

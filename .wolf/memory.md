@@ -193,3 +193,4 @@
 | 21:35 | 针对2怀疑:①时序—收回turn-taking(turn_detection create_response:false×3处+转写门注入后手动create_response,in_flight守卫)保注入一定被本轮参考;②内容—inject_context简化成"当前说话人是谁"(去整段历史噪声) | voice/realtime.py | py_compile OK,待真机 | ~7k |
 | 16:28 | 设计 ASR 级联重构:Omni 由 S2S 改文本入(带说话人)+中和音频;真机 spike 实测 append-image-before-audio 硬约束→静音锚点方案验证通过 | docs/ASR_CASCADE_REDESIGN.md, cerebrum, PROJECT_STATE | 设计定稿+去风险 | ~30k |
 | 16:39 | 阶段0:连续帧静音锚点验证通过(3轮切图全命中最新帧/clear无缝/0报错)+ OmniTextDriver 骨架(独立未接线) | voice/omni_text_driver.py, anatomy.md | 阶段0完成 | ~20k |
+| 16:47 | 阶段1:asr_stream.py(AsrStream+TurnAggregator)独立流式ASR;TTS端到端smoke通过(转写准/时间戳/聚合1轮;小艺→小易证热词需求) | voice/asr_stream.py, anatomy.md | 阶段1模块验证 | ~25k |
