@@ -175,6 +175,7 @@ class ChatCallback(OmniRealtimeCallback):
         self.conv: OmniRealtimeConversation | None = None
         self.dialog: "RealtimeDialog | None" = None
         self.exit_i = 0
+        self._resp_text = ""   # 累积本次回复的语音 transcript;双-response 下语音响应是孤儿(无 .done),靠 response.done 兜底 flush
 
     def on_open(self) -> None:
         log("✅ WebSocket 已连接 dashscope.aliyuncs.com")
@@ -512,29 +513,14 @@ class ChatCallback(OmniRealtimeCallback):
                     except Exception as e:
                         log(f"⚠ 回 function_call_output 失败:{e}")
             elif etype == "response.audio_transcript.delta":
-                print(event.get("delta", ""), end="", flush=True)
+                _d = event.get("delta", "")
+                self._resp_text += _d          # 累积(供孤儿语音响应在 response.done 兜底 flush)
+                print(_d, end="", flush=True)
             elif etype == "response.audio_transcript.done":
                 print(flush=True)
-                _atext = (event.get("transcript") or "").strip()
-                if _atext:
-                    for m in _ACTION_TAG_RE.finditer(_atext):
-                        act = _extract_tag_action(m.group())
-                        if act:
-                            log(f"⚠ 标签泄漏兜底: '{m.group()}' → 触发 {act}")
-                            self.motion_q.put({"name": act})
-                    _atext = _ACTION_TAG_RE.sub("", _atext).strip()
-                if _atext:
-                    log(f"💬 小艺:{_atext}")        # 模型回复入 log(网页 log 面板可见)
-                    with st.lock:
-                        _log_pid = st.resp_snapshot_pid or st.current_person_id or "_unknown"
-                        _log_name = st.resp_snapshot_name or st.current_person_name
-                        st.display_transcript_seq += 1
-                        st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "assistant", "text": _atext, "pid": _log_pid, "name": _log_name})
-                        if len(st.display_transcript) > 100:
-                            st.display_transcript = st.display_transcript[-80:]
-                    if not st.no_memory:
-                        with st.lock:
-                            st.conversation_log.setdefault(_log_pid, []).append(("assistant", _atext))
+                _atext = (event.get("transcript") or self._resp_text or "").strip()
+                self._resp_text = ""
+                self._emit_assistant_text(_atext)
             elif etype == "response.audio.delta":
                 with st.lock:
                     if st.drop_audio:
@@ -548,6 +534,10 @@ class ChatCallback(OmniRealtimeCallback):
                 f16k = resample_poly(pcm.astype(np.float32) / 32768.0, PLAY_SR, OUT_SR).astype(np.float32)
                 self.play_q.put((gen, f16k))
             elif etype == "response.done":
+                if self._resp_text.strip():        # 双-response 孤儿 A:transcript deltas 到了但没 .done → 这里兜底 flush
+                    _pending_text = self._resp_text
+                    self._resp_text = ""
+                    self._emit_assistant_text(_pending_text)
                 fire_rc = False
                 _fire_pending = False   # 级联:当前回复结束,补发被"排队"的 ASR 轮(智能接管的排队分支)
                 _reinject = None     # A:回复结束、模型空闲 → 补注入(治多人忙时注入被 in_flight 门冻住→身份钉死)
@@ -600,6 +590,32 @@ class ChatCallback(OmniRealtimeCallback):
                 log(f"❌ 服务端错误事件:{event}")
         except Exception as e:
             log(f"❌ on_event 处理异常:{type(e).__name__}: {e}\n   原始事件:{str(event)[:300]}")
+
+    def _emit_assistant_text(self, _atext: str) -> None:
+        """把模型回复文本入 log(💬)+ dashboard + conversation_log(记忆)。
+        统一入口:audio_transcript.done 走这里,双-response 孤儿 A 也由 response.done 兜底走这里。"""
+        _atext = (_atext or "").strip()
+        if not _atext:
+            return
+        st = self.st
+        for m in _ACTION_TAG_RE.finditer(_atext):
+            act = _extract_tag_action(m.group())
+            if act:
+                log(f"⚠ 标签泄漏兜底: '{m.group()}' → 触发 {act}")
+                self.motion_q.put({"name": act})
+        _atext = _ACTION_TAG_RE.sub("", _atext).strip()
+        if not _atext:
+            return
+        log(f"💬 小艺:{_atext}")        # 模型回复入 log(网页 log 面板可见)
+        with st.lock:
+            _log_pid = st.resp_snapshot_pid or st.current_person_id or "_unknown"
+            _log_name = st.resp_snapshot_name or st.current_person_name
+            st.display_transcript_seq += 1
+            st.display_transcript.append({"seq": st.display_transcript_seq, "ts": time.strftime("%H:%M:%S"), "role": "assistant", "text": _atext, "pid": _log_pid, "name": _log_name})
+            if len(st.display_transcript) > 100:
+                st.display_transcript = st.display_transcript[-80:]
+            if not st.no_memory:
+                st.conversation_log.setdefault(_log_pid, []).append(("assistant", _atext))
 
     def handle_asr_turn(self, transcript: str, start_mono: float) -> None:
         """CASCADE(阶段2):本地 ASR 一轮 → 归属 → 带说话人标签 user item + 记忆注入 + 手动 create_response。

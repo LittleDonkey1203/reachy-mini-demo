@@ -202,3 +202,4 @@
 | 19:55 | 延迟优化:诊断慢在接管cancel(~3-4s空档);修=turn_gap 0.6→1.5s聚轮 + 智能接管(旧回复<1.5s排队不打断,done后补发;真长/卡死才cancel) | realtime.py,d01,state.py | 延迟优化待复测 | ~18k |
 | 20:16 | 诊断+修延迟根因(bug-076):动作工具产生孤儿语音response(created无done)致in_flight永久漏→每轮cancel(3s);忙判据改active_resp_id追踪 | realtime.py,state.py,buglog | 待复测(应从5s降到~2s) | ~22k |
 | 20:29 | Q1动作找回:文本入模式模型少主动做动作→inject_context(cascade)每轮system条目补动作提示;基础人设已有但静态提示不够 | voice/realtime.py | 待真机测动作回没回 | ~6k |
+| 20:38 | 修双-response致💬/助手记忆丢失:语音响应A是孤儿(无audio_transcript.done)→累积deltas+response.done兜底flush(_emit_assistant_text) | voice/realtime.py | 待复测💬显示+记忆入库 | ~10k |
