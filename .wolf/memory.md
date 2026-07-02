@@ -192,3 +192,4 @@
 | 21:19 | 两人测大大被贴到两张脸(unknown2也归大大):命名兜底焦点≠说话人+多轮echo→漏名。修:①兜底只present==1(单人无歧义)②防漏名闸=名字被在场另一身份占用即拒(重名走dashboard) | voice/realtime.py | py_compile OK,待真机 | ~3k |
 | 21:35 | 针对2怀疑:①时序—收回turn-taking(turn_detection create_response:false×3处+转写门注入后手动create_response,in_flight守卫)保注入一定被本轮参考;②内容—inject_context简化成"当前说话人是谁"(去整段历史噪声) | voice/realtime.py | py_compile OK,待真机 | ~7k |
 | 16:28 | 设计 ASR 级联重构:Omni 由 S2S 改文本入(带说话人)+中和音频;真机 spike 实测 append-image-before-audio 硬约束→静音锚点方案验证通过 | docs/ASR_CASCADE_REDESIGN.md, cerebrum, PROJECT_STATE | 设计定稿+去风险 | ~30k |
+| 16:39 | 阶段0:连续帧静音锚点验证通过(3轮切图全命中最新帧/clear无缝/0报错)+ OmniTextDriver 骨架(独立未接线) | voice/omni_text_driver.py, anatomy.md | 阶段0完成 | ~20k |
