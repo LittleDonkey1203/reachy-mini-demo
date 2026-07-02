@@ -549,6 +549,18 @@
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-07-01T17:35:00.000Z"
+    },
+    {
+      "id": "bug-073",
+      "timestamp": "2026-07-02T19:15:00.000Z",
+      "error_message": "CASCADE=1 真机:机器人只招呼不答问,每个 ASR 轮日志 ⏭[ASR]跳过 create_response(in_flight=1)",
+      "file": "voice/realtime.py",
+      "root_cause": "唤醒招呼 create_response 与首个 ASR 轮 handle_asr_turn 的 create_response 抢跑(in_flight 由 response.created 异步递增,存在空窗),起两个回复只回一个 response.done → in_flight 卡在 1 → 沿用 S2S 的 'in_flight>0 就跳过' 守卫把后续所有回答全挡掉。",
+      "fix": "cascade 下 handle_asr_turn 把'跳过'改为'接管':in_flight>0 时先 cancel_response + 硬清 st.in_flight=0,再 create_response。既解卡死(自愈)又给自然轮次接管。",
+      "tags": ["cascade", "in_flight", "create_response", "race", "asr", "阶段2"],
+      "related_bugs": ["bug-067"],
+      "occurrences": 1,
+      "last_seen": "2026-07-02T19:15:00.000Z"
     }
   ]
 }

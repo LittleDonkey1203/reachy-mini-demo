@@ -655,16 +655,23 @@ class ChatCallback(OmniRealtimeCallback):
         if self.dialog is not None and self.memory_mgr is not None:
             _cur_pid = _log_pid if _tspk_real else None
             self.dialog.inject_context(_cur_pid, _real_name)
-        # ③ 手动 create_response(in_flight==0 守卫,防和唤醒招呼双答)
+        # ③ 手动 create_response。级联:新 ASR 轮 = 用户开口 → **接管**:取消在途旧回复 + 硬清
+        #    in_flight 再答。不能沿用 S2S 的"in_flight>0 就跳过"——招呼/首轮 create_response 与
+        #    response.created 异步递增有空窗,易起双回复卡 in_flight,导致之后全被跳过(机器人只招呼不答问)。
         with st.lock:
             _busy = st.in_flight > 0
-        if not _busy:
+        if _busy:
             try:
-                c.create_response()
+                c.cancel_response()
             except Exception as e:
-                log(f"⚠ [ASR]create_response 失败:{type(e).__name__}: {e}")
-        else:
-            log(f"⏭ [ASR]跳过 create_response(in_flight={st.in_flight},招呼/旧回复在途)")
+                log(f"⚠ [ASR]cancel_response 失败:{type(e).__name__}: {e}")
+            with st.lock:
+                st.in_flight = 0
+            log("↩ [ASR]接管:取消在途旧回复,答新一轮")
+        try:
+            c.create_response()
+        except Exception as e:
+            log(f"⚠ [ASR]create_response 失败:{type(e).__name__}: {e}")
 
 
 class RealtimeDialog:
