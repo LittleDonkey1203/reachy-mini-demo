@@ -42,6 +42,8 @@
 - **记忆兜底抽取(2026-06-27):** `RealtimeDialog.extract_memory_async` 每轮 transcription 后无条件用 `EXTRACT_MODEL`(qwen-plus)+最近5轮上下文抽「本句说话人」个人事实,`save_fact` 内置去重 → 兜底 plus 偶发漏调 remember_fact("说了不做")。与 realtime 原生 remember_fact 并存不冲突。
 - **codegraph 按 `.gitignore` 过滤,不认 `.codegraphignore`(2026-06-30):** codegraph CLI(v0.9.6)无 exclude 选项;`.codegraphignore` 写了也无效(实测重建索引文件数不变)。它按 `.gitignore` 模式过滤(连已 git 跟踪但被 ignore 的 `_archive/` 16 文件都排掉 → 72 跟踪只索引 56)。生产代码 = `voice/ perception/ identity/ memory/` + `audio/sound_turn.py`;`_experiments/ tests/ healthcheck/ tools/ audio/_*` 是脚手架。要让结构分析只看生产,**不要污染 .gitignore**(会让 git 停跟踪 tests/ 等),改用查询的 `path` 参数限定(codegraph_files/context/explore 都支持)。
 - **Realtime function-calling:** flash-realtime 触发可靠性差(OmniGAIA flash≈33.9 vs plus≈57.2),会把工具"说成文本"不发 function_call → 记忆/动作丢失;记忆/动作场景必用 plus。Qwen-Omni-Realtime 不支持 tool_choice/parallel_tool_calls,无法强制调用。诊断:日志看 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记;动作全走"标签泄漏兜底"=模型在文本化工具。realtime.py:110 的"已注册"日志是写死文本,不反映真实 tools payload。
+- **Qwen-Omni-Realtime 视频帧必须挂在音频 buffer 之后(2026-07-02,真机 spike 实测):** 不送 `append_audio` 就 `append_video` → 服务端报 `invalid_request_error: Error append image before append audio`(与 d01:2024 注释同一约束)。**结论:不能"移除音频只送文本",但可"中和音频"** —— 送**静音 PCM** 当视频锚点 + `turn_detection=None` + `input_audio_transcription=None`,则 Omni 既不转写也不自动回复该音频,视频仍被参考;回复由 `create_item(role=user,input_text)+create_response(instructions=)` 手动驱动(spike 用合成图"绿底紫圆白7"→模型准确复述,验证通过)。这是 ASR 级联重构(见 `docs/ASR_CASCADE_REDESIGN.md`)的地基。
+- **在 Claude Code 环境跑 dashscope realtime 会被系统代理挡死(2026-07-02):** SDK 的 `OmniRealtimeConversation.connect()` 用 `WebSocketApp.run_forever()`,后者读 Windows 系统代理(`urllib.getproxies()`,不止环境变量)→ Claude 注入的 HTTP(S)_PROXY 使 WS 5s 超时(而裸 TCP 到 dashscope:443 仅 0.1s 通)。**绕法:裸 `websocket.create_connection(url, header=['Authorization: Bearer '+key], http_proxy_host=None)`**,按 SDK 事件格式自发 JSON(session.update/input_audio_buffer.append/input_image_buffer.append/conversation.item.create/response.create)。真机启动脚本环境无此代理,d01 正常。venv python = `C:\Users\ldkji\AppData\Local\Reachy Mini Control\.venv\Scripts\python.exe`(有 dashscope/cv2)。
 
 ## Do-Not-Repeat
 
@@ -70,6 +72,15 @@
 ## Decision Log
 
 <!-- Significant technical decisions with rationale. Why X was chosen over Y. -->
+
+### Omni 由"语音直入(S2S)"改为"文本入(带说话人)+ 中和音频"级联 (2026-07-02)
+- 背景:多人长时聊天张冠李戴治不住。根因两条——① `update_session` 改不了已入历史的旧轮(历史惯性:人B问"我是谁"顺着人A的历史答);② `semantic_vad` 在转写完成前抢跑建回复(注入晚于生成)。`create_item` 通道也压不住历史惯性。
+- 决策:让 Omni **只读我方文本**。每条用户轮从源头带 `「name」:` 标签入历史(天生区分多人)、易变记忆走单次 `create_response(instructions=)` 不进历史(无跨轮串味)、先集齐文本+说话人再手动 create_response(无时序竞态)。回复粒度**聚合成轮次**(更长静音/说话人切换才触发),非每句即答。
+- **ASR 必须是独立第二条连接**(2026-07-02 由用户给的官方 ASR 脚本确认):主 Omni 脑连接绝不能吃真实音频——`enable_input_audio_transcription` 会把用户音频变成**无标签 history user item**,又回张冠李戴。真实音频只喂 ASR 连接(推荐 `dashscope.audio.asr.Recognition`,model `fun-asr-realtime`/`paraformer-realtime-v2`:`send_audio_frame(裸PCM)`+`get_sentence()`+`is_sentence_end`,有 `begin/end` 时间戳对齐 ASD、`phrase_id` 热词灌人名);备选脚本2 = `OmniRealtimeConversation`+`TranscriptionParams`(model `qwen3-asr-flash-realtime`)。ASD 归属对齐 ASR 时间戳(或本句首 partial 的 monotonic 戳)。
+- **级联新引入回声风险**:独立 ASR 会转写机器人自己 TTS(S2S 时 Omni 内部处理了)→ 播放期间门掉 ASR 输入(`playback_end_estimate` 外才喂帧),播放中超阈值才当主动打断。
+- 关键约束(spike 实测):视频帧必须挂音频后 → 不移除音频、改**静音锚点** + `turn_detection=None` + 转写关(见 Key Learnings)。TTS下行/视觉/工具/记忆/唤醒/ASD/ReID 全不变。
+- 否决:纯文本入完全去音频(视频报 append-image-before-audio,不可行);继续 create_item 注入(压不住历史);按人 close+reopen 会话隔离(丢跨人上下文、复杂,留作最后退路)。
+- 详见 `docs/ASR_CASCADE_REDESIGN.md`,分 4 阶段实现。
 
 ### 砍掉 DOA 声音转头(glance #2),只留 #1 唤醒转向 + #3 视觉跟随 (2026-06-30)
 - 背景:真机测出"周边有噪声会引发转头"。glance 的防环境音闸(固定 RMS `GLANCE_LOCAL_RMS=0.006` + `doa_confident` 角度一致性)都挡不住稳定方向的环境噪声(尤其电视/旁人语音)。

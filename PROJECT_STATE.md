@@ -165,7 +165,7 @@ memory/
 
 ## 遗留问题
 
-0. **【最高优先】多人长时聊天上下文注入 bug**: 真机验证根因 = ①ASD 归属跟不上视觉(人在画面 present=1 却 tsp=None/画外)②bug-070 A done-空闲补注入把真身份翻成中性"看不见你"③保留会话→历史污染,注入对了也被历史带跑。**换注入通道治不了"来不及知道注谁"**。方案定稿见 `docs/CONTEXT_INJECTION_REDESIGN.md`:READ=注入在场名单(roster)让多模态模型自己归属;WRITE+转头=事后 ASD;system prompt 冻结,易变身份走 create_item(通道B)/create_response(通道C)。分 4 阶段落地(阶段0 三处止血已设计待改)。埋点已加(⏭跳过/💭tsp≠inj/🔁补注入/🧠含present)。
+0. **【最高优先】多人长时聊天上下文注入 bug → 决定 ASR 级联重构**: 真机验证根因 = ①历史惯性(`update_session` 改不了已入历史旧轮,人B问"我是谁"顺着人A历史答)②`semantic_vad` 转写完成前抢跑建回复(注入晚于生成)。`create_item` 通道也压不住历史惯性。**决策(2026-07-02):Omni 由语音直入改为"文本入(带说话人)+中和音频"级联** —— 每条用户轮从源头带 `「name」:` 标签入历史 + 易变记忆走单次 `create_response(instructions=)` 不进历史 + 先集齐文本+说话人再手动 create_response。本地 ASR=Paraformer 流式(端点=断句),回复聚合成轮次。**真机 spike 已去风险**:视频帧必须挂音频后(`append image before append audio`)→ 不移除音频改**静音锚点** + `turn_detection=None` + 转写关(spike 实测模型仍准确参考视频帧)。方案定稿见 `docs/ASR_CASCADE_REDESIGN.md`(取代 `CONTEXT_INJECTION_REDESIGN.md` 的注入通道结论),分 4 阶段落地。
 1. **YuNet 无 blendshapes**: smile/frown 恒 0.0, 可用 insightface 2D106 估算(注:已迁 SCRFD,此条基本过时)
 2. **多人同框介绍**: 指着他人说"这是XX" → 关联名字(方案见 docs/MULTI_PERSON_INTRO_PLAN.md)
 3. **end_session 乱码**: 模型偶尔把 function_call_output 当文字朗读
@@ -173,7 +173,8 @@ memory/
 
 ## 下一步建议
 
-1. **注入重构阶段 0(止血)**:`realtime.py` 三处小改(bug-070 A neu 护栏 + 中性门控 present>0 + 中性文案拆分),复现验证后再往阶段 1 推。详见 `docs/CONTEXT_INJECTION_REDESIGN.md` §6。
-2. **注入重构阶段 1**:落 roster 状态(perception/fusion 收敛在场名单),只读打日志和 ASD 并行对拍。
-3. 待办:PR#10 摘 `47b1372`(embedding 交叉检查,防误写)+ prompt 精简;flush-on-write(硬杀丢当轮记忆);group-framing/glance 真机验;PROJECT_STATE/FEATURE_INVENTORY 补账。
-4. 未提交批次(bug-069v2/070/glance/group-framing/启动脚本/埋点)——注入重构阶段0改完一起理清再提交。
+1. **ASR 级联重构阶段 0**:抽 `OmniTextDriver`(封装 create_item/create_response/静音锚点/视频),不改现有 S2S 行为,先真机验证静音锚点在连续视频帧下稳定。详见 `docs/ASR_CASCADE_REDESIGN.md` §6。
+2. **阶段 1**:接 Paraformer 流式 ASR(独立线程,与 ASD 同一路 mono),打通 sentence_end + 时间戳 + 轮次聚合,先只打日志不驱动。
+3. **阶段 2**:切换驱动——停送真实音频改静音锚点、`turn_detection=None`/转写关,由轮次聚合触发带标签 create_item + 带记忆 create_response。**阶段 3**:barge-in(ASR partial 起始)+热词表+buffer clear 节流+参数调优。
+4. 旁支待办(重构后再理):PR#10 摘 `47b1372`(embedding 交叉检查);group-framing/naming 真机验;FEATURE_INVENTORY 补账。
+5. 检查点提交已落 `c289c87`(create_item+turn-taking 那批);ASR 级联为全新架构,基于此检查点开分支推进。
