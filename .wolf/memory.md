@@ -173,3 +173,19 @@
 | 17:40 | codegraph 全工程分析:建索引(56文件/1339节点)+ 量化结构热点(god函数/77字段State单锁/重复定义/吞异常) | d01/state/actions | 产出优化清单待审 | ~9k |
 | 15:50 | 下载 L2CS-Net MobileNetV2 ONNX 模型(9.3MB) + benchmark: L0=0.02ms L2=35ms p50 CPU | models/l2csnet_mobilenetv2.onnx scripts/benchmark_gaze.py | 模型加载+推理正常 | ~2k |
 | 15:55 | 修正设计文档 224→448 输入尺寸 + 更新 anatomy.md 新增文件 | docs/GAZE_AWARE_INTERACTION_PLAN.md .wolf/anatomy.md | 文档与实现一致 | ~1k |
+
+## Session: 2026-07-01~02 (Phase 2 ARMED 注视回看)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| -- | Dashboard 注视可视化(Change 1-3): 读 gaze state + 框色/标签/箭头 + 左上状态行 | voice/debug_server.py | mutual_gaze 框色+gaze标签+方向箭头+状态行 | ~30k |
+| -- | 注册面板可关闭+可拖动: ✕按钮+header拖动+重开🏷按钮 | voice/debug_server.py | UX 改善 | ~8k |
+| -- | import math 修复: 从 for 循环内移到模块级 | voice/debug_server.py | 修正上 session 遗留 bug | ~1k |
+| -- | ARMED 注视回看 Phase 2: state.py 加 gaze_target_u/v + config.py 加 4 常量 + d01 3 处改动(FSM 存 u,v + ARMED 积分分支 + behavior_loop 条件 approach) | voice/state.py voice/config.py voice/d01_realtime_chat.py | py_compile 3/3 绿;待真机测 | ~40k |
+| -- | 更新 PROJECT_STATE.md + FEATURE_INVENTORY.md + wolf 文件 | PROJECT_STATE.md docs/FEATURE_INVENTORY.md .wolf/* | 项目状态同步 | ~5k |
+| 15:30 | 注视检测五层断链修复:①gaze对tentative track也跑②views包含所有active③FSM不过滤confirmed④gaze按identity_key持久化⑤diag移到外层 | perception/gaze.py,face_pipeline.py,gaze_behavior.py,voice/config.py,voice/d01_realtime_chat.py | 编译通过,等用户实测 | ~6000 |
+| 15:55 | L0 pitch门槛30→45:用户实际head pitch稳定+30~36°(桌面机器人摄像头偏高),被L0拒绝导致L2不跑gaze=+0/+0 | voice/config.py | 等重启实测 | ~2000 |
+| 16:30 | fix: L2 LOOKING降频(每3帧)、ByteTrack参数放宽(iou0.15/max_age60/min_hits2)、mutual阈值收紧(yaw15/pitch15)、回正改慢速dwell | gaze.py, face_config.py, config.py, d01 | 编译通过 | ~8k |
+| 17:10 | feat: 注视样本采集(GAZE_SAVE_SAMPLES=1)+标注评估脚本(gaze_eval.py) | gaze.py, scripts/gaze_eval.py | 新建 | ~3k |
+| 17:15 | fix: pitch阈值22→13(427张标注数据网格搜索F1=0.857最优) | config.py | 编译OK | ~1k |
+| 17:20 | feat: 注视情感反应 — 长时间对视不说话触发歪头(4s)/摆天线(10s)/再歪头(18s) | d01, config.py | 编译OK | ~5k |

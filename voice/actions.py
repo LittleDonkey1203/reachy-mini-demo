@@ -79,6 +79,47 @@ def act_tilt(m: ReachyMini, by: float, bp: float, body: float) -> None:
     m.goto_target(gpose(by, bp, body), duration=0.5, body_yaw=brad)
 
 
+# ── 注视微动作:小幅度、慢速、像小动物的无意识小动作 ──
+
+def act_micro_tilt(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    """微歪头:roll 5°,轻轻歪一下就回来。"""
+    brad = math.radians(body)
+    m.goto_target(gpose(by, bp, body, roll=5), duration=0.6, body_yaw=brad)
+    time.sleep(0.4)
+    m.goto_target(gpose(by, bp, body), duration=0.6, body_yaw=brad)
+
+
+def act_micro_nod(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    """微点头:pitch 只动 5°,像不经意地点了一下。"""
+    brad = math.radians(body)
+    m.goto_target(gpose(by, bp + 5, body), duration=0.5, body_yaw=brad)
+    m.goto_target(gpose(by, bp, body), duration=0.5, body_yaw=brad)
+
+
+def act_micro_wiggle(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    """微摆天线:幅度减半,只摆一次,像耳朵抖了一下。"""
+    brad = math.radians(body)
+    m.goto_target(antennas=[+0.35, -0.35], duration=0.35, body_yaw=brad)
+    m.goto_target(antennas=[-0.25, +0.25], duration=0.35, body_yaw=brad)
+    m.goto_target(antennas=INIT_ANTENNAS, duration=0.4, body_yaw=brad)
+
+
+def act_micro_perk(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    """竖天线:两根天线同时轻轻竖起,像小动物竖耳朵。"""
+    brad = math.radians(body)
+    m.goto_target(antennas=[-0.5, -0.5], duration=0.4, body_yaw=brad)
+    time.sleep(0.3)
+    m.goto_target(antennas=INIT_ANTENNAS, duration=0.5, body_yaw=brad)
+
+
+def act_micro_glance(m: ReachyMini, by: float, bp: float, body: float) -> None:
+    """微瞥:yaw 偏 4° 再回来,像不经意地瞥了一眼。"""
+    brad = math.radians(body)
+    m.goto_target(gpose(by + 4, bp - 2, body), duration=0.5, body_yaw=brad)
+    time.sleep(0.2)
+    m.goto_target(gpose(by, bp, body), duration=0.5, body_yaw=brad)
+
+
 # ── 动作分发字典 ──
 ACTIONS = {
     "nod": act_nod,
@@ -89,4 +130,9 @@ ACTIONS = {
     "look_down": lambda m, by, bp, body: _look(m, by, bp, body, pitch_off=+16),
     "wiggle_antennas": act_wiggle,
     "tilt_head": act_tilt,
+    "micro_tilt": act_micro_tilt,
+    "micro_nod": act_micro_nod,
+    "micro_wiggle": act_micro_wiggle,
+    "micro_perk": act_micro_perk,
+    "micro_glance": act_micro_glance,
 }

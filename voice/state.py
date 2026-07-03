@@ -273,6 +273,8 @@ class State:
         self.asd_speaker = None        # 画面内 ASD 说话人 {pid,name,track_id,score,at}|None(画外);供 user query 归属
         self.gaze_behavior: str = "IDLE"        # GazeBehaviorFSM 状态
         self.gaze_target_id: int | None = None  # FSM 目标 track_id
+        self.gaze_target_u: float = 0.5         # 目标人脸归一化 u
+        self.gaze_target_v: float = 0.5         # 目标人脸归一化 v
         self.dbg_gate_open = True
         self.dbg_switching = False
         self.dbg_switch_phase = ""

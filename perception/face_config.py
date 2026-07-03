@@ -30,10 +30,10 @@ class TrackingConfig:
     """ByteTrack 式多人脸跟踪。"""
     high_thresh: float = 0.6            # BYTE 一阶段置信门
     low_thresh: float = 0.1            # BYTE 二阶段下界
-    iou_threshold: float = 0.3         # IoU 匹配门
+    iou_threshold: float = 0.15         # IoU 匹配门(放宽:低fps帧间位移大,IoU低但仍是同一人)
     embedding_threshold: float = 0.45  # lost track 用 embedding 找回的余弦距离门
-    max_age: int = 30                  # lost track 删除前的帧数
-    min_hits: int = 3                  # tentative → confirmed 所需命中帧
+    max_age: int = 60                  # lost track 删除前的帧数(低fps=8时60帧≈7.5s)
+    min_hits: int = 2                  # tentative → confirmed 所需命中帧(快确认,减少churn)
     embedding_weight: float = 0.3      # 一阶段融合 cost 里 embedding 的权重
 
 

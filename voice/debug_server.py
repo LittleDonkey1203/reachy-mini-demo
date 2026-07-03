@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import math as _math
 import os
 import threading
 import time
@@ -28,11 +30,12 @@ from voice.config import (
     DECIMATE, DOA_GATE_FRESH_S, GATE_DEG, INSTRUCTIONS, SNAP_DIR,
     PLAY_HAND_V_MAX, PLAY_SCORE_MIN, PLAY_SIZE_OFF,
 )
+import voice.state as _state_mod
 from voice.state import (
     State, log,
-    _vis_log_buf, _vis_log_seq,
-    _conv_events, _conv_turns, _conv_seq,
-    _feedback_notes, _feedback_seq,
+    _vis_log_buf,
+    _conv_events, _conv_turns,
+    _feedback_notes,
 )
 
 
@@ -122,6 +125,8 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
             person_id = st.current_person_id
             person_name = st.current_person_name
             identity_injected = st.identity_injected
+            gaze_behavior = st.gaze_behavior
+            gaze_target_id = st.gaze_target_id
 
         if rgb is None:
             blank = np.zeros((360, 640, 3), dtype=np.uint8)
@@ -146,18 +151,41 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
                 _is_conf = bool(_v.get("confirmed"))
                 _spk = bool(_v.get("speaking"))      # ASD:正在说话(>阈值且新鲜)
                 _asc = _v.get("asd")                 # ASD 说话分(signed)
-                # 框色:说话=绿,其余=灰(蓝色已去掉;头部跟随只看机器人朝向/yaw)
-                _bcolor = (0, 200, 0) if _spk else (150, 150, 150)
-                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, 2 if _spk else 1)
+                _mg = bool(_v.get("mutual_gaze"))    # 在看摄像头
+                # 框色:说话=绿 > mutual_gaze=青 > 普通灰
+                _bcolor = (0, 200, 0) if _spk else ((200, 200, 0) if _mg else (150, 150, 150))
+                _bthick = 2 if (_spk or _mg) else 1
+                _cv2.rectangle(bgr, (_ax0, _ay0), (_ax1, _ay1), _bcolor, _bthick)
                 # 顶部标签:身份(Unknown-N/真名)+ trackid + ASD 说话分 —— 每框常驻
                 _nm = _v.get("name") or "?"
                 _asd_s = f" {_asc:+.2f}" if _asc is not None else ""
                 _top = f"{_nm} T{_v.get('track_id')}{_asd_s}"
                 _cjk_w = sum(18 if ord(c) > 127 else 10 for c in _top) + 6
-                _lblc = (0, 150, 0) if _spk else ((0, 140, 0) if _is_conf else (90, 90, 90))
+                _lblc = (0, 150, 0) if _spk else ((200, 200, 0) if _mg else ((0, 140, 0) if _is_conf else (90, 90, 90)))
                 _ly = _ay0 - 20 if _ay0 - 20 >= 0 else _ay1   # 靠顶则画到框下方
                 _cv2.rectangle(bgr, (_ax0, _ly), (_ax0 + _cjk_w, _ly + 20), _lblc, -1)
                 _put_cjk_text(bgr, _top, (_ax0 + 2, _ly + 2), (255, 255, 255))
+                # 底部 gaze 标签 + 方向线
+                _gy = _v.get("gaze_yaw", 0.0)
+                _gp = _v.get("gaze_pitch", 0.0)
+                if _mg:
+                    _gz_txt = "LOOK"
+                    _gz_c = (200, 200, 0)
+                else:
+                    _gz_txt = f"Y:{_gy:+.0f} P:{_gp:+.0f}"
+                    _gz_c = (150, 150, 150)
+                _gz_w = len(_gz_txt) * 9 + 6
+                _gz_y = _ay1 + 1
+                _cv2.rectangle(bgr, (_ax0, _gz_y), (_ax0 + _gz_w, _gz_y + 18), (30, 30, 30), -1)
+                _cv2.putText(bgr, _gz_txt, (_ax0 + 2, _gz_y + 13),
+                             _cv2.FONT_HERSHEY_SIMPLEX, 0.40, _gz_c, 1)
+                # 注视方向线(从框中心出发,按 gaze_yaw 水平 + gaze_pitch 垂直)
+                _cx = (_ax0 + _ax1) // 2
+                _cy = (_ay0 + _ay1) // 2
+                _glen = 30
+                _gx2 = _cx + int(_glen * _math.sin(_math.radians(_gy)))
+                _gy2 = _cy - int(_glen * _math.sin(_math.radians(_gp)))
+                _cv2.arrowedLine(bgr, (_cx, _cy), (_gx2, _gy2), _gz_c, 2, tipLength=0.3)
         elif _all_faces and len(_all_faces) > 1:
             for _fi, _af in enumerate(_all_faces):
                 _is_sel = (_doa_sel is not None and _fi == _doa_sel)
@@ -245,10 +273,12 @@ def vis_debug_server(st: State, port: int, stop: threading.Event) -> None:
         # ── 左上角：状态机信息（白字黑底）──
         _tnow = time.time()
         now_s = time.strftime("%H:%M:%S", time.localtime(_tnow)) + f".{int((_tnow % 1) * 1000):03d}"
+        _gaze_line = f"gaze={gaze_behavior}" + (f" →T{gaze_target_id}" if gaze_target_id else "")
         lines = [
             f"[{state_name}]",
             f"yaw={ty:+.1f}deg  pitch={tp:+.1f}deg",
             f"face_locked={'Y' if locked else 'N'}  hand_age={time.monotonic()-hand_at:.1f}s",
+            _gaze_line,
             now_s,
         ]
         for i, line in enumerate(lines):
@@ -535,6 +565,25 @@ canvas{display:block;margin:0 auto}
     <div id="pb-body"></div>
   </div>
 </div>
+
+<!-- reg-panel 必须在 <script> 之前,否则 JS IIFE 初始化找不到 DOM 元素 -->
+<div id="reg-panel" style="position:fixed;right:12px;bottom:12px;z-index:50;background:#1e1e2e;border:1px solid #374151;border-radius:8px;padding:0;font:12px system-ui;color:#e5e7eb;width:240px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
+  <div id="reg-hdr" style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;cursor:move;user-select:none;border-bottom:1px solid #374151;border-radius:8px 8px 0 0;background:#161626">
+    <span style="font-weight:600;font-size:12px">🏷 注册身份</span>
+    <button id="reg-close" onclick="toggleRegPanel(false)" style="background:none;border:none;color:#6b7280;font-size:16px;cursor:pointer;line-height:1;padding:0 2px">✕</button>
+  </div>
+  <div id="reg-body" style="padding:8px 10px">
+    <div style="font-size:11px;color:#6b7280;margin-bottom:6px">点下方人脸填入 track</div>
+    <div style="display:flex;gap:4px;margin-bottom:6px">
+      <input id="reg-tid" type="number" placeholder="track" style="width:56px;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
+      <input id="reg-name" type="text" placeholder="名字" style="flex:1;min-width:0;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
+      <button onclick="doRegister()" style="background:#2563eb;color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer">注册</button>
+    </div>
+    <div id="reg-tracks" style="font-size:11px;color:#9ca3af;max-height:110px;overflow-y:auto"></div>
+    <div id="reg-status" style="font-size:11px;margin-top:5px;color:#9ca3af"></div>
+  </div>
+</div>
+<button id="reg-toggle" onclick="toggleRegPanel(true)" style="display:none;position:fixed;right:12px;bottom:12px;z-index:49;background:#1e1e2e;border:1px solid #374151;border-radius:50%;width:36px;height:36px;color:#9ca3af;font-size:18px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)">🏷</button>
 
 <script>
 // ── Tab switching ──
@@ -1151,19 +1200,29 @@ async function doRegister(){
     const d=await r.json();$('reg-status').textContent=d.msg||'已提交';$('reg-name').value='';}
   catch(e){$('reg-status').textContent='⚠ '+e.message}
 }
+// ── reg-panel: close/open toggle + drag ──
+function toggleRegPanel(show){
+  $('reg-panel').style.display=show?'':'none';
+  $('reg-toggle').style.display=show?'none':'';
+}
+(()=>{
+  const panel=$('reg-panel'),hdr=$('reg-hdr');
+  let dx=0,dy=0,dragging=false;
+  hdr.addEventListener('mousedown',e=>{
+    if(e.target.id==='reg-close')return;
+    dragging=true;dx=e.clientX-panel.offsetLeft;dy=e.clientY-panel.offsetTop;
+    panel.style.transition='none';
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    panel.style.left=(e.clientX-dx)+'px';panel.style.top=(e.clientY-dy)+'px';
+    panel.style.right='auto';panel.style.bottom='auto';
+  });
+  document.addEventListener('mouseup',()=>{dragging=false;});
+})();
 poll();
 window.addEventListener('resize',()=>{if(document.getElementById('view-conv').classList.contains('active'))drawTimeline()});
 </script>
-<div id="reg-panel" style="position:fixed;right:12px;bottom:12px;z-index:50;background:#1e1e2e;border:1px solid #374151;border-radius:8px;padding:8px 10px;font:12px system-ui;color:#e5e7eb;width:240px;box-shadow:0 2px 8px rgba(0,0,0,.4)">
-  <div style="font-weight:600;margin-bottom:6px">🏷 注册身份(点下方人脸填入 track)</div>
-  <div style="display:flex;gap:4px;margin-bottom:6px">
-    <input id="reg-tid" type="number" placeholder="track" style="width:56px;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
-    <input id="reg-name" type="text" placeholder="名字" style="flex:1;min-width:0;background:#0f0f1a;border:1px solid #374151;color:#e5e7eb;border-radius:4px;padding:3px 5px">
-    <button onclick="doRegister()" style="background:#2563eb;color:#fff;border:none;border-radius:4px;padding:3px 8px;cursor:pointer">注册</button>
-  </div>
-  <div id="reg-tracks" style="font-size:11px;color:#9ca3af;max-height:110px;overflow-y:auto"></div>
-  <div id="reg-status" style="font-size:11px;margin-top:5px;color:#9ca3af"></div>
-</div>
 </body></html>"""
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -1246,56 +1305,65 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                         after_conv = int(part[11:])
                     except ValueError:
                         pass
-            now = time.monotonic()
-            with st.lock:
-                data = {
-                    "state": st.state,
-                    "track_yaw": st.track_yaw,
-                    "track_pitch": st.track_pitch,
-                    "body_yaw_deg": st.body_yaw_deg,
-                    "face_locked": st.face_locked,
-                    "speaking": now < st.playback_end_estimate + 0.1,
-                    "doa_resid_stable": st.doa_resid_stable,
-                    "doa_confident": st.doa_confident,
-                    "doa_fresh": (
-                        st.doa_resid_stable is not None
-                        and (now - st.doa_at) < DOA_GATE_FRESH_S
-                    ),
-                    "gate_open": st.dbg_gate_open,
-                    "switching": st.dbg_switching,
-                    "switch_phase": st.dbg_switch_phase,
-                    "switch_target": st.dbg_switch_target,
-                    "identity_pid": st.current_person_id,
-                    "identity_name": st.current_person_name,
-                    "identity_injected": st.identity_injected,
-                    "is_owner": st.current_is_owner,
-                    "memory_prompt": st.dbg_memory_prompt,
-                    "audio_gate": st.audio_gate_closed,
-                    "clear_phase": (st.clear_workflow or {}).get("phase"),
-                    "user_speaking": st.user_speaking,
-                    "track_views": [
-                        {"track_id": v.get("track_id"), "name": v.get("name"),
-                         "zone": v.get("zone"), "confirmed": v.get("confirmed"),
-                         "selected": v.get("selected")}
-                        for v in ((st.dbg_det or {}).get("track_views") or [])
-                    ],
-                    "register_result": st.register_result,
-                }
-            data["log_seq"] = _vis_log_seq
-            data["new_logs"] = [t for s, t in _vis_log_buf if s > after]
-            # 对话可视化增量字段
-            data["conv_seq"] = _conv_seq
-            data["conv_events"] = [e for e in _conv_events if e["seq"] > after_conv]
-            data["conv_turns"] = _conv_turns[-30:]
-            data["feedback"] = _feedback_notes[-50:]
-            data["feedback_dir"] = SNAP_DIR
-            data["instructions"] = INSTRUCTIONS  # 前端首次拿到后可缓存
-            # Context debug 面板数据
-            with st.lock:
-                data["session_instructions"] = st.dbg_session_instructions
-                data["conversation_log"] = {k: v[-20:] for k, v in st.conversation_log.items()}
-                data["display_transcript"] = st.display_transcript[-100:]
-            body = json.dumps(data, ensure_ascii=False, cls=_NumpyEncoder).encode("utf-8")
+            try:
+                now = time.monotonic()
+                with st.lock:
+                    data = {
+                        "state": st.state,
+                        "track_yaw": st.track_yaw,
+                        "track_pitch": st.track_pitch,
+                        "body_yaw_deg": st.body_yaw_deg,
+                        "face_locked": st.face_locked,
+                        "speaking": now < st.playback_end_estimate + 0.1,
+                        "doa_resid_stable": st.doa_resid_stable,
+                        "doa_confident": st.doa_confident,
+                        "doa_fresh": (
+                            st.doa_resid_stable is not None
+                            and (now - st.doa_at) < DOA_GATE_FRESH_S
+                        ),
+                        "gate_open": st.dbg_gate_open,
+                        "switching": st.dbg_switching,
+                        "switch_phase": st.dbg_switch_phase,
+                        "switch_target": st.dbg_switch_target,
+                        "identity_pid": st.current_person_id,
+                        "identity_name": st.current_person_name,
+                        "identity_injected": st.identity_injected,
+                        "is_owner": st.current_is_owner,
+                        "memory_prompt": st.dbg_memory_prompt,
+                        "audio_gate": st.audio_gate_closed,
+                        "clear_phase": (st.clear_workflow or {}).get("phase"),
+                        "user_speaking": st.user_speaking,
+                        "track_views": [
+                            {"track_id": v.get("track_id"), "name": v.get("name"),
+                             "zone": v.get("zone"), "confirmed": v.get("confirmed"),
+                             "selected": v.get("selected")}
+                            for v in ((st.dbg_det or {}).get("track_views") or [])
+                        ],
+                        "register_result": st.register_result,
+                    }
+                    data["session_instructions"] = st.dbg_session_instructions
+                    data["conversation_log"] = {k: list(v[-20:]) for k, v in st.conversation_log.items()}
+                    data["display_transcript"] = list(st.display_transcript[-100:])
+                data["log_seq"] = _state_mod._vis_log_seq
+                data["new_logs"] = [t for s, t in list(_vis_log_buf) if s > after]
+                data["conv_seq"] = _state_mod._conv_seq
+                data["conv_events"] = [e for e in list(_conv_events) if e["seq"] > after_conv]
+                data["conv_turns"] = list(_conv_turns)[-30:]
+                data["feedback"] = list(_feedback_notes)[-50:]
+                data["feedback_dir"] = SNAP_DIR
+                data["instructions"] = INSTRUCTIONS
+                body = json.dumps(data, ensure_ascii=False, cls=_NumpyEncoder).encode("utf-8")
+            except Exception as _exc:
+                import traceback as _tb
+                _tb_str = _tb.format_exc()
+                print(f"[debug_server] _state() CRASH: {_exc}\n{_tb_str}", flush=True)
+                err_body = json.dumps({"error": str(_exc), "tb": _tb_str}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(err_body)))
+                self.end_headers()
+                self.wfile.write(err_body)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1337,7 +1405,6 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                 self.wfile.write(str(e).encode("utf-8"))
 
         def _feedback(self):
-            global _feedback_seq
             try:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1364,12 +1431,12 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                         transcript = "".join(s.get("text", "") for s in sentences)
                 except Exception as asr_e:
                     transcript = f"(ASR 不可用: {type(asr_e).__name__})"
-                _feedback_seq += 1
-                note = {"id": _feedback_seq, "ts": note_ts,
+                _state_mod._feedback_seq += 1
+                note = {"id": _state_mod._feedback_seq, "ts": note_ts,
                         "transcript": transcript, "turn_id": turn_id,
                         "audio_b64": audio_b64}
                 _feedback_notes.append(note)
-                log(f"📌 反馈笔记 #{_feedback_seq}: {transcript[:60]}")
+                log(f"📌 反馈笔记 #{_state_mod._feedback_seq}: {transcript[:60]}")
                 # 持久化到磁盘
                 try:
                     os.makedirs(SNAP_DIR, exist_ok=True)
@@ -1379,7 +1446,7 @@ window.addEventListener('resize',()=>{if(document.getElementById('view-conv').cl
                 except Exception as _pe:
                     log(f"⚠ 反馈写盘失败:{_pe}")
                 resp = json.dumps({"ok": True, "transcript": transcript,
-                                   "id": _feedback_seq}, ensure_ascii=False).encode()
+                                   "id": _state_mod._feedback_seq}, ensure_ascii=False).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(resp)))

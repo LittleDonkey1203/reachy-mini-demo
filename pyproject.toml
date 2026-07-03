@@ -5,7 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "reachy-mini",
+    "reachy-mini==1.8.0",
     "openai",
     "dashscope",
     "mediapipe<0.10.15; sys_platform == 'darwin' and platform_machine == 'x86_64'",

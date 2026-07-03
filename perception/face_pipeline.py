@@ -135,19 +135,18 @@ class FaceReIDPipeline:
         # ── per-track 注视估计(L0+L1+L2 级联) ──
         _gaze_results: dict = {}
         if self._gaze is not None and self._gaze.available and full_rgb is not None:
-            alive = {t.track_id for t in active}
-            self._gaze.gc(alive)
+            alive_keys = {trk.identity_id or f"t{trk.track_id}" for trk in active}
+            self._gaze.gc(alive_keys)
             for trk in active:
-                if not trk.is_confirmed():
-                    continue
                 if trk.landmarks is None or not np.any(trk.landmarks):
                     continue
                 gr = self._gaze.update(
-                    trk.track_id, trk.landmarks, full_rgb, trk.bbox, decimate)
+                    trk.track_id, trk.landmarks, full_rgb, trk.bbox, decimate,
+                    identity_key=trk.identity_id,
+                    frame_w=full_rgb.shape[1] if full_rgb is not None else 0)
                 _gaze_results[trk.track_id] = gr
 
-        views = [self._view(t, _gaze_results) for t in active
-                 if t.is_confirmed() or t.smooth_embedding is not None]
+        views = [self._view(t, _gaze_results) for t in active]
         prim = self.tracker.get_primary_target()
         primary = self._view(prim, _gaze_results) if (prim is not None and prim.is_confirmed()) else None
         # 归一化:用检测帧 W,H

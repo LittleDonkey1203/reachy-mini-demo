@@ -105,15 +105,32 @@ GAZE_BIN_WIDTH = 4.0
 GAZE_OFFSET = 180.0
 GAZE_MEAN = (0.485, 0.456, 0.406)
 GAZE_STD = (0.229, 0.224, 0.225)
-GAZE_HEAD_YAW_THRESH = 45.0
-GAZE_HEAD_PITCH_THRESH = 35.0
+GAZE_HEAD_YAW_THRESH = 40.0          # L0 头姿门槛(原45,适当收紧,侧脸>40°淘汰不跑L2)
+GAZE_HEAD_PITCH_THRESH = 45.0        # L0 头姿门槛(桌面机器人摄像头偏高,用户脸自然pitch+30~36°)
 GAZE_NOT_LOOKING_INTERVAL = 5
-GAZE_MUTUAL_YAW_THRESH = 12.0
-GAZE_MUTUAL_PITCH_THRESH = 15.0
+GAZE_LOOKING_INTERVAL = 3            # LOOKING 态也降频(每3帧跑一次L2),防L2每帧跑→fps崩→churn
+GAZE_MUTUAL_YAW_THRESH = 15.0        # mutual 阈值(收紧:L2CS-Net ~10°误差+桌面俯视偏差,20太宽)
+GAZE_MUTUAL_PITCH_THRESH = 13.0      # mutual 阈值(标注数据427张网格搜索最优F1=0.857)
+GAZE_DIR_DEADBAND = 8.0              # 方向一致性死区:|head_yaw|<此值时不检查gaze方向(正对相机)
+GAZE_L2_EMA_ALPHA = 0.25             # L2 输出 EMA 平滑(越小越平滑,0.25≈4帧有效窗口,压瞬时噪声)
+GAZE_MUTUAL_CONFIRM_FRAMES = 10      # mutual_gaze 连续 N 帧L2才确认(10帧×3=30raw帧≈2s,压误检)
+GAZE_MUTUAL_DROP_FRAMES = 5          # mutual_gaze 连续 N 帧丢失才确认 NOT_LOOKING(黏性,防闪烁)
 GAZE_IDLE_TIMEOUT_S = 2.0
 GAZE_SCAN_PERIOD_S = 2.5
 GAZE_GLANCE_INTERVAL_S = 4.0
 GAZE_MIN_FACE_PX = 40
+GAZE_ARMED_TAU = 0.80            # ARMED 注视回看时间常数(s)
+GAZE_ARMED_MAX_STEP = 1.2        # 每帧最大转头步进(度)
+GAZE_ARMED_DEADBAND = 3.0        # 小于此角度不动(度)
+GAZE_ARMED_ENTRY_S = 0.5         # CURIOUS_LOOK 持续这么久才激活(防抖)
+GAZE_ARMED_GRACE_S = 1.0         # 注视丢失后保持积分这么久(防闪烁回正)
+GAZE_RETURN_DWELL_S = 1.5       # 注视丢失→回正前先停留这么久(自然感)
+GAZE_RETURN_SPEED_DPS = 20.0    # 回正速度(°/s),远慢于追踪的90°/s,自然不生硬
+# 注视情感反应:长时间对视不说话时随机触发微动作(per-identity冷却)
+GAZE_REACT_FIRST_S = 4.0       # 首次微动作需持续注视至少N秒
+GAZE_REACT_INTERVAL_S = 8.0    # 之后每隔N秒随机触发一次微动作
+GAZE_REACT_MAX_COUNT = 3       # 同一轮最多触发N次微动作,之后不再打扰
+GAZE_REACT_COOLDOWN_S = 180.0  # 同一个人一轮反应完后冷却3分钟,不过度打扰
 
 # ── DOA 声源转向 ──
 DOA_URL = "http://127.0.0.1:8000/api/state/doa"

@@ -35,20 +35,23 @@ class GazeCommand:
 class GazeBehaviorFSM:
     def __init__(self, idle_timeout_s: float = 2.0,
                  scan_period_s: float = 2.5,
-                 glance_interval_s: float = 4.0):
+                 glance_interval_s: float = 4.0,
+                 curious_confirm: int = 3):
         self.state = GazeBehavior.IDLE
         self._idle_timeout = idle_timeout_s
         self._scan_period = scan_period_s
         self._glance_interval = glance_interval_s
+        self._curious_confirm = curious_confirm
         self._no_face_since: float = 0.0
         self._scan_switch_t: float = 0.0
         self._scan_idx: int = 0
+        self._looking_streak: int = 0  # 连续 mutual_gaze 帧计数
 
     def update(self, track_views: list, now: float | None = None) -> GazeCommand:
         if now is None:
             now = time.monotonic()
 
-        faces = [v for v in track_views if v.state == "confirmed"]
+        faces = list(track_views)
         looking = [v for v in faces if v.mutual_gaze]
 
         if not faces:
@@ -56,17 +59,23 @@ class GazeBehaviorFSM:
                 self._no_face_since = now
             if (now - self._no_face_since) >= self._idle_timeout:
                 self.state = GazeBehavior.IDLE
+                self._looking_streak = 0
                 return GazeCommand(behavior=GazeBehavior.IDLE)
             return GazeCommand(behavior=self.state)
 
         self._no_face_since = 0.0
 
-        if len(looking) == 1:
+        if looking:
+            self._looking_streak += 1
+        else:
+            self._looking_streak = 0
+
+        if len(looking) == 1 and self._looking_streak >= self._curious_confirm:
             self.state = GazeBehavior.CURIOUS_LOOK
             return GazeCommand(behavior=GazeBehavior.CURIOUS_LOOK,
                                target_track_id=looking[0].track_id)
 
-        if len(looking) > 1:
+        if len(looking) > 1 and self._looking_streak >= self._curious_confirm:
             self.state = GazeBehavior.SCANNING
             scan_ids = [v.track_id for v in looking]
             if (now - self._scan_switch_t) >= self._scan_period:
@@ -77,8 +86,12 @@ class GazeBehaviorFSM:
                                target_track_id=scan_ids[idx],
                                scan_targets=scan_ids, scan_index=idx)
 
-        self.state = GazeBehavior.GLANCING
-        biggest = max(faces, key=lambda v: abs(
-            (v.bbox_px[2] - v.bbox_px[0]) * (v.bbox_px[3] - v.bbox_px[1])))
-        return GazeCommand(behavior=GazeBehavior.GLANCING,
-                           target_track_id=biggest.track_id)
+        # 有人在场但 looking streak 未达确认阈值或没人看
+        if faces:
+            self.state = GazeBehavior.GLANCING
+            biggest = max(faces, key=lambda v: abs(
+                (v.bbox_px[2] - v.bbox_px[0]) * (v.bbox_px[3] - v.bbox_px[1])))
+            return GazeCommand(behavior=GazeBehavior.GLANCING,
+                               target_track_id=biggest.track_id)
+
+        return GazeCommand(behavior=self.state)

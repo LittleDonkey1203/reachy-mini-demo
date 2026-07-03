@@ -150,9 +150,13 @@ from voice.config import (                          # ← 配置常量集中管�
     AUDIO_GATE_TIMEOUT_S,
     GAZE_MODEL_PATH, GAZE_INPUT_SIZE, GAZE_NUM_BINS, GAZE_BIN_WIDTH, GAZE_OFFSET,
     GAZE_MEAN, GAZE_STD,
-    GAZE_HEAD_YAW_THRESH, GAZE_HEAD_PITCH_THRESH, GAZE_NOT_LOOKING_INTERVAL,
-    GAZE_MUTUAL_YAW_THRESH, GAZE_MUTUAL_PITCH_THRESH,
+    GAZE_HEAD_YAW_THRESH, GAZE_HEAD_PITCH_THRESH, GAZE_NOT_LOOKING_INTERVAL, GAZE_LOOKING_INTERVAL,
+    GAZE_MUTUAL_YAW_THRESH, GAZE_MUTUAL_PITCH_THRESH, GAZE_DIR_DEADBAND,
+    GAZE_L2_EMA_ALPHA, GAZE_MUTUAL_CONFIRM_FRAMES, GAZE_MUTUAL_DROP_FRAMES,
     GAZE_IDLE_TIMEOUT_S, GAZE_SCAN_PERIOD_S, GAZE_GLANCE_INTERVAL_S, GAZE_MIN_FACE_PX,
+    GAZE_ARMED_TAU, GAZE_ARMED_MAX_STEP, GAZE_ARMED_DEADBAND, GAZE_ARMED_ENTRY_S, GAZE_ARMED_GRACE_S,
+    GAZE_RETURN_DWELL_S, GAZE_RETURN_SPEED_DPS,
+    GAZE_REACT_FIRST_S, GAZE_REACT_INTERVAL_S, GAZE_REACT_MAX_COUNT, GAZE_REACT_COOLDOWN_S,
     _NOPARAM, BASE_TOOLS, SNAP_PROMPTS, _DIR_MAP,
     greet_prompt, parse_judge,
 )
@@ -466,7 +470,7 @@ def _make_face_embedder(rec, roi_detector=None):
 
 
 def vision_result_loop(st: State, result_q, stop: threading.Event,
-                       cb_ref: list = None) -> None:
+                       cb_ref: list = None, motion_q: "queue.Queue" = None) -> None:
     """消费视觉子进程结果 → 时间常数型积分跟随目标(逻辑同 F-01,数据源改进程队列)。
     丢脸缓冲(1c):连续 VIS_MISS_N 帧漏检才重置滤波/进入丢脸路径,防侧脸闪断。"""
     fx = OneEuroFilter(min_cutoff=0.8, beta=0.08)
@@ -499,6 +503,18 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
     _last_frame_t = 0.0               # 上一帧到达时刻(算瞬时 fps)
     _fps_ema = 20.0                   # 检测 fps 的 EMA(低 fps 时冻结相机运动,断 churn 死循环)
     _lowfps_log_t = 0.0              # 低 fps 冻结日志节流
+    _gaze_armed_since = 0.0          # ARMED 注视回看:连续激活起始时刻(防抖)
+    _gaze_armed_logged = False       # 激活日志节流
+    _gaze_armed_active = False       # 积分已激活(过了入场延迟)
+    _gaze_armed_lost_at = 0.0       # 注视丢失时刻(grace period 起点)
+    _gaze_diag_t = 0.0              # 注视诊断日志节流时刻
+    # 注视情感反应:长时间对视不说话时随机触发微动作(per-identity冷却)
+    _gaze_stare_since = 0.0         # 连续注视起始时刻(0=未在注视)
+    _gaze_react_count = 0           # 本轮已触发次数
+    _gaze_react_last_t = 0.0       # 上次触发时刻
+    _gaze_react_cooldowns: dict[str, float] = {}  # per-identity 冷却到期时刻
+    _gaze_react_target_key = ""     # 当前注视反应的目标身份
+    _MICRO_ACTIONS = ["micro_tilt", "micro_nod", "micro_wiggle", "micro_perk", "micro_glance"]
 
     while not stop.is_set():
         try:
@@ -648,9 +664,17 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                     # ── 注视行为 FSM ──
                     if _gaze_fsm is not None and _track_views:
                         _gaze_cmd = _gaze_fsm.update(_track_views, now)
+                        _gaze_u, _gaze_v = 0.5, 0.5
+                        if _gaze_cmd.target_track_id is not None:
+                            for _tv in _track_views:
+                                if _tv.track_id == _gaze_cmd.target_track_id:
+                                    _gaze_u, _gaze_v = _tv.u, _tv.v
+                                    break
                         with st.lock:
                             st.gaze_behavior = _gaze_cmd.behavior.name
                             st.gaze_target_id = _gaze_cmd.target_track_id
+                            st.gaze_target_u = _gaze_u
+                            st.gaze_target_v = _gaze_v
                     # 当前人 = 稳定头部焦点(仅供显示/greet/owner)。记忆注入不挂在它身上——
                     # 焦点随对话在多人间切换是正常的,但注入只认「本句说话人」(realtime transcription),
                     # 否则焦点一翻就 update_session 重注入 → 时序竞态 → 回复用错人记忆(治问题2)。
@@ -791,7 +815,32 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
             # 头部目标由 behavior_loop 驱动(避免双写 track_yaw)。
             integrate = (st.state == ST_TRACKING) and (not st.action_active)
             play_integrate = (st.state == ST_PLAYING) and (not st.action_active)
+            gaze_integrate = (st.state == ST_ARMED
+                              and st.gaze_behavior in ("CURIOUS_LOOK", "SCANNING"))
+            # grace period: 注视丢失后保持积分一段时间,防闪烁回正
+            if gaze_integrate:
+                _gaze_armed_lost_at = 0.0  # 注视恢复,清 grace 计时
+            elif _gaze_armed_active and _gaze_armed_lost_at == 0.0:
+                _gaze_armed_lost_at = now  # 刚丢失,开始 grace 计时
+            if not gaze_integrate and _gaze_armed_active and st.state == ST_ARMED:
+                if _gaze_armed_lost_at > 0.0 and (now - _gaze_armed_lost_at) < GAZE_ARMED_GRACE_S:
+                    gaze_integrate = True   # grace 期内仍保持积分
             h_at = st.hand_at
+
+        # ── 注视诊断日志(每 2s,独立于 gaze FSM block) ──
+        if (now - _gaze_diag_t) >= 2.0:
+            _gaze_diag_t = now
+            _gb_now = st.gaze_behavior if hasattr(st, 'gaze_behavior') else '?'
+            if _track_views:
+                _diag_parts = []
+                for _tv in _track_views:
+                    _diag_parts.append(
+                        f"T{_tv.track_id}({_tv.state[0]}) head={_tv.head_yaw:+.0f}/{_tv.head_pitch:+.0f}"
+                        f" gaze={_tv.gaze_yaw:+.0f}/{_tv.gaze_pitch:+.0f}"
+                        f" look={'Y' if _tv.mutual_gaze else 'N'}")
+                log(f"👁 gaze diag: {' | '.join(_diag_parts)} → {_gb_now} int={'Y' if gaze_integrate else 'N'}")
+            else:
+                log(f"👁 gaze diag: no tracks → {_gb_now} int={'Y' if gaze_integrate else 'N'}")
 
         # ── PLAYING:跟手积分(灵敏档 τ/步进/幅度;丢检 ≤0.35s 惯性外推防愣住)──
         def steer_hand(tu: float, tv: float) -> None:
@@ -933,9 +982,74 @@ def vision_result_loop(st: State, result_q, stop: threading.Event,
                         st.track_yaw = float(np.clip(st.track_yaw,
                                                      st.body_yaw_deg - NECK_REL_LIMIT,
                                                      st.body_yaw_deg + NECK_REL_LIMIT))
+            elif gaze_integrate:
+                # ── ARMED 注视回看:人看机器人时缓慢转头注视对方 ──
+                if _gaze_armed_since == 0.0:
+                    _gaze_armed_since = now
+                if (now - _gaze_armed_since) >= GAZE_ARMED_ENTRY_S:
+                    _gaze_armed_active = True
+                    gu = fx(st.gaze_target_u, now)
+                    gv = fy(st.gaze_target_v, now)
+                    err_yaw = YAW_SIGN * (gu - 0.5) * FOV_X_DEG
+                    err_pitch = PITCH_SIGN * (gv - 0.5) * FOV_Y_DEG
+                    if abs(err_yaw) < GAZE_ARMED_DEADBAND:
+                        err_yaw = 0.0
+                    if abs(err_pitch) < GAZE_ARMED_DEADBAND:
+                        err_pitch = 0.0
+                    dt_g = max(1e-3, now - t_prev_ctrl)
+                    t_prev_ctrl = now
+                    k_g = 1.0 - math.exp(-dt_g / GAZE_ARMED_TAU)
+                    with st.lock:
+                        sy = float(np.clip(k_g * err_yaw, -GAZE_ARMED_MAX_STEP, GAZE_ARMED_MAX_STEP))
+                        sp = float(np.clip(k_g * err_pitch, -GAZE_ARMED_MAX_STEP, GAZE_ARMED_MAX_STEP))
+                        st.track_yaw = float(np.clip(st.track_yaw + sy,
+                                                      st.body_yaw_deg - NECK_REL_LIMIT,
+                                                      st.body_yaw_deg + NECK_REL_LIMIT))
+                        st.track_pitch = float(np.clip(st.track_pitch + sp,
+                                                        -TRACK_PITCH_LIMIT, TRACK_PITCH_LIMIT))
+                    if not _gaze_armed_logged:
+                        _gaze_armed_logged = True
+                        log(f"👁 ARMED 注视回看激活 → T{st.gaze_target_id}")
+                    # ── 注视情感反应:长时间对视不说话 → 随机微动作(per-identity冷却) ──
+                    if motion_q is not None:
+                        with st.lock:
+                            _react_pid = st.current_person_id or f"t{st.gaze_target_id}"
+                        if _react_pid != _gaze_react_target_key:
+                            _gaze_stare_since = 0.0
+                            _gaze_react_count = 0
+                            _gaze_react_last_t = 0.0
+                            _gaze_react_target_key = _react_pid
+                        _cd = _gaze_react_cooldowns.get(_react_pid, 0.0)
+                        if now > _cd and _gaze_react_count < GAZE_REACT_MAX_COUNT:
+                            if _gaze_stare_since == 0.0:
+                                _gaze_stare_since = now
+                            stare_dur = now - _gaze_stare_since
+                            with st.lock:
+                                _is_talking = st.user_speaking or getattr(st, 'in_flight', 0) > 0
+                            if not _is_talking:
+                                _need = (GAZE_REACT_FIRST_S if _gaze_react_count == 0
+                                         else GAZE_REACT_INTERVAL_S)
+                                _since_last = now - _gaze_react_last_t if _gaze_react_last_t > 0 else stare_dur
+                                if stare_dur >= GAZE_REACT_FIRST_S and _since_last >= _need:
+                                    act = random.choice(_MICRO_ACTIONS)
+                                    motion_q.put({"name": act})
+                                    _gaze_react_count += 1
+                                    _gaze_react_last_t = now
+                                    log(f"👁 注视微动作: {act} ({_gaze_react_count}/{GAZE_REACT_MAX_COUNT}) [{_react_pid}]")
+                                    if _gaze_react_count >= GAZE_REACT_MAX_COUNT:
+                                        _gaze_react_cooldowns[_react_pid] = now + GAZE_REACT_COOLDOWN_S
+                            else:
+                                _gaze_stare_since = 0.0
+                                _gaze_react_count = 0
+                                _gaze_react_last_t = 0.0
+                else:
+                    t_prev_ctrl = now
             else:
                 t_prev_ctrl = now
                 _glance_since = 0.0; _glance_phase = 0       # 非 TRACKING:清转头状态(防 stale 时间戳)
+                _gaze_armed_since = 0.0; _gaze_armed_logged = False
+                _gaze_armed_active = False; _gaze_armed_lost_at = 0.0
+                _gaze_stare_since = 0.0; _gaze_react_count = 0; _gaze_react_last_t = 0.0
         else:
             miss_streak += 1
             t_prev_ctrl = now
@@ -1022,6 +1136,8 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
     指向请求(POINT-02)→ POINTING(转头朝手指方向)→ snapshot → 回 TRACKING。"""
     dt = 1.0 / FSM_HZ
     step = SND_SPEED_DPS * dt           # 每帧最大转角
+    gaze_return_step = GAZE_RETURN_SPEED_DPS * dt  # 注视回正慢速步进
+    _gaze_return_t = 0.0                 # 注视回正 dwell 起始时刻(0=未触发)
     phase_t = time.monotonic()          # 当前状态进入时刻
     scan_dir = 1.0
     pt_yaw_goal = pt_body_goal = pt_pitch_goal = 0.0  # POINTING 目标
@@ -1104,7 +1220,7 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                 # 避免 audio loop 在 wake_ok=False + state=ARMED 窗口误关 WS。
                 if woke:
                     sr, sconf, sat = st.doa_resid_stable, st.doa_confident, st.doa_at
-                    st.track_yaw = st.track_pitch = 0.0   # armed 居中,从 0 起转
+                    # 不归零 track_yaw/pitch — 从当前注视位置起转,避免唤醒时先复位再找人
             if woke:
                 if not st.vis_ready:
                     if not _vis_wait_logged:
@@ -1136,7 +1252,22 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                     st.wake_ok = False
                     st.wake_doa = None
             else:
-                approach(0.0, 0.0, 0.0)                 # 缓慢保持回正(头控渲染慢呼吸)
+                with st.lock:
+                    _gb = st.gaze_behavior
+                if _gb not in ("CURIOUS_LOOK", "SCANNING"):
+                    if _gaze_return_t == 0.0:
+                        _gaze_return_t = now
+                    if (now - _gaze_return_t) >= GAZE_RETURN_DWELL_S:
+                        with st.lock:
+                            ty, b, tp = st.track_yaw, st.body_yaw_deg, st.track_pitch
+                            def _mv_slow(cur, goal):
+                                d = goal - cur
+                                return goal if abs(d) <= gaze_return_step else cur + math.copysign(gaze_return_step, d)
+                            st.track_yaw = _mv_slow(ty, 0.0)
+                            st.body_yaw_deg = _mv_slow(b, 0.0)
+                            st.track_pitch = _mv_slow(tp, 0.0)
+                else:
+                    _gaze_return_t = 0.0
             continue
 
         # EXIT-01:用户结束意图(end_session 工具置 flag)→ 回中 + 告别 cue + 回 armed。
@@ -1261,8 +1392,11 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                                   {"resid": round(snd, 1), "target": round(engage_target, 1)})
                 set_state(ST_ENGAGING)
             elif wake_mode and (now - last_interact) > NO_INTERACT_S and not speaking:
-                log(f"💤 engaged 无互动 {NO_INTERACT_S:.0f}s → 回 armed 待命")
-                set_state(ST_ARMED)
+                with st.lock:
+                    _gb_idle = st.gaze_behavior
+                if _gb_idle not in ("CURIOUS_LOOK", "SCANNING"):
+                    log(f"💤 engaged 无互动 {NO_INTERACT_S:.0f}s → 回 armed 待命")
+                    set_state(ST_ARMED)
 
         elif state == ST_ENGAGING:
             if switching:
@@ -1385,7 +1519,11 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
             if not locked:                          # 迟滞已含 1.5s 丢锁 → 不会瞬断空转
                 set_state(ST_SEARCHING)
             elif (now - last_interact) > NO_INTERACT_S and not speaking:
-                if wake_mode:
+                with st.lock:
+                    _gb_track = st.gaze_behavior
+                if _gb_track in ("CURIOUS_LOOK", "SCANNING"):
+                    pass  # 用户在注视,不算无互动
+                elif wake_mode:
                     log(f"💤 {NO_INTERACT_S:.0f}s 无说话互动 → 回 armed 待命")
                     set_state(ST_ARMED)
                 else:
@@ -1758,9 +1896,15 @@ def main() -> int:
         head_yaw_thresh=GAZE_HEAD_YAW_THRESH,
         head_pitch_thresh=GAZE_HEAD_PITCH_THRESH,
         not_looking_interval=GAZE_NOT_LOOKING_INTERVAL,
+        looking_interval=GAZE_LOOKING_INTERVAL,
         mutual_yaw_thresh=GAZE_MUTUAL_YAW_THRESH,
         mutual_pitch_thresh=GAZE_MUTUAL_PITCH_THRESH,
+        gaze_dir_deadband=GAZE_DIR_DEADBAND,
+        fov_x_deg=FOV_X_DEG,
         min_face_px=GAZE_MIN_FACE_PX,
+        l2_ema_alpha=GAZE_L2_EMA_ALPHA,
+        mutual_confirm_frames=GAZE_MUTUAL_CONFIRM_FRAMES,
+        mutual_drop_frames=GAZE_MUTUAL_DROP_FRAMES,
         input_size=GAZE_INPUT_SIZE,
         num_bins=GAZE_NUM_BINS,
         bin_width=GAZE_BIN_WIDTH,
@@ -1899,7 +2043,7 @@ def main() -> int:
                     daemon=True,
                 ).start()
                 threading.Thread(target=frame_pump_loop, args=(mini, st, vis_frame_q, stop), daemon=True).start()
-                threading.Thread(target=vision_result_loop, args=(st, vis_result_q, stop, _cb_ref), daemon=True).start()
+                threading.Thread(target=vision_result_loop, args=(st, vis_result_q, stop, _cb_ref, motion_q), daemon=True).start()
             else:
                 log(f"⚠ 视觉模型不存在({VIS_MODEL_PATH}),本次无人脸跟随(其余功能不受影响)")
 

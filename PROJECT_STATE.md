@@ -2,6 +2,24 @@
 
 ## 已完成事项
 
+### ✅ 注视感知 Phase 2 — ARMED 注视回看 + 时间常数平滑 + Dashboard 可视化(2026-07-02)
+
+**Phase 2a: Dashboard 可视化**
+- `debug_server.py`: mutual_gaze 框色(说话绿>注视青>普通灰) + 底部 gaze 标签(LOOK / Y:+5 P:-3) + 注视方向箭头 + 左上角 `gaze=CURIOUS_LOOK →T42` 行
+- 注册面板(#reg-panel)改为可关闭(✕)+可拖动(标题栏)+重开按钮(🏷)
+
+**Phase 2b: ARMED 注视回看**
+- 有人看机器人(CURIOUS_LOOK/SCANNING)→ 机器人在 ARMED 下缓慢回看对方
+- 积分机制: 指数时间常数 τ=0.80s(TRACKING 用 0.40s,这里慢一倍) + OneEuroFilter 平滑
+- 防抖: 入场延迟 0.5s + deadband 3° + max_step 1.2°/帧 + 不驱动身体
+- 退出: gaze→IDLE/GLANCING 时 behavior_loop 恢复 approach(0,0,0) 回正
+
+**修改文件**:
+- `voice/state.py`: +gaze_target_u/v 字段
+- `voice/config.py`: +GAZE_ARMED_TAU/MAX_STEP/DEADBAND/ENTRY_S 常量
+- `voice/d01_realtime_chat.py`: gaze FSM 存 target u,v + vision_result_loop ARMED 积分分支 + behavior_loop 条件 approach
+- `voice/debug_server.py`: 可视化 + 面板交互
+
 ### ✅ 注视感知 Phase 1 — 三级级联 Gaze Estimation(2026-06-29，feat/gaze-aware-interaction 分支）
 
 在场人是否在看机器人 + 注视行为状态机，为后续"好奇回看"交互打基础。
@@ -212,8 +230,8 @@ memory/
 
 ## 下一步建议
 
-1. 下载 ONNX 模型后真机测试注视感知（看机器人时 dashboard 显示 mutual_gaze=True）
-2. Phase 2：GazeBehaviorFSM 驱动头部跟随（好奇回看 / 扫视 / 瞥一眼）
+1. **真机验证 Phase 2 注视回看**：`VIS_DEBUG=1 bash start_mac.sh`，ARMED 下看机器人→头缓慢转向，看走→回正
+2. Phase 3：TRACKING 态注视增强（对话中持续微调头部追踪说话人视线）
 3. 真机测试验证身份稳定性修复 + 上下文防污染效果
-4. 继续 todo.md 未完成项
+4. 继续 todo.md 未完成项(#1 DOA / #7 身份优化 / #9 对话质量)
 5. Semantic Memory 层 — 从 episodes 抽象知识 + GraphDB

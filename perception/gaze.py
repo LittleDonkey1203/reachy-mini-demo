@@ -9,9 +9,13 @@ L2: L2CS-Net MobileNetV2 ONNX (448×448), ~10-15ms/face on macOS Intel CPU
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 import numpy as np
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -36,6 +40,14 @@ class _TrackGazeState:
     frames_since_check: int = 0
     gaze_yaw: float = 0.0
     gaze_pitch: float = 0.0
+    # EMA 平滑后的 gaze(供 mutual_gaze 判定)
+    smooth_yaw: float = 0.0
+    smooth_pitch: float = 0.0
+    # 连续帧迟滞计数器
+    looking_streak: int = 0     # 连续"原始 mutual" 帧数
+    not_looking_streak: int = 0  # 连续"原始 非 mutual" 帧数
+    confirmed_mutual: bool = False  # 迟滞后的稳定 mutual_gaze
+    l2_count: int = 0  # L2 推理次数(warm-start: 前几帧用高 alpha)
 
 
 class HeadPoseFilter:
@@ -126,8 +138,14 @@ class GazeModule:
     def __init__(self, model_path: str,
                  head_yaw_thresh: float = 45.0, head_pitch_thresh: float = 35.0,
                  not_looking_interval: int = 5,
+                 looking_interval: int = 3,
                  mutual_yaw_thresh: float = 12.0, mutual_pitch_thresh: float = 15.0,
+                 gaze_dir_deadband: float = 8.0,
+                 fov_x_deg: float = 65.0,
                  min_face_px: int = 40,
+                 l2_ema_alpha: float = 0.35,
+                 mutual_confirm_frames: int = 3,
+                 mutual_drop_frames: int = 5,
                  input_size: int = 448, num_bins: int = 90,
                  bin_width: float = 4.0, offset: float = 180.0,
                  mean: tuple = (0.485, 0.456, 0.406),
@@ -137,9 +155,24 @@ class GazeModule:
                                         bin_width, offset, mean, std)
         self._mutual_yaw = mutual_yaw_thresh
         self._mutual_pitch = mutual_pitch_thresh
+        self._gaze_dir_deadband = gaze_dir_deadband
+        self._fov_x = fov_x_deg
         self._not_looking_interval = not_looking_interval
+        self._looking_interval = looking_interval
         self._min_face_px = min_face_px
-        self._states: dict[int, _TrackGazeState] = {}
+        self._ema_alpha = l2_ema_alpha
+        self._confirm_frames = mutual_confirm_frames
+        self._drop_frames = mutual_drop_frames
+        self._states: dict[str, _TrackGazeState] = {}
+        # 样本采集: GAZE_SAVE_SAMPLES=1 时保存 L2 输入 crop + 模型输出
+        self._save_samples = os.environ.get("GAZE_SAVE_SAMPLES") == "1"
+        self._sample_dir: Optional[Path] = None
+        self._sample_seq = 0
+        if self._save_samples:
+            repo = Path(__file__).resolve().parent.parent
+            self._sample_dir = repo / "data" / "gaze_samples"
+            self._sample_dir.mkdir(parents=True, exist_ok=True)
+            _log.info("📸 Gaze 样本采集已开启 → %s", self._sample_dir)
 
     @property
     def available(self) -> bool:
@@ -147,63 +180,138 @@ class GazeModule:
 
     def update(self, track_id: int, landmarks_5x2: np.ndarray,
                full_rgb: Optional[np.ndarray], bbox_xyxy: np.ndarray,
-               decimate: int) -> GazeResult:
-        st = self._states.get(track_id)
+               decimate: int, identity_key: Optional[str] = None,
+               frame_w: int = 0) -> GazeResult:
+        key = identity_key or f"t{track_id}"
+        st = self._states.get(key)
         if st is None:
             st = _TrackGazeState()
-            self._states[track_id] = st
+            self._states[key] = st
 
         head_yaw, head_pitch = self._head_filter.estimate(landmarks_5x2)
         res = GazeResult(track_id=track_id, head_yaw=head_yaw, head_pitch=head_pitch)
 
         if not self._head_filter.is_candidate(head_yaw, head_pitch):
+            # 大侧脸:直接判定非注视,更新迟滞计数
             st.last_result = "NOT_LOOKING"
             st.frames_since_check = 0
+            st.looking_streak = 0
+            st.not_looking_streak += 1
+            if st.not_looking_streak >= self._drop_frames:
+                st.confirmed_mutual = False
+            res.mutual_gaze = st.confirmed_mutual
             return res
 
         needs_l2 = self._needs_l2(st)
         if not needs_l2:
-            res.gaze_yaw = st.gaze_yaw
-            res.gaze_pitch = st.gaze_pitch
-            res.mutual_gaze = (abs(st.gaze_yaw) < self._mutual_yaw
-                               and abs(st.gaze_pitch) < self._mutual_pitch)
+            # 复用上次平滑值
+            res.gaze_yaw = st.smooth_yaw
+            res.gaze_pitch = st.smooth_pitch
+            res.mutual_gaze = st.confirmed_mutual
             return res
 
         if not self._estimator.available or full_rgb is None:
+            res.mutual_gaze = st.confirmed_mutual
             return res
 
         face_w = (bbox_xyxy[2] - bbox_xyxy[0])
         if face_w < self._min_face_px:
+            res.mutual_gaze = st.confirmed_mutual
             return res
 
         crop = _crop_face(full_rgb, bbox_xyxy, decimate)
         if crop is None:
+            res.mutual_gaze = st.confirmed_mutual
             return res
 
         gaze_yaw, gaze_pitch = self._estimator.predict(crop)
-        res.gaze_yaw = gaze_yaw
-        res.gaze_pitch = gaze_pitch
-        res.mutual_gaze = (abs(gaze_yaw) < self._mutual_yaw
-                           and abs(gaze_pitch) < self._mutual_pitch)
+
+        # ── 样本采集 ──
+        if self._save_samples and self._sample_dir is not None:
+            self._sample_seq += 1
+            sid = f"{self._sample_seq:06d}"
+            cv2.imwrite(str(self._sample_dir / f"{sid}.jpg"),
+                        cv2.cvtColor(crop, cv2.COLOR_RGB2BGR),
+                        [cv2.IMWRITE_JPEG_QUALITY, 90])
+            meta = {
+                "id": sid, "ts": time.time(), "track_id": track_id,
+                "head_yaw": round(head_yaw, 2), "head_pitch": round(head_pitch, 2),
+                "gaze_yaw_raw": round(gaze_yaw, 2), "gaze_pitch_raw": round(gaze_pitch, 2),
+                "smooth_yaw": round(st.smooth_yaw, 2), "smooth_pitch": round(st.smooth_pitch, 2),
+                "bbox": [round(float(v), 1) for v in bbox_xyxy[:4]],
+                "decimate": decimate, "frame_w": frame_w,
+                "label": None,  # 待标注: "looking" / "not_looking"
+            }
+            with open(self._sample_dir / f"{sid}.json", "w") as f:
+                json.dump(meta, f, ensure_ascii=False)
+
+        # ── EMA 平滑 L2 输出 ──
+        st.l2_count += 1
+        a = 0.6 if st.l2_count <= 3 else self._ema_alpha  # warm-start: 前3帧高alpha快收敛
+        if st.last_result == "UNKNOWN":
+            st.smooth_yaw = gaze_yaw
+            st.smooth_pitch = gaze_pitch
+        else:
+            st.smooth_yaw = a * gaze_yaw + (1.0 - a) * st.smooth_yaw
+            st.smooth_pitch = a * gaze_pitch + (1.0 - a) * st.smooth_pitch
+
+        res.gaze_yaw = st.smooth_yaw
+        res.gaze_pitch = st.smooth_pitch
         res.l2_ran = True
 
+        # 保存原始值(用于降频复用)
         st.gaze_yaw = gaze_yaw
         st.gaze_pitch = gaze_pitch
-        st.last_result = "LOOKING" if res.mutual_gaze else "NOT_LOOKING"
+
+        # ── 连续帧迟滞判定 mutual_gaze ──
+        # 方向一致性: L2CS-Net 的 gaze_yaw 是相对人脸坐标系,
+        # 看相机时 gaze 和 head 应同号(都偏向同一侧=眼球朝相机方向看)
+        # head 接近正中(|head_yaw|<deadband)时不检查方向
+        dir_ok = (abs(head_yaw) < self._gaze_dir_deadband
+                  or (head_yaw > 0) == (st.smooth_yaw > 0))
+        raw_mutual = (abs(st.smooth_yaw) < self._mutual_yaw
+                      and abs(st.smooth_pitch) < self._mutual_pitch
+                      and dir_ok)
+        if raw_mutual:
+            st.looking_streak += 1
+            st.not_looking_streak = 0
+            if st.looking_streak >= self._confirm_frames:
+                st.confirmed_mutual = True
+        else:
+            st.not_looking_streak += 1
+            st.looking_streak = 0
+            if st.not_looking_streak >= self._drop_frames:
+                st.confirmed_mutual = False
+
+        res.mutual_gaze = st.confirmed_mutual
+        st.last_result = "LOOKING" if st.confirmed_mutual else "NOT_LOOKING"
         st.frames_since_check = 0
+
+        # ── 诊断日志(每20帧打一次,不刷屏) ──
+        _diag_ctr = getattr(st, '_diag_ctr', 0) + 1
+        st._diag_ctr = _diag_ctr
+        if _diag_ctr % 5 == 0:
+            _log.info("T%d gaze raw=%.1f/%.1f smooth=%.1f/%.1f head=%.1f/%.1f "
+                      "look=%d notlook=%d mutual=%s",
+                      track_id, gaze_yaw, gaze_pitch,
+                      st.smooth_yaw, st.smooth_pitch,
+                      head_yaw, head_pitch,
+                      st.looking_streak, st.not_looking_streak,
+                      st.confirmed_mutual)
+
         return res
 
     def _needs_l2(self, st: _TrackGazeState) -> bool:
         if st.last_result == "UNKNOWN":
             return True
-        if st.last_result == "LOOKING":
-            return True
         st.frames_since_check += 1
-        if st.frames_since_check >= self._not_looking_interval:
+        interval = (self._looking_interval if st.last_result == "LOOKING"
+                    else self._not_looking_interval)
+        if st.frames_since_check >= interval:
             st.frames_since_check = 0
             return True
         return False
 
-    def gc(self, alive_ids: set[int]) -> None:
-        for tid in [k for k in self._states if k not in alive_ids]:
-            del self._states[tid]
+    def gc(self, alive_keys: set[str]) -> None:
+        for k in [k for k in self._states if k not in alive_keys]:
+            del self._states[k]

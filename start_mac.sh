@@ -111,7 +111,7 @@ export no_proxy="localhost,127.0.0.1,::1"
 
 nohup "$SCRIPT_DIR/.venv/bin/reachy-mini-daemon" \
   -p "$SERIAL_PORT" \
-  --localhost-only \
+  --fastapi-host 127.0.0.1 \
   --log-level INFO \
   >> "$LOG_DIR/daemon.log" 2>&1 &
 echo $! > "$DAEMON_PID"
