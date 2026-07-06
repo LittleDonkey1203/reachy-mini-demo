@@ -189,3 +189,15 @@
 | 17:10 | feat: 注视样本采集(GAZE_SAVE_SAMPLES=1)+标注评估脚本(gaze_eval.py) | gaze.py, scripts/gaze_eval.py | 新建 | ~3k |
 | 17:15 | fix: pitch阈值22→13(427张标注数据网格搜索F1=0.857最优) | config.py | 编译OK | ~1k |
 | 17:20 | feat: 注视情感反应 — 长时间对视不说话触发歪头(4s)/摆天线(10s)/再歪头(18s) | d01, config.py | 编译OK | ~5k |
+| 14:00 | rebase 冲突解决完成 + force push 更新 PR #12 | feat/gaze-aware-interaction | 3 commits cleanly on origin/main | ~2k |
+
+## Session: 2026-07-06 (工具系统重构)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 14:10 | 移动 tools/ 脚本到 scripts/ | tools/* → scripts/ | 腾出 tools/ 给 Tool 类包 | ~500 |
+| 14:20 | 创建 tools/ 包(6文件): base.py(Tool ABC+ToolDeps) + motion.py(8动作) + session.py(EndSession) + memory.py(4记忆) + registry.py(ToolRegistry+build_default) + __init__.py | tools/*.py | 新包就位 | ~3k |
+| 14:30 | 重构 realtime.py: 130行 if/elif → ~20行 registry 分发; ChatCallback/RealtimeDialog 加 registry 参数 | voice/realtime.py | 分发代码减 80% | ~2k |
+| 14:35 | d01 切换到 registry: TOOLS列表→build_default_registry(); no_memory→registry.exclude() | voice/d01_realtime_chat.py | 接线完成 | ~1k |
+| 14:40 | 验证: py_compile 10/10 绿 + 新旧 specs 13/13 完全一致 + exclude 正常 | — | 回归通过 | ~500 |
+| 14:45 | 更新 PROJECT_STATE.md + anatomy.md | PROJECT_STATE.md .wolf/anatomy.md | 状态同步 | ~1k |

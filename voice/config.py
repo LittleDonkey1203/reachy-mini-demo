@@ -272,7 +272,7 @@ EXPR_SMILE_ANT = 0.20
 EXPR_FROWN_ANT = -0.15
 EXPR_BLEND_TAU = 0.8
 
-# ── 工具定义 ──
+# ── 工具定义 (DEPRECATED: 工具规格现由 tools/ 包生成，此处保留供参考) ──
 _NOPARAM = {"type": "object", "properties": {}}
 BASE_TOOLS = [
     {"type": "function", "name": "nod",
