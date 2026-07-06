@@ -177,6 +177,13 @@ memory/
 - 9 状态 FSM: ARMED/IDLE_CENTER/ENGAGING/TRACKING/SEARCHING/RETURNING/POINTING/PLAYING
 - 5 层运动仲裁: Primary > Playing > SoundTurn > Tracking > Idle
 
+### 多人"我是谁"误答修复(2026-07-06,bug-068)
+- **现象**:已认识 A 在场,新人 B 问"我是谁",模型答"你是 A";但全都认识时接力问则回答正确。
+- **诊断**:`test_identity_switch.py` 5 场景全 PASS → 模型能力没问题,能正确处理 `update_session` 中途切换 instructions(含 known→neutral、known→known、session restart)。
+- **根因**:ASD fallback(`realtime.py:222-226`)— B 刚出现,ASD 还没攒够帧,`speaker_window()` 返回 None → 2 秒内 fallback 到 `st.asd_speaker`(=A)→ 注入 A 的记忆 → 模型理所当然答"你是 A"。
+- **修法**:ASD `tracked_keys()` 暴露当前有 crop 缓冲的 key 集合;fallback 时检查追踪人数——多人(`>1`)不 fallback,走 neutral 路径;单人保持原逻辑。日志 `⚠ ASD fallback 拦截` 可追踪触发情况。
+- **待真机验证**:两人场景 + 新人问"我是谁"应答"不认识"。
+
 ## 遗留问题
 
 1. **YuNet 无 blendshapes**: smile/frown 恒 0.0, 可用 insightface 2D106 估算
