@@ -223,7 +223,17 @@ class ChatCallback(OmniRealtimeCallback):
                     with st.lock:
                         _hold = st.asd_speaker
                     if _hold is not None and (now - _hold.get("at", 0.0)) < 2.0:
-                        _asp = _hold
+                        # 多人场景:ASD 追踪多于 1 个身份时 speaker_window 无结果,
+                        # 意味着新人可能还没攒够 ASD 帧(无法出分),此时不 fallback 到旧人
+                        # → 走 neutral 路径,让模型回答"不认识"而非张冠李戴(bug-067)
+                        _n_tracked = (len(self.asd_engine.tracked_keys())
+                                      if (self.asd_engine is not None and self.asd_engine.available)
+                                      else 0)
+                        if _n_tracked <= 1:
+                            _asp = _hold
+                        else:
+                            log(f"⚠ ASD fallback 拦截:追踪 {_n_tracked} 人但 speaker_window 无结果,"
+                                f"不归属到 {_hold.get('name', '?')}(可能是新人说话)")
                 if _asp is not None:
                     _tid = _asp.get("track_id")
                     _log_pid = _asp.get("pid") or f"_track{_tid}"      # 在画面但未识别:临时 track 键

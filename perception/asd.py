@@ -305,6 +305,11 @@ class AsdEngine:
                 self._last_pos_t.pop(k, None)
                 self._last_tid.pop(k, None)
 
+    def tracked_keys(self) -> set:
+        """当前正在追踪的 key 集合(有 crop 缓冲,含还没攒够帧出分的新人)。"""
+        with self._lock:
+            return set(self._crops.keys())
+
     def last_track(self, key):
         """key 对应的最近 track_id(仅供显示/归属标签);无则 None。"""
         return self._last_tid.get(key)
