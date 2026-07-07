@@ -18,6 +18,28 @@ VISION_MODEL = os.environ.get("VISION_MODEL", "qwen3.5-omni-plus")
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen-turbo")
 EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "qwen-plus")  # 每轮工具审视(记忆抽取),FC/判断更稳
 VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+# ── Reasoner(异步对话策略,Talker-Reasoner 架构,REASONER-01)──
+REASONER_MODEL = os.environ.get("REASONER_MODEL", "qwen-max")
+REASONER_BASE_URL = os.environ.get("REASONER_BASE_URL", VISION_BASE_URL)  # 默认复用 DashScope compatible-mode;留出换 GLM 端点
+REASONER_API_KEY = os.environ.get("REASONER_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+REASONER_DEBOUNCE_S = 8.0        # 两次生成最小间隔(距上次完成 < 此值则等)
+REASONER_HINT_TTL_S = 90.0       # hint 过期时长(注入门①·新鲜)
+REASONER_MAX_STALE_TURNS = 6     # hint 落后当前轮数超过此值不注入(注入门③)
+REASONER_TIMEOUT_S = 20.0        # 单次 LLM 调用超时
+REASONER_PROMPT = (
+    "你是一个「对话策划」,在后台辅助一个桌面聊天机器人(它叫小艺)。"
+    "下面给你最近的对话和当前用户画像(记忆事实/最近话题),"
+    "请预判接下来几轮用户可能对什么感兴趣、怎么聊更轻松开心,给出简短策略。\n"
+    "严格只输出一个 JSON 对象,不要解释、不要代码块标记:\n"
+    '{"topics":[{"t":"话题词","hook":"一句自然的引子或提问"}],'
+    '"style":"本轮回应风格建议,如 1-2短句+反问",'
+    '"avoid":"该回避的点,可留空","callback":"可回扣的用户已知信息点,可留空"}\n'
+    "要求:topics 最多 2 条、新鲜不重复已聊内容;hook 是机器人能自然说出口的话;"
+    "策略仅供机器人【内部参考】——严禁在回复里提及策略本身,也严禁说"
+    "「我觉得你会感兴趣」「根据我的分析」之类的元话语。"
+)
+
 VOICE = "Ethan"
 INSTRUCTIONS = (
     "你是桌面机器人,名字叫'小艺'(用户给你起的中文名),有真实的身体(头、天线)和一台摄像头。"
