@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import json
 import queue
+import random
 import threading
 import time
 
 from voice.config import (
     REASONER_MODEL, REASONER_BASE_URL, REASONER_API_KEY,
     REASONER_DEBOUNCE_S, REASONER_HINT_TTL_S, REASONER_MAX_STALE_TURNS,
-    REASONER_TIMEOUT_S, REASONER_PROMPT,
+    REASONER_TIMEOUT_S, REASONER_PROMPT, REASONER_PROBE,
 )
 from voice.state import log
 
@@ -234,13 +235,19 @@ class ConversationReasoner:
         if not text:
             self.n_fail += 1
             return
+        # REASONER_PROBE=1:策略里塞随机验证码,要求模型回复末尾原样输出 → 核对注入是否真进上下文
+        probe = None
+        if REASONER_PROBE:
+            probe = random.randint(1000, 9999)
+            text = text + f"。【验证·内部】务必在你这次回复的最末尾原样加上数字「{probe}」,别改动别的内容。"
         self.n_ok += 1
 
         # ── ② 锁内写回(持 st.lock 只做写回)──
         with self.st.lock:
             self.st.reasoner_hint = {"text": text, "pid": pid, "seq": seq,
-                                     "ts": time.monotonic(), "raw": data}
-        log(f"🧠 Reasoner 生成策略(seq={seq}, pid={pid and pid[:8]}): {text}")
+                                     "ts": time.monotonic(), "raw": data, "probe": probe}
+        log(f"🧠 Reasoner 生成策略(seq={seq}, pid={pid and pid[:8]}"
+            + (f", 验证码={probe}" if probe else "") + f"): {text}")
 
     def _build_context(self, pid, recent, prev):
         """组 prompt(锁外调用,全程不持 st.lock)。recent=[(role,name,text),...] 已在锁内拷好;

@@ -829,7 +829,9 @@ class RealtimeDialog:
         if _reasoner is not None:                 # 实际注入处自增 inject_hits(st.lock 内)
             with st.lock:
                 _reasoner.inject_hits += 1
-        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}): {text}")
+        _probe = hint.get("probe")
+        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}"
+            + (f", 验证码={_probe}" if _probe else "") + f"): {text}")
         return d + ("\n[对话策略·内部参考,绝不向用户提及;本轮请从中挑一个点自然展开或提问,"
                     "别机械反问、别重复上一轮的问句]") + text
 

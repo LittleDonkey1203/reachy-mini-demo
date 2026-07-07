@@ -27,6 +27,9 @@ REASONER_DEBOUNCE_S = float(os.environ.get("REASONER_DEBOUNCE_S", "8"))         
 REASONER_HINT_TTL_S = float(os.environ.get("REASONER_HINT_TTL_S", "90"))           # hint 过期时长(注入门①·env 可调)
 REASONER_MAX_STALE_TURNS = int(os.environ.get("REASONER_MAX_STALE_TURNS", "10"))   # 落后轮数上限(注入门③;默认10 容慢模型;env 可调)
 REASONER_TIMEOUT_S = float(os.environ.get("REASONER_TIMEOUT_S", "20"))  # 单次 LLM 调用超时(env 可调;慢模型如 qwen3.7-max ~21s 需调大)
+# 注入验证探针:REASONER_PROBE=1 时,策略里塞一个随机验证码、要求模型回复末尾原样输出,
+# 核对"注入的验证码"与"模型回复的验证码"是否一致 → 证明 Reasoner 内容确实进了上下文(测完关掉)
+REASONER_PROBE = os.environ.get("REASONER_PROBE", "").lower() in ("1", "true", "yes")
 REASONER_PROMPT = (
     "你是一个「对话策划」,在后台辅助一个桌面聊天机器人(它叫小艺)。"
     "下面给你最近的对话和当前用户画像(记忆事实/最近话题),"
