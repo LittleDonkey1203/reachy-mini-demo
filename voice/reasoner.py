@@ -132,6 +132,7 @@ class ConversationReasoner:
         self.n_ok = 0
         self.n_fail = 0
         self.n_dropped = 0
+        self.inject_hits = 0        # resp_directive 实际注入策略的次数(批次2;在 _maybe_append_strategy 自增)
         self._total_ms = 0.0
 
     # ── 生命周期 ──
@@ -177,9 +178,11 @@ class ConversationReasoner:
             self.st.reasoner_hint = None
 
     def stats(self):
-        avg = (self._total_ms / self.n_calls) if self.n_calls else 0.0
+        avg_s = (self._total_ms / self.n_calls / 1000.0) if self.n_calls else 0.0
+        rate = (self.inject_hits / self.n_ok) if self.n_ok else 0.0
         return {"calls": self.n_calls, "ok": self.n_ok, "fail": self.n_fail,
-                "dropped": self.n_dropped, "avg_ms": round(avg, 1)}
+                "dropped": self.n_dropped, "avg_latency_s": round(avg_s, 2),
+                "inject_hits": self.inject_hits, "inject_rate": round(rate, 2)}
 
     # ── worker ──
     def _run(self):

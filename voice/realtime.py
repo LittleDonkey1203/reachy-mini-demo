@@ -822,6 +822,10 @@ class RealtimeDialog:
         text = hint.get("text", "")
         age = now - hint.get("ts", now)
         lag = cur_seq - hint.get("seq", cur_seq)
+        _reasoner = self.callback.reasoner if self.callback else None
+        if _reasoner is not None:                 # 实际注入处自增 inject_hits(st.lock 内)
+            with st.lock:
+                _reasoner.inject_hits += 1
         log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}):{text[:40]}…")
         return d + "\n[对话策略·内部参考,绝不向用户提及]" + text
 

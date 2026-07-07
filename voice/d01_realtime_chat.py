@@ -2325,8 +2325,8 @@ def main() -> int:
                 if _asd_engine is not None:
                     _asd_engine.stop()
                 if reasoner is not None:
+                    log("🧠 Reasoner 统计: " + json.dumps(reasoner.stats(), ensure_ascii=False))
                     reasoner.stop()
-                    log("🧠 Reasoner 已停止")
         finally:
             try:
                 mini.set_automatic_body_yaw(True)

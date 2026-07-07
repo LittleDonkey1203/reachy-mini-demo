@@ -274,6 +274,28 @@ def test_11_concurrency():
         shutil.rmtree(d)
 
 
+def test_12_concurrency_same_pid():
+    print("\n[Test 12] 并发冒烟·同 pid(RLock 序列化读改写,不丢)")
+    import threading
+    d = tempfile.mkdtemp()
+    try:
+        mm = MemoryManager(d)
+
+        def worker(base):
+            for i in range(20):                  # 2 线程 × 20 key = 40 < MAX_FACTS=50
+                mm.save_fact("shared", f"{base}{i}", f"v{i}")
+
+        t1 = threading.Thread(target=worker, args=("a",))
+        t2 = threading.Thread(target=worker, args=("b",))
+        t1.start(); t2.start()
+        t1.join(timeout=10); t2.join(timeout=10)
+        n = len(mm.get_facts("shared"))
+        _check(f"同 pid 40 条完整(实得 {n})", n == 40)
+        assert n == 40, f"同 pid 并发丢数据:{n}/40"
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     print("=" * 60)
     print("  记忆管理功能测试 — memory_manager.py")
@@ -291,6 +313,7 @@ def main():
         test_09_flush_unload,
         test_10_qwen_tools,
         test_11_concurrency,
+        test_12_concurrency_same_pid,
     ]
 
     for fn in tests:
