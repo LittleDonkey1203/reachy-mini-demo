@@ -24,6 +24,7 @@ from voice.config import (
     CONV_SUMMARY_THRESHOLD,
 )
 from voice.state import State, log, _record_event
+from voice.reasoner import hint_gate_ok   # 策略注入三道门(reasoner 不 import realtime,无环)
 import voice.state as _st_mod
 
 
@@ -142,6 +143,7 @@ class ChatCallback(OmniRealtimeCallback):
         self._speech_start_t = 0.0           # 本句说话起点(monotonic),speech_started 时记
         self.conv: OmniRealtimeConversation | None = None
         self.dialog: "RealtimeDialog | None" = None
+        self.reasoner = None                 # ConversationReasoner(d01 注入;--no-reasoner 时保持 None)
         self.exit_i = 0
 
     def on_open(self) -> None:
@@ -248,10 +250,14 @@ class ChatCallback(OmniRealtimeCallback):
                 # ── ① 本句说话人:记忆「存/读」唯一来源(稳),不再用飘的 current_person_id ──
                 _tspk_real = (_log_pid not in ("_unknown", "_offscreen")
                               and not _log_pid.startswith("_track"))
+                _new_tspk = _log_pid if _tspk_real else None
                 with st.lock:
-                    st.turn_speaker_pid = _log_pid if _tspk_real else None
+                    _old_tspk = st.turn_speaker_pid
+                    st.turn_speaker_pid = _new_tspk
                     st.turn_speaker_name = _real_name if _tspk_real else None   # 占位名 ?T 绝不入 turn_speaker
                     st.turn_speaker_at = now
+                if self.reasoner is not None and _new_tspk != _old_tspk:
+                    self.reasoner.invalidate()   # 换人:旧说话人策略作废,等新说话人重新生成
                 log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
                 if _transcript:
                     with st.lock:
@@ -309,6 +315,11 @@ class ChatCallback(OmniRealtimeCallback):
                                 log(f"⚠ create_response 失败:{type(_e).__name__}: {_e}")
                         else:
                             log(f"⏭ 跳过 create_response(in_flight={st.in_flight},招呼/旧回复在途)")
+                    # ── Reasoner:本轮转写完成 → 触发后台策略生成(notify 非阻塞;reasoner 为 None 跳过)──
+                    if self.reasoner is not None:
+                        with st.lock:
+                            _rseq = st.display_transcript_seq
+                        self.reasoner.notify(_rseq, _log_pid if _tspk_real else None)
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
@@ -637,6 +648,8 @@ class RealtimeDialog:
             if st.clear_workflow is not None:
                 st.clear_workflow = None
                 st.clear_lock = False
+        if self.callback.reasoner is not None:
+            self.callback.reasoner.invalidate()   # 会话关闭:策略作废(在 st.lock 外调,invalidate 自持锁)
         if self.memory_mgr and not self.no_memory:
             for _pid, _log in _all_logs.items():
                 if _pid != "_unknown" and len(_log) >= 2:
@@ -652,6 +665,8 @@ class RealtimeDialog:
         """身份切换时重启 WS 会话，清除旧对话历史防止上下文污染。"""
         st = self.st
         log(f"🔄 身份切换重启: {old_pid and old_pid[:8]}→{new_pid[:8]} ({new_pname})")
+        if self.callback.reasoner is not None:
+            self.callback.reasoner.invalidate()   # 身份切换:策略作废
         if old_pid and self.memory_mgr and not self.no_memory:
             with st.lock:
                 _old_log = list(st.conversation_log.get(old_pid, []))
@@ -791,7 +806,24 @@ class RealtimeDialog:
         else:
             d = ("【本次回应对象】对方不在画面里、你看不到TA。若被问身份,如实说看不到、不确定是谁;"
                  "别套用其他人的名字或记忆。")
+        d = self._maybe_append_strategy(d, cur_pid, present)   # 末尾拼 Reasoner 策略段(身份段 d 一字不动)
         return self.instructions + "\n\n" + d
+
+    def _maybe_append_strategy(self, d, cur_pid, present):
+        """resp_directive 末尾拼「对话策略」段:hint_gate_ok 三道门全过才注入,身份段 d 保持不变。
+        策略缺失/过期/换人/落后轮数 → 原样返回 d(即现状,红线1:Reasoner 失效不影响对话)。"""
+        st = self.st
+        with st.lock:
+            hint = st.reasoner_hint
+            cur_seq = st.display_transcript_seq
+        now = time.monotonic()
+        if not hint_gate_ok(hint, cur_pid, present, now, cur_seq):
+            return d
+        text = hint.get("text", "")
+        age = now - hint.get("ts", now)
+        lag = cur_seq - hint.get("seq", cur_seq)
+        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}):{text[:40]}…")
+        return d + "\n[对话策略·内部参考,绝不向用户提及]" + text
 
     def extract_memory_async(self, pid: str, pname: str | None,
                              current_text: str, context_turns: list) -> None:
