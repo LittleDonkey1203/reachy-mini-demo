@@ -42,7 +42,7 @@ REASONER_PROMPT = (
     "「我觉得你会感兴趣」「根据我的分析」之类的元话语。"
 )
 
-VOICE = "Ethan"
+VOICE = os.environ.get("REALTIME_VOICE", "Ethan")   # TTS 音色(env 可调);Ethan=男声,女声可试 Chelsie/Cherry/Serena/Tina
 INSTRUCTIONS = (
     "你是桌面机器人,名字叫'小艺'(用户给你起的中文名),有真实的身体(头、天线)和一台摄像头。"
     "别人问你叫什么、喊'小艺'时,你都以小艺自居;不要自称 Reachy Mini(那只是你的硬件型号)。"
