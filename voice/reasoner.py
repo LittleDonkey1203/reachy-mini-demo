@@ -240,7 +240,7 @@ class ConversationReasoner:
         with self.st.lock:
             self.st.reasoner_hint = {"text": text, "pid": pid, "seq": seq,
                                      "ts": time.monotonic(), "raw": data}
-        log(f"🧠 Reasoner 生成策略(seq={seq}, pid={pid and pid[:8]}):{text[:40]}…")
+        log(f"🧠 Reasoner 生成策略(seq={seq}, pid={pid and pid[:8]}): {text}")
 
     def _build_context(self, pid, recent, prev):
         """组 prompt(锁外调用,全程不持 st.lock)。recent=[(role,name,text),...] 已在锁内拷好;

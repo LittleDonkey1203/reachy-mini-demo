@@ -829,7 +829,7 @@ class RealtimeDialog:
         if _reasoner is not None:                 # 实际注入处自增 inject_hits(st.lock 内)
             with st.lock:
                 _reasoner.inject_hits += 1
-        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}):{text[:40]}…")
+        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}): {text}")
         return d + "\n[对话策略·内部参考,绝不向用户提及;供灵感、可改述,避免连续多轮重复同一话题]" + text
 
     def extract_memory_async(self, pid: str, pname: str | None,
