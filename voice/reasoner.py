@@ -266,7 +266,7 @@ class ConversationReasoner:
         self.n_calls += 1
         if self._client is None:
             self._client = self._factory()
-        t0 = time.monotonic()
+        t0 = time.monotonic()                     # 于 create 前取
         resp = self._client.chat.completions.create(
             model=REASONER_MODEL,
             messages=[{"role": "system", "content": REASONER_PROMPT},
@@ -274,5 +274,7 @@ class ConversationReasoner:
             temperature=0.7,
             timeout=REASONER_TIMEOUT_S,
         )
-        self._total_ms += (time.monotonic() - t0) * 1000.0
+        _elapsed_ms = (time.monotonic() - t0) * 1000.0
+        with self.st.lock:                        # 锁内累计(create 已返回,不违反"LLM 调用在锁外")
+            self._total_ms += _elapsed_ms
         return (resp.choices[0].message.content or "").strip()

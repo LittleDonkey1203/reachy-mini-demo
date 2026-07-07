@@ -197,6 +197,26 @@ def test_drain_uses_latest_snapshot():
     assert h["seq"] == 9 and h["pid"] == "p2"
 
 
+def test_latency_accounted():
+    """延迟记账:create() sleep 0.05s → avg_latency_s > 0(排除上批 0.0 = 瞬时 mock 的疑点)。"""
+    st = FakeSt()
+
+    def _slow_create(**kw):
+        time.sleep(0.05)
+        return _Resp('{"topics":[{"t":"x","hook":"h"}],"style":"短"}')
+
+    class _SlowClient:
+        def __init__(s):
+            s.chat = type("_Ch", (), {"completions":
+                                      type("_Co", (), {"create": staticmethod(_slow_create)})()})()
+
+    r = ConversationReasoner(st, None, oai_client_factory=lambda: _SlowClient())
+    r._process(1, "p1")
+    s = r.stats()
+    assert s["avg_latency_s"] > 0, f"latency 未记账: {s}"
+    assert s["ok"] == 1
+
+
 def test_notify_without_start_warns_once():
     """未 start() 就 notify → 打一次告警(log-once),flag 只置一次。"""
     r = ConversationReasoner(FakeSt(), None, oai_client_factory=lambda: None)
