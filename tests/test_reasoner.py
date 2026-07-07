@@ -86,8 +86,12 @@ def test_gate_expired():
 
 def test_gate_stale_turns():
     now = time.monotonic()
-    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 17) is False   # 17-10=7 > 6
-    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 16) is True    # 16-10=6 ≤ 6
+    # 显式传 max_stale=6 测边界逻辑本身(不依赖 config 默认)
+    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 17, max_stale=6) is False  # 7 > 6
+    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 16, max_stale=6) is True   # 6 ≤ 6
+    # 默认(config 现为 10)的边界
+    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 20) is True    # 10 ≤ 10
+    assert hint_gate_ok(_hint("p1", 10, now), "p1", True, now, 21) is False   # 11 > 10
 
 
 def test_gate_pid_none_present():

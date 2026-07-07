@@ -23,9 +23,9 @@ VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 REASONER_MODEL = os.environ.get("REASONER_MODEL", "qwen-max")
 REASONER_BASE_URL = os.environ.get("REASONER_BASE_URL", VISION_BASE_URL)  # 默认复用 DashScope compatible-mode;留出换 GLM 端点
 REASONER_API_KEY = os.environ.get("REASONER_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
-REASONER_DEBOUNCE_S = 8.0        # 两次生成最小间隔(距上次完成 < 此值则等)
-REASONER_HINT_TTL_S = 90.0       # hint 过期时长(注入门①·新鲜)
-REASONER_MAX_STALE_TURNS = 6     # hint 落后当前轮数超过此值不注入(注入门③)
+REASONER_DEBOUNCE_S = float(os.environ.get("REASONER_DEBOUNCE_S", "8"))            # 两次生成最小间隔(env 可调)
+REASONER_HINT_TTL_S = float(os.environ.get("REASONER_HINT_TTL_S", "90"))           # hint 过期时长(注入门①·env 可调)
+REASONER_MAX_STALE_TURNS = int(os.environ.get("REASONER_MAX_STALE_TURNS", "10"))   # 落后轮数上限(注入门③;默认10 容慢模型;env 可调)
 REASONER_TIMEOUT_S = float(os.environ.get("REASONER_TIMEOUT_S", "20"))  # 单次 LLM 调用超时(env 可调;慢模型如 qwen3.7-max ~21s 需调大)
 REASONER_PROMPT = (
     "你是一个「对话策划」,在后台辅助一个桌面聊天机器人(它叫小艺)。"
