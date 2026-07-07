@@ -256,8 +256,11 @@ class ChatCallback(OmniRealtimeCallback):
                     st.turn_speaker_pid = _new_tspk
                     st.turn_speaker_name = _real_name if _tspk_real else None   # 占位名 ?T 绝不入 turn_speaker
                     st.turn_speaker_at = now
-                if self.reasoner is not None and _new_tspk != _old_tspk:
-                    self.reasoner.invalidate()   # 换人:旧说话人策略作废,等新说话人重新生成
+                if (self.reasoner is not None and _old_tspk and _new_tspk
+                        and _old_tspk != _new_tspk):
+                    # 仅"已识别人 A → 另一已识别人 B"才作废;不被同一人的画外/track/识别抖动
+                    # (None↔pid)误清(那正是命中率归零的元凶)。跨人泄漏由注入门 pid 匹配兜底。
+                    self.reasoner.invalidate()
                 log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
                 if _transcript:
                     with st.lock:
