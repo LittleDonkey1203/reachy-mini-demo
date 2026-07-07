@@ -644,6 +644,30 @@
       ],
       "occurrences": 1,
       "last_seen": "2026-07-03"
+    },
+    {
+      "id": "bug-069",
+      "timestamp": "2026-07-06T21:00:00.000Z",
+      "error_message": "TypeError: MemoryManager.save_fact() missing 1 required positional argument: 'value'(日志刷「工具审视失败」5 次)",
+      "file": "voice/realtime.py (RealtimeDialog.extract_memory_async)",
+      "root_cause": "每轮兜底记忆抽取器 prompt 让 qwen-plus 吐自由文本 facts 列表,循环里 save_fact(pid, f) 只传 2 参;但本分支(origin/main)MemoryManager 是 key-value 模型 save_fact(pid, key, value) 要 3 参 → 每轮抽取保存都 TypeError,兜底记忆网失效(只有模型主动调 remember_fact 才存得进)",
+      "fix": "抽取器 prompt 改产 key-value dict(而非自由文本 list);解析 facts 按 dict items 循环 save_fact(pid, k, v);非 dict(模型偶发吐旧 list)当空跳过防再崩",
+      "tags": ["memory", "save_fact", "extract_memory_async", "key-value", "typeerror"],
+      "related_bugs": [],
+      "occurrences": 5,
+      "last_seen": "2026-07-06"
+    },
+    {
+      "id": "bug-070",
+      "timestamp": "2026-07-06T21:35:00.000Z",
+      "error_message": "多人在场时新人/换人问『我是谁/我叫什么/我喜欢吃什么』→ 模型张冠李戴,答成另一个人的名字/喜好(如碧霞问被答『你叫大大』)",
+      "file": "voice/realtime.py (注入 + turn-taking + create_response)",
+      "root_cause": "三层叠加:①共享 realtime 会话历史污染(所有人轮次混在一个 session,一旦答错就滚雪球)②semantic_vad 在 speech_stopped 就自动 commit,注入(transcription.completed)慢一拍,没进已提交上下文 ③concise create_item 的 system 条目被 Qwen Omni 低权重/忽略,压不过音频历史",
+      "fix": "WIP(PR #16,待真机验证):inject_context 走 create_item + 每轮刷新;收回 turn-taking(turn_detection create_response=false + 注入后手动 create_response,in_flight==0 守卫)治抢跑;resp_directive() 用 response.instructions 给单次回复下当前说话人强指令(普通轮+工具轮都带)治 system 条目被忽略;过滤称呼/名字 fact 防名字打架。若仍不够则上 Option C(身份切换重启会话清历史)",
+      "tags": ["memory", "identity", "多人", "张冠李戴", "create_item", "turn-taking", "semantic_vad", "response.instructions", "wip"],
+      "related_bugs": ["bug-067", "bug-068"],
+      "occurrences": 1,
+      "last_seen": "2026-07-06"
     }
   ]
 }
