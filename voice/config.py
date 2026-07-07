@@ -26,7 +26,7 @@ REASONER_API_KEY = os.environ.get("REASONER_API_KEY") or os.environ.get("DASHSCO
 REASONER_DEBOUNCE_S = 8.0        # 两次生成最小间隔(距上次完成 < 此值则等)
 REASONER_HINT_TTL_S = 90.0       # hint 过期时长(注入门①·新鲜)
 REASONER_MAX_STALE_TURNS = 6     # hint 落后当前轮数超过此值不注入(注入门③)
-REASONER_TIMEOUT_S = 20.0        # 单次 LLM 调用超时
+REASONER_TIMEOUT_S = float(os.environ.get("REASONER_TIMEOUT_S", "20"))  # 单次 LLM 调用超时(env 可调;慢模型如 qwen3.7-max ~21s 需调大)
 REASONER_PROMPT = (
     "你是一个「对话策划」,在后台辅助一个桌面聊天机器人(它叫小艺)。"
     "下面给你最近的对话和当前用户画像(记忆事实/最近话题),"
