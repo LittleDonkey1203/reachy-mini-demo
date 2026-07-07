@@ -830,7 +830,8 @@ class RealtimeDialog:
             with st.lock:
                 _reasoner.inject_hits += 1
         log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}): {text}")
-        return d + "\n[对话策略·内部参考,绝不向用户提及;供灵感、可改述,避免连续多轮重复同一话题]" + text
+        return d + ("\n[对话策略·内部参考,绝不向用户提及;本轮请从中挑一个点自然展开或提问,"
+                    "别机械反问、别重复上一轮的问句]") + text
 
     def extract_memory_async(self, pid: str, pname: str | None,
                              current_text: str, context_turns: list) -> None:
