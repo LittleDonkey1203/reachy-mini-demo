@@ -832,8 +832,8 @@ class RealtimeDialog:
         _probe = hint.get("probe")
         log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}"
             + (f", 验证码={_probe}" if _probe else "") + f"): {text}")
-        return d + ("\n[对话策略·内部参考,绝不向用户提及;本轮请从中挑一个点自然展开或提问,"
-                    "别机械反问、别重复上一轮的问句]") + text
+        return d + ("\n[对话策略·内部参考,绝不向用户提及;本轮从中挑一个点自然展开;"
+                    "把话题留给用户——可轻问也可观察式留白,别每轮以问句结尾]") + text
 
     def extract_memory_async(self, pid: str, pname: str | None,
                              current_text: str, context_turns: list) -> None:

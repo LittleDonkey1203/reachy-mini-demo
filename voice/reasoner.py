@@ -66,21 +66,23 @@ def compress_hint(data, limit=HINT_LIMIT):
         for t in topics[:2]:
             if not isinstance(t, dict):
                 continue
-            tw = str(t.get("t", "")).strip()
-            hook = str(t.get("hook", "")).strip()
+            tw = str(t.get("t") or "").strip()
+            hook = str(t.get("hook") or "").strip()
             if tw and hook:
                 parts.append(f"可聊「{tw}」:{hook}")
             elif hook:
                 parts.append(hook)
             elif tw:
                 parts.append(f"可聊「{tw}」")
-    style = str(data.get("style", "")).strip()
+    # 空字段整段跳过;用 `or ""` 而非 .get(k,"") —— JSON null 时 .get 返回 None,
+    # str(None)="None" 会污染注入文本(如"风格:None"),必须先归一化成空串
+    style = str(data.get("style") or "").strip()
     if style:
         parts.append(f"风格:{style}")
-    callback = str(data.get("callback", "")).strip()
+    callback = str(data.get("callback") or "").strip()
     if callback:
         parts.append(f"可回扣:{callback}")
-    avoid = str(data.get("avoid", "")).strip()
+    avoid = str(data.get("avoid") or "").strip()
     if avoid:
         parts.append(f"回避:{avoid}")
     return "；".join(parts)[:limit]

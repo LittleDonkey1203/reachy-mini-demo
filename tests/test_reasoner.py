@@ -63,6 +63,21 @@ def test_compress_empty():
     assert compress_hint("garbage") == ""
 
 
+def test_compress_skips_empty_and_null_fields():
+    """空字段 / JSON null 的 style·avoid·callback 整段跳过,不出现在压缩文本中。"""
+    base_topic = [{"t": "露营", "hook": "去露营吗"}]
+    # 空字符串
+    txt = compress_hint({"topics": base_topic, "style": "", "avoid": "", "callback": ""})
+    assert "露营" in txt
+    assert "风格:" not in txt and "回避:" not in txt and "可回扣:" not in txt
+    # JSON null(治 str(None)="None" 污染)
+    txt2 = compress_hint({"topics": base_topic, "style": None, "avoid": None, "callback": None})
+    assert "风格:" not in txt2 and "None" not in txt2
+    # null hook 也不该冒出 "None"
+    txt3 = compress_hint({"topics": [{"t": "露营", "hook": None}]})
+    assert "None" not in txt3
+
+
 # ────────── ② 三道门(过期 / 换人 / 落后轮数)──────────
 def _hint(pid="p1", seq=10, ts=None):
     return {"text": "策略", "pid": pid, "seq": seq,
