@@ -45,14 +45,15 @@ def build_default_registry() -> ToolRegistry:
         ForgetFactTool,
         RememberFactTool,
     )
-    from tools.motion import make_motion_tools
-    from tools.motion import TurnBodyTool
+    from tools.motion import TurnBodyTool, make_motion_tools
+    from tools.seek import FindPersonTool
     from tools.session import EndSessionTool
 
     reg = ToolRegistry()
     for t in make_motion_tools():
         reg.register(t)
     reg.register(TurnBodyTool())
+    reg.register(FindPersonTool())
     reg.register(EndSessionTool())
     reg.register(RememberFactTool())
     reg.register(ClearMemoryTool())

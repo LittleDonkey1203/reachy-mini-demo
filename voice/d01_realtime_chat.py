@@ -134,6 +134,7 @@ from voice.config import (                          # ← 配置常量集中管�
     SPREAD_BAD, WIDE_SCAN_RANGE, WIDE_SCAN_HZ, WIDE_SCAN_TIME_S,
     DOA_WAKE_FRESH_S, SEEK_PITCH_UP, SEEK_PITCH_AMP, SEEK_PITCH_HZ,
     SEEK_NEARBY_DEG, SEEK_NEARBY_TIME_S, SEEK_SUPPRESS_DEG,
+    SEEK_PERSON_DWELL_S, SEEK_PERSON_TIMEOUT_S, SEEK_PERSON_STEPS,
     GREET_PHRASES, EXIT_MIN_S, EXIT_MAX_S,
     POINT_FRESH_S, POINT_YAW_GAIN, POINT_PITCH_GAIN,
     POINT_TURN_TIMEOUT_S, POINT_SETTLE_S, POINT_HOLD_MAX_S,
@@ -1314,6 +1315,16 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
             st.dbg_switch_target = switch_target
     sw_t = 0.0
     sw_dir = 1.0
+    # ── 寻人(find_person):behavior_loop 驱动 Stop-and-Check 离散步进 ──
+    seeking_person = False
+    seek_person_pid: str | None = None
+    seek_person_name: str | None = None
+    seek_person_call_id: str | None = None
+    seek_person_step_idx = 0
+    seek_person_origin_yaw = 0.0
+    seek_person_t0 = 0.0
+    seek_person_phase = "check"  # "turn"=转到位 / "check"=停留检测
+    seek_person_dwell_t = 0.0
     play_big_since = None    # 近处晃动大手持续出现的起点(PLAY-01 进入迟滞)
     play_still_since = None  # 逗它中手开始静止的时刻(静止超时退出)
     while not stop.is_set():
@@ -1401,6 +1412,49 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                 st.wake_cue_t = now
             log("👋 结束意图 → 回中 + 告别 → 回待命")
             set_state(ST_RETURNING)
+            continue
+
+        # ── 寻人请求(find_person):tool → st.seek_person_request → behavior 驱动搜索 ──
+        with st.lock:
+            _spr = st.seek_person_request
+            if _spr is not None:
+                st.seek_person_request = None
+        if _spr is not None and _face_pipeline is not None:
+            _sp_pid = _spr["pid"]
+            _sp_name = _spr["name"]
+            _sp_call_id = _spr["call_id"]
+            # Acquire:先查当前画面(目标 last_seen < 2s → 直接报)
+            _sp_ident = _face_pipeline.store.identities.get(_sp_pid)
+            if _sp_ident is not None and (time.time() - _sp_ident.last_seen) < 2.0:
+                with st.lock:
+                    _sp_cy = st.track_yaw + st.body_yaw_deg
+                _sp_diff = _sp_cy  # 无 origin 概念,用当前绝对角做相对判断
+                if abs(_sp_diff) < 10:
+                    _sp_dir = "在你正前方"
+                elif _sp_diff > 0:
+                    _sp_dir = "在你左边"
+                else:
+                    _sp_dir = "在你右边"
+                with st.lock:
+                    st.seek_person_result = {
+                        "call_id": _sp_call_id,
+                        "output": f"找到了!{_sp_name}{_sp_dir}。",
+                    }
+                log(f"🔍 寻人快检: {_sp_name}就在眼前({_sp_dir})")
+            else:
+                # 需要扫场 → 进入 Stop-and-Check
+                seeking_person = True
+                seek_person_pid = _sp_pid
+                seek_person_name = _sp_name
+                seek_person_call_id = _sp_call_id
+                seek_person_step_idx = 0
+                with st.lock:
+                    seek_person_origin_yaw = st.track_yaw + st.body_yaw_deg
+                seek_person_t0 = now
+                seek_person_phase = "turn"
+                seek_person_dwell_t = 0.0
+                log(f"🔍 寻人扫场: 找「{_sp_name}」 origin={seek_person_origin_yaw:+.0f}°")
+                set_state(ST_ENGAGING, seed_interact=True)
             continue
 
         # M1.5-b 二次唤醒切换:三档方向(confident→直转 / fresh→粗方向 / 无→反向离A)
@@ -1557,6 +1611,70 @@ def behavior_loop(st: State, snap_q: "queue.Queue", stop: threading.Event,
                     sp = float(np.clip(SEEK_PITCH_UP + SEEK_PITCH_AMP * math.sin(2 * math.pi * SEEK_PITCH_HZ * tsw),
                                        -TRACK_PITCH_LIMIT, TRACK_PITCH_LIMIT))
                     approach(sweep, bg, sp)
+                continue
+            # ── 寻人 Stop-and-Check(find_person)──
+            if seeking_person:
+                # 超时检查
+                if now - seek_person_t0 > SEEK_PERSON_TIMEOUT_S:
+                    with st.lock:
+                        st.seek_person_result = {
+                            "call_id": seek_person_call_id,
+                            "output": f"找了一圈,没看到{seek_person_name}。",
+                        }
+                    log(f"🔍 寻人超时({SEEK_PERSON_TIMEOUT_S:.0f}s) → 未找到{seek_person_name}")
+                    seeking_person = False
+                    set_state(ST_RETURNING)
+                    continue
+                # 当前步位的目标角(世界系)
+                if seek_person_step_idx < len(SEEK_PERSON_STEPS):
+                    _sp_target = seek_person_origin_yaw + SEEK_PERSON_STEPS[seek_person_step_idx]
+                    _sp_target = float(np.clip(_sp_target, -SND_TARGET_LIMIT, SND_TARGET_LIMIT))
+                else:
+                    # 所有步位扫完 → 未找到
+                    with st.lock:
+                        st.seek_person_result = {
+                            "call_id": seek_person_call_id,
+                            "output": f"找了一圈,没看到{seek_person_name}。",
+                        }
+                    log(f"🔍 寻人全部步位扫完 → 未找到{seek_person_name}")
+                    seeking_person = False
+                    set_state(ST_RETURNING)
+                    continue
+
+                if seek_person_phase == "turn":
+                    # 转到目标角
+                    _sp_bg = float(np.clip(_sp_target, -BODY_LIMIT_DEG, BODY_LIMIT_DEG))
+                    arrived = approach(_sp_target, _sp_bg, 0.0)
+                    if arrived:
+                        seek_person_phase = "check"
+                        seek_person_dwell_t = now
+                elif seek_person_phase == "check":
+                    # 停留检测:检查目标 identity 是否出现
+                    _sp_ident = _face_pipeline.store.identities.get(seek_person_pid)
+                    if _sp_ident is not None and (time.time() - _sp_ident.last_seen) < 1.0:
+                        # 找到了!计算方向
+                        with st.lock:
+                            _sp_cur = st.track_yaw + st.body_yaw_deg
+                        _sp_diff = _sp_cur - seek_person_origin_yaw
+                        if abs(_sp_diff) < 10:
+                            _sp_dir_str = "在你正前方"
+                        elif _sp_diff > 0:
+                            _sp_dir_str = "在你左边"
+                        else:
+                            _sp_dir_str = "在你右边"
+                        with st.lock:
+                            st.seek_person_result = {
+                                "call_id": seek_person_call_id,
+                                "output": f"找到了!{seek_person_name}{_sp_dir_str}。",
+                            }
+                        log(f"🔍 寻人成功: {seek_person_name}{_sp_dir_str}(step={seek_person_step_idx})")
+                        seeking_person = False
+                        set_state(ST_TRACKING, seed_interact=True)
+                        continue
+                    # 停留时间到 → 下一步
+                    if now - seek_person_dwell_t >= SEEK_PERSON_DWELL_S:
+                        seek_person_step_idx += 1
+                        seek_person_phase = "turn"
                 continue
             # SEEK 两阶段认脸:direct 阶段压锁(防途中的脸拽住),但 |resid|<SEEK_SUPPRESS_DEG 的正前方豁免
             seek_suppress = (wide_scan and seek_phase == "direct"
@@ -2297,6 +2415,21 @@ def main() -> int:
                         greet_sent_at = time.monotonic()
                     elif _do_greet and _busy:
                         log("👋 唤醒应答跳过(模型已在回应后续话,不双答)")
+                    # ── 寻人结果回送(behavior_loop → st.seek_person_result → 主循环发 tool output) ──
+                    with st.lock:
+                        _sp_result = st.seek_person_result
+                        if _sp_result is not None:
+                            st.seek_person_result = None
+                    if _sp_result is not None and conv is not None:
+                        try:
+                            conv.create_item({
+                                "type": "function_call_output",
+                                "call_id": _sp_result["call_id"],
+                                "output": json.dumps({"result": _sp_result["output"]}, ensure_ascii=False),
+                            })
+                            log(f"🔍 寻人结果已回送模型: {_sp_result['output'][:60]}")
+                        except Exception as _sp_e:
+                            log(f"⚠ find_person 回 output 失败:{_sp_e}")
                     # (已移除"按 current_person_id 的延迟补注入":焦点驱动的注入会和「本句说话人」打架→
                     #  回复用错人记忆。记忆注入统一由 realtime transcription 按 turn_speaker 完成。)
                     _rms = float(np.sqrt(np.mean(mono**2)))

@@ -303,3 +303,20 @@ class IdentityStore:
             else:
                 print(f"  {z:<8s} N=   0")
         print(f"  thresholds: match={self.cfg.match_threshold:.2f} unknown={self.cfg.unknown_threshold:.2f}")
+
+    # ── 按名反查 ──────────────────────────────────
+    def find_by_name(self, name: str) -> Optional[Identity]:
+        """按名字反查身份(模糊匹配:子串/忽略大小写)。优先精确匹配,再 fallback 到子串。"""
+        name = name.strip()
+        if not name:
+            return None
+        nl = name.lower()
+        # 精确匹配(忽略大小写)
+        for ident in self.identities.values():
+            if ident.name and ident.name.strip().lower() == nl:
+                return ident
+        # 子串匹配(用户可能说昵称/部分名)
+        for ident in self.identities.values():
+            if ident.name and nl in ident.name.strip().lower():
+                return ident
+        return None

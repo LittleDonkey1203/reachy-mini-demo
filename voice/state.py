@@ -311,6 +311,9 @@ class State:
         self.clear_workflow: dict | None = None
         self.clear_lock: bool = False
         self.audio_gate_closed: bool = False
+        # 寻人(find_person)跨线程通信
+        self.seek_person_request: dict | None = None   # {pid, name, call_id} → behavior 消费
+        self.seek_person_result: dict | None = None    # {call_id, output} → 主循环回送模型
         self.audio_gate_buffer: list[bytes] = []
         self.audio_gate_closed_at: float = 0.0
         self.dbg_memory_prompt: str | None = None

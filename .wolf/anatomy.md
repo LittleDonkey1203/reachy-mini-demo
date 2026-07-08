@@ -11,6 +11,7 @@
 - `motion.py` — MotionTool 类 + 8 个动作工具实例(nod/shake_head/look_*/wiggle/tilt) + TurnBodyTool(带参转身) (~800 tok)
 - `session.py` — EndSessionTool 结束对话工具 (~400 tok)
 - `memory.py` — 4 个记忆工具类(RememberFact/ForgetFact/ClearMemory/ConfirmClear) (~1500 tok)
+- `seek.py` — FindPersonTool 寻人工具:查 gallery 按名反查 → 异步交 behavior_loop 驱动 Stop-and-Check 搜索 (~600 tok)
 
 ## ../../../../.claude/plans/
 
@@ -93,6 +94,7 @@
 
 ## identity/
 
+- `identity_store.py` — 持久化身份 gallery(IdentityStore):开集识别、三区间匹配、find_by_name 按名反查 (~2900 tok)
 - `owner.py` — 主人认定模块(首次交互自动绑定+转让) (~789 tok)
 - `recognizer.py` — 身份识别模块 — YuNet 人脸检测 + arcface 特征提取 + 特征库匹配。 (~6249 tok)
 

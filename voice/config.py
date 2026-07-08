@@ -227,6 +227,12 @@ SEEK_NEARBY_DEG = 25.0
 SEEK_NEARBY_TIME_S = 2.5
 SEEK_SUPPRESS_DEG = 12.0
 
+# ── 寻人搜索(find_person) ──
+SEEK_PERSON_STEP_DEG = 30.0       # 离散步进角度
+SEEK_PERSON_DWELL_S = 0.6         # 每步停留检测时间(s)
+SEEK_PERSON_TIMEOUT_S = 15.0      # 全程超时(s)
+SEEK_PERSON_STEPS = [0, -30, 30, -60, 60, -90, 90]  # 交替左右扩展的世界角偏移
+
 # ── 唤醒应答 ──
 GREET_PHRASES = ["在呢", "来啦", "你好呀", "我在", "嗨,你好", "诶,在的", "怎么啦"]
 BYE_PHRASES = ["好的", "拜拜", "休息啦", "我先歇会儿", "回头见", "去忙啦", "嗯,先这样"]

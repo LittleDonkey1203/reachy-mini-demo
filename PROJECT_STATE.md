@@ -241,6 +241,7 @@ tools/
   registry.py      — ToolRegistry + build_default_registry()
   motion.py        — MotionTool (8 动作) + TurnBodyTool (带参转身)
   session.py       — EndSessionTool
+  seek.py          — FindPersonTool (寻人搜索)
   memory.py        — 4 个记忆工具类
 perception/
   vision_worker.py — Face(YuNet/MediaPipe) + Hand(GestureRecognizer)
@@ -327,6 +328,17 @@ memory/
 - **根因**:ASD fallback(`realtime.py:222-226`)— B 刚出现,ASD 还没攒够帧,`speaker_window()` 返回 None → 2 秒内 fallback 到 `st.asd_speaker`(=A)→ 注入 A 的记忆 → 模型理所当然答"你是 A"。
 - **修法**:ASD `tracked_keys()` 暴露当前有 crop 缓冲的 key 集合;fallback 时检查追踪人数——多人(`>1`)不 fallback,走 neutral 路径;单人保持原逻辑。日志 `⚠ ASD fallback 拦截` 可追踪触发情况。
 - **待真机验证**:两人场景 + 新人问"我是谁"应答"不认识"。
+
+### 寻人特性 find_person(2026-07-08,按 Tool ABC 重新实现,待真机验证)
+- **需求**:用户说"找到大大" → 机器人调用 `find_person(name="大大")` → 转头扫场搜索 → 找到后锁定+语音播报方位。
+- **架构**:按新插件式 Tool ABC(`tools/seek.py: FindPersonTool`)实现,通过 `ToolRegistry` 统一注册分发。
+- **搜索策略**:Stop-and-Check 离散步进(非连续旋转)——ByteTrack/ArcFace 需要稳定画面。
+  - ①先检查当前画面(Acquire):目标 person_id 的 `last_seen` < 2s → 直接播报。
+  - ②不在画面 → 离散步进扫场:`[0, -30, 30, -60, 60, -90, 90]°` 交替左右。
+  - ③每步:转到位 → 停 0.6s → 检查 gallery `last_seen` → 找到即播报方位。
+  - ④全扫完 / 超时 15s → "没看到"。
+- **改动文件**:identity_store.py(find_by_name) + tools/seek.py(FindPersonTool) + tools/registry.py(注册) + voice/config.py(常量) + voice/state.py(跨线程字段) + voice/d01_realtime_chat.py(behavior_loop + 主循环)。
+- **不新增 FSM 状态**:复用 ST_ENGAGING + `seeking_person` 标志。结果通过 `st.seek_person_result` 传回主循环。
 
 ## 遗留问题
 
