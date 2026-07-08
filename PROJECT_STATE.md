@@ -21,6 +21,17 @@
 **验证**：py_compile 10/10 绿；新旧 specs 13/13 完全一致；exclude 过滤正确
 
 **扩展方式**：新增工具 = 创建 Tool 子类 + register()，无需改分发代码
+### 🔧 多人张冠李戴修复(2026-07-06,bug-069/070,PR #16,分支 pr14-on-main,⚠️ 待两人硬测)
+- **现象**:多人在场,新人/换人问"我是谁/我叫什么/我喜欢吃什么" → 模型答成另一个人(碧霞被答"你叫大大")。
+- **诊断 & 探针实测(一锤定音)**:归属层(ASD)+注入内容都对。用随机暗号探针(create_item 埋 A#、response.instructions 埋 B#,看回复带哪个)实测:**A# 从不出现、B# 每轮都带且对得上当轮 → Qwen Omni 完全忽略会话中途的 create_item system 条目,只 honor response.instructions**。所以 v1 的 create_item 注入是废重量。
+- **修复(voice/realtime.py,D-only)**:
+  - **收回 turn-taking**:3 处会话配置 `turn_detection_param={"create_response":False}` + 注入后我方手动 create_response(in_flight==0 守卫)→ 治 semantic_vad 在 speech_stopped 抢跑。
+  - `resp_directive()`(**Option D,唯一有效通道**):`response.instructions` 给单次回复下"当前说话人"强指令(基础人设+身份约束,普通轮 + 工具轮都带)。
+  - 过滤 称呼/名字 类 fact 防和身份名打架(治"碧霞→陛下");fix 兜底抽取器 save_fact 缺参 TypeError(bug-069)。
+  - **已砍**:create_item 注入(inject_context)整套 + 诊断探针 —— 探针证明无效,身份注入单通道走 D。
+- **已验**:D 被 honor(回复带当轮 B#);单人 + 初步多人无张冠李戴(归属对→答对,不确定→中性)。
+- **待验**:两人都已识别、都在画面、轮流问身份 → 确认 D 的"忽略历史里的其他人"能压住(真正对抗历史)。
+- **后手(若 D 不够)**:Option C —— 身份切换重启会话清历史(`restart_session_for_switch` 现死代码,需接线+去抖)。
 
 ### ✅ 注视感知 Phase 2 — ARMED 注视回看 + 时间常数平滑 + Dashboard 可视化(2026-07-02)
 
@@ -245,6 +256,13 @@ memory/
 
 - 9 状态 FSM: ARMED/IDLE_CENTER/ENGAGING/TRACKING/SEARCHING/RETURNING/POINTING/PLAYING
 - 5 层运动仲裁: Primary > Playing > SoundTurn > Tracking > Idle
+
+### 多人"我是谁"误答修复(2026-07-06,bug-068)
+- **现象**:已认识 A 在场,新人 B 问"我是谁",模型答"你是 A";但全都认识时接力问则回答正确。
+- **诊断**:`test_identity_switch.py` 5 场景全 PASS → 模型能力没问题,能正确处理 `update_session` 中途切换 instructions(含 known→neutral、known→known、session restart)。
+- **根因**:ASD fallback(`realtime.py:222-226`)— B 刚出现,ASD 还没攒够帧,`speaker_window()` 返回 None → 2 秒内 fallback 到 `st.asd_speaker`(=A)→ 注入 A 的记忆 → 模型理所当然答"你是 A"。
+- **修法**:ASD `tracked_keys()` 暴露当前有 crop 缓冲的 key 集合;fallback 时检查追踪人数——多人(`>1`)不 fallback,走 neutral 路径;单人保持原逻辑。日志 `⚠ ASD fallback 拦截` 可追踪触发情况。
+- **待真机验证**:两人场景 + 新人问"我是谁"应答"不认识"。
 
 ## 遗留问题
 
