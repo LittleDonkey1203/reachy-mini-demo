@@ -116,7 +116,7 @@ def _migrate_legacy_summaries(summaries: list[dict]) -> list[dict]:
     return episodes
 
 
-# ── Qwen 工具定义 ──
+# ── Qwen 工具定义 (DEPRECATED: 工具规格现由 tools/memory.py 生成，此处保留供参考) ──
 
 QWEN_TOOLS = [
     {

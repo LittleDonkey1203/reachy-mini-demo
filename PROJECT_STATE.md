@@ -2,6 +2,25 @@
 
 ## 已完成事项
 
+### ✅ 工具系统重构 — 硬编码 → 插件式 Tool ABC(2026-07-06)
+
+将分散在三个文件的工具系统（config.py BASE_TOOLS + manager.py QWEN_TOOLS + realtime.py 130 行 if/elif 分发链）重构为插件式 Tool 基类模式。
+
+**新建 tools/ 包**（原 tools/ 脚本移至 scripts/）：
+- `tools/base.py` — Tool ABC + ToolDeps dataclass
+- `tools/registry.py` — ToolRegistry（register/get/specs/exclude）+ build_default_registry()
+- `tools/motion.py` — MotionTool 类（8 个实例：nod/shake_head/look_*/wiggle/tilt）
+- `tools/session.py` — EndSessionTool（exit_i 计数器从 ChatCallback 移入）
+- `tools/memory.py` — RememberFactTool / ForgetFactTool / ClearMemoryTool / ConfirmClearTool
+
+**修改文件**：
+- `voice/realtime.py` — ChatCallback/RealtimeDialog 接受 registry 参数；130 行 if/elif 替换为 ~20 行统一分发
+- `voice/d01_realtime_chat.py` — TOOLS 列表替换为 build_default_registry()；no_memory 用 registry.exclude()
+- `voice/config.py` + `memory/manager.py` — BASE_TOOLS/QWEN_TOOLS 加 DEPRECATED 注释
+
+**验证**：py_compile 10/10 绿；新旧 specs 13/13 完全一致；exclude 过滤正确
+
+**扩展方式**：新增工具 = 创建 Tool 子类 + register()，无需改分发代码
 ### 🔧 多人张冠李戴修复(2026-07-06,bug-069/070,PR #16,分支 pr14-on-main,⚠️ 待两人硬测)
 - **现象**:多人在场,新人/换人问"我是谁/我叫什么/我喜欢吃什么" → 模型答成另一个人(碧霞被答"你叫大大")。
 - **诊断 & 探针实测(一锤定音)**:归属层(ASD)+注入内容都对。用随机暗号探针(create_item 埋 A#、response.instructions 埋 B#,看回复带哪个)实测:**A# 从不出现、B# 每轮都带且对得上当轮 → Qwen Omni 完全忽略会话中途的 create_item system 条目,只 honor response.instructions**。所以 v1 的 create_item 注入是废重量。
@@ -183,12 +202,18 @@
 
 ```
 voice/
-  config.py        — 常量 + 工具元数据 + prompt
+  config.py        — 常量 + prompt (工具定义已迁移到 tools/)
   state.py         — State 类 + log + OneEuroFilter
   d01_realtime_chat.py — 主程序 (~600 行，已瘦身)
   debug_server.py  — Dashboard
   kws.py           — 唤醒词门控
-  realtime.py      — Qwen-Omni-Realtime 协议层 + Session Consolidation
+  realtime.py      — Qwen-Omni-Realtime 协议层 + registry 分发 + Session Consolidation
+tools/
+  base.py          — Tool ABC + ToolDeps dataclass
+  registry.py      — ToolRegistry + build_default_registry()
+  motion.py        — MotionTool (8 动作工具)
+  session.py       — EndSessionTool
+  memory.py        — 4 个记忆工具类
 perception/
   vision_worker.py — Face(YuNet/MediaPipe) + Hand(GestureRecognizer)
   fusion.py        — 声源-视觉融合

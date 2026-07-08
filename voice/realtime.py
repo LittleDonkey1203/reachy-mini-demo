@@ -17,14 +17,14 @@ from dashscope.audio.qwen_omni import (
 )
 from reachy_mini import ReachyMini
 
-from memory.safety import handle_clear_memory_intent, handle_confirm_clear
 from voice.config import (
     MODEL, VOICE, SUMMARY_MODEL, EXTRACT_MODEL, CONNECT_TIMEOUT_S,
-    BYE_PHRASES, POINT_FRESH_S, OUT_SR, PLAY_SR,
+    POINT_FRESH_S, OUT_SR, PLAY_SR,
     CONV_SUMMARY_THRESHOLD,
 )
 from voice.state import State, log, _record_event
 import voice.state as _st_mod
+from tools.base import ToolDeps
 
 
 def _record_tool_output(st: State, tool_name: str, call_id: str, output: str):
@@ -128,7 +128,8 @@ class ChatCallback(OmniRealtimeCallback):
 
     def __init__(self, st: State, play_q: "queue.Queue", motion_q: "queue.Queue",
                  snap_q: "queue.Queue", mini: ReachyMini,
-                 memory_mgr, owner_mgr, id_recognizer, face_pipeline=None, asd_engine=None):
+                 memory_mgr, owner_mgr, id_recognizer, registry=None,
+                 face_pipeline=None, asd_engine=None):
         self.st = st
         self.play_q = play_q
         self.motion_q = motion_q
@@ -137,12 +138,12 @@ class ChatCallback(OmniRealtimeCallback):
         self.memory_mgr = memory_mgr
         self.owner_mgr = owner_mgr
         self.id_recognizer = id_recognizer
+        self.registry = registry
         self.face_pipeline = face_pipeline   # 命名时落 gallery(confirm_identity)
         self.asd_engine = asd_engine         # 谁在说话:本句归属用 speaker_window
         self._speech_start_t = 0.0           # 本句说话起点(monotonic),speech_started 时记
         self.conv: OmniRealtimeConversation | None = None
         self.dialog: "RealtimeDialog | None" = None
-        self.exit_i = 0
 
     def on_open(self) -> None:
         log("✅ WebSocket 已连接 dashscope.aliyuncs.com")
@@ -350,131 +351,39 @@ class ChatCallback(OmniRealtimeCallback):
                         "name": st.resp_snapshot_name or st.current_person_name,
                     })
                 log(f"🤖 模型调用工具: {name}({_fc_args[:200]})")
-                if name == "take_snapshot":
+                try:
+                    args_dict = json.loads(_fc_args) if _fc_args else {}
+                except (json.JSONDecodeError, TypeError):
+                    args_dict = {}
+                # ── legacy snapshot 工具（已移除但防残留调用）──
+                if name in ("take_snapshot", "identify_pointed_object"):
                     with st.lock:
-                        maybe_pointing = (time.monotonic() - st.finger_ext_at) < POINT_FRESH_S
+                        maybe_pointing = (time.monotonic() - st.finger_ext_at) < POINT_FRESH_S if name == "take_snapshot" else True
                         st.snapshot_pending += 1
                     mode = "judge" if maybe_pointing else "scene"
-                    if maybe_pointing:
-                        log("👉 最近见过伸指 → 先原地看图判断是否真在指(两段式)")
                     self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": mode})
-                elif name == "end_session":
-                    phrase = BYE_PHRASES[self.exit_i % len(BYE_PHRASES)]
-                    self.exit_i += 1
-                    output_msg = {"success": True,
-                                  "say": f"对话结束。用中文只说这一句简短告别:「{phrase}」,别追问、别挽留、别加别的。"}
+                # ── registry 统一分发 ──
+                elif self.registry is not None and self.registry.get(name) is not None:
+                    tool = self.registry.get(name)
+                    deps = ToolDeps(
+                        st=st, conv=self.conv, motion_q=self.motion_q,
+                        memory_mgr=self.memory_mgr, owner_mgr=self.owner_mgr,
+                        id_recognizer=self.id_recognizer, face_pipeline=self.face_pipeline,
+                    )
                     try:
-                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=end_session output={json.dumps(output_msg, ensure_ascii=False)}")
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(output_msg, ensure_ascii=False),
-                        })
-                        _record_tool_output(st, "end_session", call_id, json.dumps(output_msg, ensure_ascii=False))
+                        output = tool.execute(deps, call_id, args_dict)
+                        if output is not None:
+                            log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool={name} output={output[:200]}")
+                            self.conv.create_item({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": output,
+                            })
+                            _record_tool_output(st, name, call_id, output)
                     except Exception as e:
-                        log(f"⚠ end_session 回 output 失败:{e}")
-                    with st.lock:
-                        st.exit_request = True
-                    log(f"👋 收到结束意图 → 告别「{phrase}」+ 回待命")
-                elif name == "identify_pointed_object":
-                    with st.lock:
-                        st.snapshot_pending += 1
-                    log("👉 收到指向请求 → 先原地看图判断(两段式)")
-                    self.snap_q.put({"call_id": call_id, "gen": st.fc_gen, "mode": "judge"})
-                elif name in ("remember_fact", "forget_fact"):
-                    with st.lock:
-                        pid = st.resp_snapshot_pid     # 不再兜回在场人:画外/无归属→None→不存不命名(治张冠李戴)
-                    if pid is None:
-                        result = "当前没有识别到用户身份(可能说话人不在画面里),无法存储记忆。"
-                    else:
-                        args_str = event.get("arguments", "{}")
-                        try:
-                            args_dict = json.loads(args_str)
-                        except (json.JSONDecodeError, TypeError):
-                            args_dict = {}
-                        result = self.memory_mgr.handle_tool_call(pid, name, args_dict)
-                        with st.lock:
-                            st.identity_injected = False
-                            st.identity_injected_pid = None
-                        if name == "remember_fact":
-                            new_name = args_dict.get("name")
-                            if new_name:
-                                with st.lock:                  # 取当轮用户转写,供命名 guard 校验(防脑补)
-                                    _turn_text = next((d.get("text", "") for d in reversed(st.display_transcript)
-                                                       if d.get("role") == "user"), "")
-                                try_name_identity(
-                                    memory_mgr=self.memory_mgr, id_recognizer=self.id_recognizer,
-                                    face_pipeline=self.face_pipeline, owner_mgr=self.owner_mgr, st=st,
-                                    pid=pid, new_name=new_name, transcript=_turn_text, log_fn=log)
-                        elif name == "forget_fact":
-                            keyword = args_dict.get("keyword", "")
-                            if "名" in keyword or "name" in keyword.lower():
-                                self.memory_mgr.set_name(pid, None)
-                                if self.id_recognizer is not None:
-                                    self.id_recognizer.db.set_name(pid, None)
-                                with st.lock:
-                                    st.current_person_name = None
-                    try:
-                        result_payload = {"result": result}
-                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool={name} output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(result_payload, ensure_ascii=False),
-                        })
-                        _record_tool_output(st, name, call_id, json.dumps(result_payload, ensure_ascii=False))
-                    except Exception as e:
-                        log(f"⚠ 记忆工具回 output 失败:{e}")
-                    log(f"🧠 记忆工具 {name}: {result}")
-                elif name == "clear_memory":
-                    args_str = event.get("arguments", "{}")
-                    try:
-                        args_dict = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError):
-                        args_dict = {}
-                    result = handle_clear_memory_intent(st, args_dict, self.conv,
-                                                       self.id_recognizer)
-                    try:
-                        result_payload = {"result": result}
-                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=clear_memory output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(result_payload, ensure_ascii=False),
-                        })
-                        _record_tool_output(st, "clear_memory", call_id, json.dumps(result_payload, ensure_ascii=False))
-                    except Exception as e:
-                        log(f"⚠ clear_memory 回 output 失败:{e}")
-                    log(f"🔒 clear_memory 启动: {result}")
-                elif name == "confirm_clear":
-                    args_str = event.get("arguments", "{}")
-                    try:
-                        args_dict = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError):
-                        args_dict = {}
-                    result = handle_confirm_clear(st, args_dict,
-                                                  self.memory_mgr, self.id_recognizer)
-                    try:
-                        result_payload = {"result": result}
-                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool=confirm_clear output={json.dumps(result_payload, ensure_ascii=False)[:200]}")
-                        self.conv.create_item({
-                            "type": "function_call_output", "call_id": call_id,
-                            "output": json.dumps(result_payload, ensure_ascii=False),
-                        })
-                        _record_tool_output(st, "confirm_clear", call_id, json.dumps(result_payload, ensure_ascii=False))
-                    except Exception as e:
-                        log(f"⚠ confirm_clear 回 output 失败:{e}")
-                    log(f"🔒 confirm_clear: {result}")
+                        log(f"⚠ 工具 {name} 执行失败:{type(e).__name__}: {e}")
                 else:
-                    self.motion_q.put({"name": name, "call_id": call_id})
-                    output_msg = {"success": True, "action": name}
-                    try:
-                        log(f"📤 create_item(tool_output) call_id={call_id[:8]} tool={name} output={json.dumps(output_msg, ensure_ascii=False)}")
-                        self.conv.create_item({
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": json.dumps(output_msg, ensure_ascii=False),
-                        })
-                        _record_tool_output(st, name, call_id, json.dumps(output_msg, ensure_ascii=False))
-                    except Exception as e:
-                        log(f"⚠ 回 function_call_output 失败:{e}")
+                    log(f"⚠ 未注册工具: {name}")
             elif etype == "response.audio_transcript.delta":
                 print(event.get("delta", ""), end="", flush=True)
             elif etype == "response.audio_transcript.done":
@@ -552,17 +461,19 @@ class RealtimeDialog:
 
     def __init__(self, st: State, play_q, motion_q, snap_q, mini: ReachyMini,
                  oai_client, memory_mgr, owner_mgr, id_recognizer,
-                 instructions: str, tools: list, no_memory: bool = False,
+                 instructions: str, registry=None, no_memory: bool = False,
                  face_pipeline=None, asd_engine=None):
         self.callback = ChatCallback(st, play_q, motion_q, snap_q, mini,
                                      memory_mgr, owner_mgr, id_recognizer,
+                                     registry=registry,
                                      face_pipeline=face_pipeline, asd_engine=asd_engine)
         self.callback.dialog = self
         self.st = st
         self.oai = oai_client
         self.memory_mgr = memory_mgr
         self.instructions = instructions
-        self.tools = tools
+        self.registry = registry
+        self.tools = registry.specs() if registry is not None else []
         self.no_memory = no_memory
         self.conv = None
         self._last_inject_fail = 0.0

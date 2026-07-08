@@ -1,7 +1,16 @@
 # anatomy.md
 
-> Auto-maintained by OpenWolf. Last scanned: 2026-06-27T03:28:12.795Z
-> Files: 58 tracked | Anatomy hits: 0 | Misses: 0
+> Auto-maintained by OpenWolf. Last scanned: 2026-07-06
+> Files: 64 tracked | Anatomy hits: 0 | Misses: 0
+
+## tools/
+
+- `__init__.py` — tools 包入口，导出 Tool/ToolDeps/ToolRegistry/build_default_registry (~200 tok)
+- `base.py` — Tool ABC 基类 + ToolDeps 运行时依赖 dataclass (~500 tok)
+- `registry.py` — ToolRegistry 注册表(register/get/specs/exclude) + build_default_registry 工厂 (~600 tok)
+- `motion.py` — MotionTool 类 + 8 个动作工具实例(nod/shake_head/look_*/wiggle/tilt) (~500 tok)
+- `session.py` — EndSessionTool 结束对话工具 (~400 tok)
+- `memory.py` — 4 个记忆工具类(RememberFact/ForgetFact/ClearMemory/ConfirmClear) (~1500 tok)
 
 ## ../../../../.claude/plans/
 
