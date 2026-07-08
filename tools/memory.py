@@ -47,12 +47,8 @@ class RememberFactTool(Tool):
                 ensure_ascii=False,
             )
 
-        result = deps.memory_mgr.handle_tool_call(pid, "remember_fact", args)
-        with st.lock:
-            st.identity_injected = False
-            st.identity_injected_pid = None
-
         new_name = args.get("name")
+        name_accepted = False
         if new_name:
             with st.lock:
                 _turn_text = next(
@@ -61,7 +57,7 @@ class RememberFactTool(Tool):
                 )
             from voice.realtime import try_name_identity
 
-            try_name_identity(
+            name_accepted = try_name_identity(
                 memory_mgr=deps.memory_mgr,
                 id_recognizer=deps.id_recognizer,
                 face_pipeline=deps.face_pipeline,
@@ -72,6 +68,19 @@ class RememberFactTool(Tool):
                 transcript=_turn_text,
                 log_fn=log,
             )
+            if not name_accepted:
+                _NAME_KEYS = {"称呼", "名字", "姓名", "昵称", "name"}
+                k = args.get("key", "").strip()
+                if k in _NAME_KEYS:
+                    return json.dumps(
+                        {"result": f"命名未通过验证,「{new_name}」未被记录。"},
+                        ensure_ascii=False,
+                    )
+
+        result = deps.memory_mgr.handle_tool_call(pid, "remember_fact", args)
+        with st.lock:
+            st.identity_injected = False
+            st.identity_injected_pid = None
 
         return json.dumps({"result": result}, ensure_ascii=False)
 

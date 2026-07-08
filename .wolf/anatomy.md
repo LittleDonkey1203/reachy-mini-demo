@@ -8,7 +8,7 @@
 - `__init__.py` — tools 包入口，导出 Tool/ToolDeps/ToolRegistry/build_default_registry (~200 tok)
 - `base.py` — Tool ABC 基类 + ToolDeps 运行时依赖 dataclass (~500 tok)
 - `registry.py` — ToolRegistry 注册表(register/get/specs/exclude) + build_default_registry 工厂 (~600 tok)
-- `motion.py` — MotionTool 类 + 8 个动作工具实例(nod/shake_head/look_*/wiggle/tilt) (~500 tok)
+- `motion.py` — MotionTool 类 + 8 个动作工具实例(nod/shake_head/look_*/wiggle/tilt) + TurnBodyTool(带参转身) (~800 tok)
 - `session.py` — EndSessionTool 结束对话工具 (~400 tok)
 - `memory.py` — 4 个记忆工具类(RememberFact/ForgetFact/ClearMemory/ConfirmClear) (~1500 tok)
 
@@ -89,6 +89,7 @@
 - `MULTI_PERSON_INTRO_PLAN.md` — 多人同框介绍朋友方案 (~2783 tok)
 - `QWEN_OMNI_TOOL_CALLING.md` — Qwen-Omni-Realtime 工具调用调研报告 (~1151 tok)
 - `WAKEWORD_PRIORITY_ANALYSIS.md` — 唤醒词 × 人脸锁定 × DOA 优先级分析 (~2615 tok)
+- `REACHY_MINI_API_REFERENCE.md` — Reachy Mini SDK 完整 API 参考(goto_target/set_target/look_at/antenna/body_yaw/animation/wobbling/WebSocket协议) (~8500 tok)
 
 ## identity/
 

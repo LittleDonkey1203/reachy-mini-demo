@@ -3,6 +3,7 @@
 
 import base64
 import json
+import os
 import queue
 import re
 import threading
@@ -65,43 +66,83 @@ def _extract_tag_action(match_str: str) -> str | None:
     return _TAG_TO_ACTION.get(s)
 
 
+# ── 用户话语→turn_body 兜底:模型应调工具但只说了文本("好嘞，转过去啦")时自动补发 ──
+_TURN_CMD_RE = re.compile(
+    r"向(左|右)转|转(向|到|去|过去|过来|过身|个身)"
+    r"|面(朝|向)(左|右|那边|这边|后面)"
+    r"|往(左|右)转",
+)
+
+
+def _parse_turn_direction(text: str) -> dict | None:
+    """从用户语音转写中提取 turn_body 方向+角度;无匹配返回 None。"""
+    m = _TURN_CMD_RE.search(text)
+    if not m:
+        return None
+    s = m.group()
+    if "右" in s:
+        direction = "right"
+    elif "左" in s:
+        direction = "left"
+    else:
+        direction = "right"    # "转过去""转个身"等无方向指示,默认右转
+    return {"direction": direction, "angle": 45}
+
+
+_BAD_CASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "data", "bad_cases")
+
+
+def _record_turn_bad_case(user_text: str, parsed_cmd: dict) -> None:
+    """记录 turn_body 未调用的 bad case(用户说了转身但模型没调工具),供后续统一优化数据。"""
+    try:
+        os.makedirs(_BAD_CASE_DIR, exist_ok=True)
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "type": "turn_body_not_called",
+            "user_text": user_text,
+            "parsed": parsed_cmd,
+        }
+        path = os.path.join(_BAD_CASE_DIR, "turn_body.jsonl")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # best-effort, 不阻塞主流程
+
+
 # ── 命名 guard:命名是身份关键操作,统一过门(治脑补名/画外命名/反复改名)──
 _NAME_OK_RE = re.compile(r"^[一-龥A-Za-z·]{1,8}$")          # 1-8 中/英文字,无数字/标点/空格
-_RENAME_INTENT_RE = re.compile(r"改名|改个名|改成|其实叫|实际叫|叫错|应该叫|重新.{0,4}名|不叫")
 
 
 def _valid_name(name: str) -> bool:
     if not name:
         return False
     n = name.strip()
-    return bool(_NAME_OK_RE.match(n)) and not n.startswith("?T") and n not in ("画外", "未知")
+    # 机器人自己的名字/别名绝不能当作用户名字
+    _BOT_NAMES = {"小艺", "小易", "小意", "小亿", "xiaoyi"}
+    return (bool(_NAME_OK_RE.match(n)) and not n.startswith("?T")
+            and n not in ("画外", "未知") and n.lower() not in _BOT_NAMES)
 
 
 def try_name_identity(*, memory_mgr, id_recognizer, face_pipeline, owner_mgr, st,
-                      pid, new_name, transcript, log_fn, allow_rename=True) -> bool:
+                      pid, new_name, transcript, log_fn) -> bool:
     """命名/改名统一 guard。返回是否真正写入了名字。
-    门1 名字合法;门2 名字必须出现在当轮转写里(防模型脑补);门3 已命名不静默覆盖(仅显式改名意图才改)。
+    门1 名字合法;门2 名字必须出现在当轮转写里(防模型脑补)。
     pid 由调用方保证 = 本句说话人(画外/无归属时为 None,直接拒)。"""
     if not pid or not new_name:
         return False
     n = new_name.strip()
-    # 门1 合法性
     if not _valid_name(n):
         log_fn(f"🚫 命名拒绝:名字不合法「{new_name}」")
         return False
-    # 门2 必须来自当轮转写(防模型脑补:用户说毕夏、模型却记陛下)
     if not (transcript and n in transcript):
         log_fn(f"🚫 命名拒绝:「{n}」不在转写里(防脑补)← 「{(transcript or '')[:30]}」")
         return False
-    # 门3 不静默改名
     existing = memory_mgr.get_name(pid) if memory_mgr else None
+    if existing and existing == n:
+        return False
     if existing:
-        if existing == n:
-            return False                                   # 重复声明,no-op
-        if not (allow_rename and _RENAME_INTENT_RE.search(transcript)):
-            log_fn(f"🚫 改名拒绝:已是「{existing}」,无明确改名意图→不覆盖为「{n}」")
-            return False
-        log_fn(f"✏ 改名:「{existing}」→「{n}」(检测到改名意图)")
+        log_fn(f"✏ 改名:「{existing}」→「{n}」")
     # 通过 → 写三处库 + gallery 落盘 + 认主
     if memory_mgr:
         memory_mgr.set_name(pid, n)
@@ -142,6 +183,9 @@ class ChatCallback(OmniRealtimeCallback):
         self.face_pipeline = face_pipeline   # 命名时落 gallery(confirm_identity)
         self.asd_engine = asd_engine         # 谁在说话:本句归属用 speaker_window
         self._speech_start_t = 0.0           # 本句说话起点(monotonic),speech_started 时记
+        self._pending_turn_cmd: dict | None = None  # 用户说了转身指令但模型未调 turn_body
+        self._turn_body_called = False               # 本轮 response 是否调了 turn_body
+        self._pending_transcript: str = ""            # 触发 turn_cmd 的用户转写(供 bad case 记录)
         self.conv: OmniRealtimeConversation | None = None
         self.dialog: "RealtimeDialog | None" = None
 
@@ -238,7 +282,7 @@ class ChatCallback(OmniRealtimeCallback):
                 if _asp is not None:
                     _tid = _asp.get("track_id")
                     _log_pid = _asp.get("pid") or f"_track{_tid}"      # 在画面但未识别:临时 track 键
-                    _real_name = _asp.get("name")                      # 真名(未命名身份=None);注入/turn_speaker 只用它
+                    _real_name = _asp.get("name")
                     _log_name = _real_name or f"?T{_tid}"             # 带 ?T 的占位仅用于日志/dashboard 显示
                     _attr_tag = f"{_log_name} (T{_tid}, ASD{_asp.get('score', 0.0):+.1f})"
                 else:
@@ -254,6 +298,12 @@ class ChatCallback(OmniRealtimeCallback):
                     st.turn_speaker_name = _real_name if _tspk_real else None   # 占位名 ?T 绝不入 turn_speaker
                     st.turn_speaker_at = now
                 log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
+                # ── turn_body 兜底检测:用户说了转身命令,等模型是否调工具 ──
+                _tcmd = _parse_turn_direction(_transcript) if _transcript else None
+                if _tcmd is not None:
+                    self._pending_turn_cmd = _tcmd
+                    self._turn_body_called = False
+                    self._pending_transcript = _transcript
                 if _transcript:
                     with st.lock:
                         st.display_transcript_seq += 1
@@ -351,6 +401,8 @@ class ChatCallback(OmniRealtimeCallback):
                         "name": st.resp_snapshot_name or st.current_person_name,
                     })
                 log(f"🤖 模型调用工具: {name}({_fc_args[:200]})")
+                if name == "turn_body":
+                    self._turn_body_called = True
                 try:
                     args_dict = json.loads(_fc_args) if _fc_args else {}
                 except (json.JSONDecodeError, TypeError):
@@ -382,8 +434,24 @@ class ChatCallback(OmniRealtimeCallback):
                             _record_tool_output(st, name, call_id, output)
                     except Exception as e:
                         log(f"⚠ 工具 {name} 执行失败:{type(e).__name__}: {e}")
+                        try:
+                            self.conv.create_item({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps({"success": False, "error": str(e)}, ensure_ascii=False),
+                            })
+                        except Exception:
+                            pass
                 else:
                     log(f"⚠ 未注册工具: {name}")
+                    try:
+                        self.conv.create_item({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps({"success": False, "error": f"unknown tool: {name}"}, ensure_ascii=False),
+                        })
+                    except Exception:
+                        pass
             elif etype == "response.audio_transcript.delta":
                 print(event.get("delta", ""), end="", flush=True)
             elif etype == "response.audio_transcript.done":
@@ -450,10 +518,67 @@ class ChatCallback(OmniRealtimeCallback):
                         self.conv.create_response(instructions=_instr_fc)
                     except Exception as _e:
                         log(f"⚠ create_response(工具轮) 失败:{type(_e).__name__}: {_e}")
+                # ── turn_body 兜底:正则预过滤 + qwen-plus 语义判断 → 确认才补发 ──
+                if self._pending_turn_cmd is not None and not self._turn_body_called:
+                    threading.Thread(
+                        target=self._judge_turn_body,
+                        args=(self._pending_transcript, self._pending_turn_cmd),
+                        daemon=True,
+                    ).start()
+                self._pending_turn_cmd = None
+                self._turn_body_called = False
             elif etype == "error":
                 log(f"❌ 服务端错误事件:{event}")
         except Exception as e:
             log(f"❌ on_event 处理异常:{type(e).__name__}: {e}\n   原始事件:{str(event)[:300]}")
+
+    def _judge_turn_body(self, transcript: str, parsed_cmd: dict):
+        """qwen-plus 判断用户话语是否是转身指令;确认则补发 motion_q + 标记 fallback。"""
+        try:
+            if self.dialog is None or self.dialog.oai is None:
+                _record_turn_bad_case(transcript, parsed_cmd)
+                return
+            prompt = (
+                "判断下面这句话是不是在**命令**机器人转身/转向。\n"
+                "只有「直接命令转身」才算(如'向右转''转过去看看''面朝那边');\n"
+                "「问转了多少/讨论转身/提到转向概念/描述过去的动作」不算。\n"
+                f"用户说:「{transcript}」\n"
+                "严格只输出 JSON,不要解释:\n"
+                '{"is_turn": true或false, "direction": "left"或"right"或"center", "angle": 30到90的整数}'
+            )
+            resp = self.dialog.oai.chat.completions.create(
+                model=EXTRACT_MODEL,
+                messages=[{"role": "system", "content": prompt},
+                          {"role": "user", "content": "请输出 JSON。"}],
+                temperature=0.1,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            result = json.loads(raw)
+            if not result.get("is_turn"):
+                log(f"🔍 turn_body 兜底:qwen-plus 判定非转身指令,跳过 (原文:{transcript[:50]})")
+                _record_turn_bad_case(transcript, parsed_cmd)
+                return
+            direction = str(result.get("direction", parsed_cmd["direction"])).lower().strip()
+            if direction not in ("left", "right", "center"):
+                direction = parsed_cmd["direction"]
+            try:
+                angle = int(result.get("angle", parsed_cmd["angle"]))
+                angle = max(10, min(angle, 90))
+            except (TypeError, ValueError):
+                angle = parsed_cmd["angle"]
+            self.motion_q.put({
+                "name": "turn_body",
+                "call_id": f"fallback_{int(time.monotonic())}",
+                "args": {"direction": direction, "angle": angle},
+            })
+            log(f"🔄 turn_body 兜底:qwen-plus 确认转身 → 补发 {direction} {angle}°")
+            with self.st.lock:
+                self.st.turn_body_fallback_fired = True
+        except Exception as e:
+            log(f"⚠ turn_body 兜底判断失败:{type(e).__name__}: {e}")
+            _record_turn_bad_case(transcript, parsed_cmd)
 
 
 class RealtimeDialog:
@@ -697,11 +822,17 @@ class RealtimeDialog:
                  "忽略之前对话里提到的其他人,绝不要用别人的名字或记忆来回答。")
         elif present:
             d = ("【本次回应对象】现在跟你说话的是一位你还没记住名字的人。"
-                 "若TA问「我是谁/我叫什么/我喜欢什么」,如实说你还不确定TA是谁、还没记住TA;"
-                 "忽略之前对话里的其他人,绝不要拿别人的名字或记忆来答。")
+                 "你不知道TA叫什么,可以自然地问TA怎么称呼。"
+                 "若TA问「我是谁/我叫什么/你认识我吗」,如实说你们好像还没正式认识、你还不知道TA的名字,然后友好地问TA叫什么;"
+                 "绝不要编名字、绝不要拿别人的名字或记忆来答。")
         else:
             d = ("【本次回应对象】对方不在画面里、你看不到TA。若被问身份,如实说看不到、不确定是谁;"
                  "别套用其他人的名字或记忆。")
+        with self.st.lock:
+            if self.st.turn_body_fallback_fired:
+                d += ("【重要提醒】上一轮用户让你转身,你没有调用turn_body工具,系统已自动执行。"
+                      "以后遇到转身指令请主动调用turn_body工具,不要只说话不调工具。")
+                self.st.turn_body_fallback_fired = False
         return self.instructions + "\n\n" + d
 
     def extract_memory_async(self, pid: str, pname: str | None,
@@ -759,13 +890,11 @@ class RealtimeDialog:
                     saved += 1
             _cb = self.callback
             if new_name:
-                # 工具审视只做「首次命名」(allow_rename=False);改名只走模型直调路径。
-                # guard 统一过门(合法/来自转写/不覆盖已命名)。
                 if try_name_identity(
                         memory_mgr=self.memory_mgr, id_recognizer=_cb.id_recognizer,
                         face_pipeline=_cb.face_pipeline, owner_mgr=_cb.owner_mgr, st=self.st,
                         pid=pid, new_name=new_name, transcript=current_text,
-                        log_fn=log, allow_rename=False):
+                        log_fn=log):
                     log(f"🧠 工具审视:补记名字「{new_name}」({pid[:12]})")
             if saved:
                 with self.st.lock:
@@ -802,7 +931,7 @@ class RealtimeDialog:
                 "   - topic: 具体说聊了什么，不要太笼统\n"
                 "   - highlights: 关于用户的关键信息点（每条是完整短句）\n\n"
                 "只输出JSON：\n"
-                '{"name":"用户名字(对话中提到则更新,否则为null)",'
+                '{"name":"用户的名字(用户自己说出自己叫什么才填,否则为null。注意:小艺是机器人的名字,不是用户的名字)",'
                 '"summary":"一句话认知描述",'
                 '"facts":{"类别1":"内容1","类别2":"内容2"},'
                 '"episode":{"topic":"具体话题","highlights":["要点1"],"mood":"engaged/casual/emotional/tense"}}'
@@ -823,6 +952,11 @@ class RealtimeDialog:
             if isinstance(new_facts, list):
                 new_facts = {f"备注{i+1}": f for i, f in enumerate(new_facts)}
             new_name = result.get("name")
+            # ── 治本:consolidation 提取的 name 也必须过 _valid_name 校验 ──
+            # 根因(bug-075):LLM 把对话中机器人自称"小艺"当用户名字提取了
+            if new_name and not _valid_name(new_name):
+                log(f"⚠ consolidation 名字被拒:「{new_name}」不合法(bot名/格式)")
+                new_name = None
             if new_name is None and current_name:
                 new_name = current_name
             new_summary = result.get("summary")

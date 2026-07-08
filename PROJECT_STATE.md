@@ -2,6 +2,45 @@
 
 ## 已完成事项
 
+### ✅ 新增 turn_body 身体转向工具(2026-07-07)
+
+LLM 可调用 `turn_body(direction, angle)` 控制底盘旋转，大角度转向场景不再依赖手动内部逻辑。
+
+- `tools/motion.py` — TurnBodyTool 类，带参数兜底（direction 默认 left，angle 默认 45°，clamp [10,90]）
+- `tools/registry.py` — 注册到 build_default_registry()（14 个工具）
+- `voice/d01_realtime_chat.py` — `_do_turn_body()` 函数 + motion_loop 特殊分支，修改 `st.body_yaw_deg` + 同步 `st.track_yaw`
+- `voice/config.py` — `TURN_BODY_DURATION=0.8` + INSTRUCTIONS 提示模型可转身
+- **与普通 MotionTool 区别**：需持久修改 `st.body_yaw_deg`，通过 motion_loop 特殊分支而非 ACTIONS 字典分发
+- **验证**：py_compile 4/4 绿；14 工具 spec 正确；待真机验证
+
+### ✅ 四项问题修复(2026-07-07,bug-072~075)
+
+1. **bot name 注册为人物身份(bug-075)**：`_valid_name()` 加 bot name 黑名单 `{"小艺","小易","小意","小亿","xiaoyi"}`；清理 `data/memories/id_*_unknown-2.json` 中被错误写入的"小艺"身份数据。
+2. **ASD 不可用时全部归属"画外"(bug-072)**：vision_result_loop 在 ASD off 时将 `st.asd_speaker` 写入 primary(最大)脸信息 `{pid, name, track_id, score:0, at:now}`；realtime.py consumer 的 `_n_tracked==0` 已兼容(≤1 通过)。
+3. **"向右转"不调 turn_body 工具(bug-073)**：用户话语正则检测转身命令(`_TURN_CMD_RE`)→ `_pending_turn_cmd`；response.done 若 `_turn_body_called=False` 则自动 `motion_q.put` 补发。与标签泄漏兜底类似但针对用户输入。→ **后改为 bad case 收集(不自动触发)，记录到 `data/turn_bad_cases.jsonl`**
+4. **gaze 仅 ARMED 态运行(bug-074)**：`_face_pipeline._gaze` 按 `st.state==ST_ARMED` 切换(None 跳过 L2CS ~35ms/face)；GazeBehaviorFSM update 加 ST_ARMED 门；非 ARMED 重置 `gaze_behavior="IDLE"` 防残值阻塞 behavior_loop 状态转换。
+
+### ✅ body_follow hold 全路径保护(2026-07-08,bug-076 v3→v4)
+
+- **v3 修法**：`_turn_body_hold_active()` 保护 5 个层面（approach/状态机/DOA glance/body_follow）
+- **v4 改进（flag 驱动）**：hold 不再按时间过期（旧：TURN_BODY_HOLD_S=2.0+对话活跃延长,最长10s），改为 flag 驱动：
+  - `st.turn_body_hold=True` 由 turn_body(left/right) 设置
+  - 持续到 ① `turn_body(direction="center")` 回正（释放 hold）② 60s 无交互（安全兜底）
+  - "什么时候转回来"的决策权交给模型，不是基础设施自动拉回
+- **direction="center"**：body 回正到 0°，释放 hold，恢复正常 DOA/body_follow/approach
+- **tool schema 更新**：direction enum 加 `"center"`，INSTRUCTIONS 加回正说明
+
+### 🔧 多人张冠李戴修复(2026-07-06,bug-069/070,PR #16,分支 pr14-on-main,⚠️ 待两人硬测)
+- **现象**:多人在场,新人/换人问"我是谁/我叫什么/我喜欢吃什么" → 模型答成另一个人(碧霞被答"你叫大大")。
+- **诊断 & 探针实测(一锤定音)**:归属层(ASD)+注入内容都对。用随机暗号探针(create_item 埋 A#、response.instructions 埋 B#,看回复带哪个)实测:**A# 从不出现、B# 每轮都带且对得上当轮 → Qwen Omni 完全忽略会话中途的 create_item system 条目,只 honor response.instructions**。所以 v1 的 create_item 注入是废重量。
+- **修复(voice/realtime.py,D-only)**:
+  - **收回 turn-taking**:3 处会话配置 `turn_detection_param={"create_response":False}` + 注入后我方手动 create_response(in_flight==0 守卫)→ 治 semantic_vad 在 speech_stopped 抢跑。
+  - `resp_directive()`(**Option D,唯一有效通道**):`response.instructions` 给单次回复下"当前说话人"强指令(基础人设+身份约束,普通轮 + 工具轮都带)。
+  - 过滤 称呼/名字 类 fact 防和身份名打架(治"碧霞→陛下");fix 兜底抽取器 save_fact 缺参 TypeError(bug-069)。
+  - **已砍**:create_item 注入(inject_context)整套 + 诊断探针 —— 探针证明无效,身份注入单通道走 D。
+- **已验**:D 被 honor(回复带当轮 B#);单人 + 初步多人无张冠李戴(归属对→答对,不确定→中性)。
+- **待验**:两人都已识别、都在画面、轮流问身份 → 确认 D 的"忽略历史里的其他人"能压住(真正对抗历史)。
+- **后手(若 D 不够)**:Option C —— 身份切换重启会话清历史(`restart_session_for_switch` 现死代码,需接线+去抖)。
 ### ✅ 工具系统重构 — 硬编码 → 插件式 Tool ABC(2026-07-06)
 
 将分散在三个文件的工具系统（config.py BASE_TOOLS + manager.py QWEN_TOOLS + realtime.py 130 行 if/elif 分发链）重构为插件式 Tool 基类模式。
@@ -21,17 +60,6 @@
 **验证**：py_compile 10/10 绿；新旧 specs 13/13 完全一致；exclude 过滤正确
 
 **扩展方式**：新增工具 = 创建 Tool 子类 + register()，无需改分发代码
-### 🔧 多人张冠李戴修复(2026-07-06,bug-069/070,PR #16,分支 pr14-on-main,⚠️ 待两人硬测)
-- **现象**:多人在场,新人/换人问"我是谁/我叫什么/我喜欢吃什么" → 模型答成另一个人(碧霞被答"你叫大大")。
-- **诊断 & 探针实测(一锤定音)**:归属层(ASD)+注入内容都对。用随机暗号探针(create_item 埋 A#、response.instructions 埋 B#,看回复带哪个)实测:**A# 从不出现、B# 每轮都带且对得上当轮 → Qwen Omni 完全忽略会话中途的 create_item system 条目,只 honor response.instructions**。所以 v1 的 create_item 注入是废重量。
-- **修复(voice/realtime.py,D-only)**:
-  - **收回 turn-taking**:3 处会话配置 `turn_detection_param={"create_response":False}` + 注入后我方手动 create_response(in_flight==0 守卫)→ 治 semantic_vad 在 speech_stopped 抢跑。
-  - `resp_directive()`(**Option D,唯一有效通道**):`response.instructions` 给单次回复下"当前说话人"强指令(基础人设+身份约束,普通轮 + 工具轮都带)。
-  - 过滤 称呼/名字 类 fact 防和身份名打架(治"碧霞→陛下");fix 兜底抽取器 save_fact 缺参 TypeError(bug-069)。
-  - **已砍**:create_item 注入(inject_context)整套 + 诊断探针 —— 探针证明无效,身份注入单通道走 D。
-- **已验**:D 被 honor(回复带当轮 B#);单人 + 初步多人无张冠李戴(归属对→答对,不确定→中性)。
-- **待验**:两人都已识别、都在画面、轮流问身份 → 确认 D 的"忽略历史里的其他人"能压住(真正对抗历史)。
-- **后手(若 D 不够)**:Option C —— 身份切换重启会话清历史(`restart_session_for_switch` 现死代码,需接线+去抖)。
 
 ### ✅ 注视感知 Phase 2 — ARMED 注视回看 + 时间常数平滑 + Dashboard 可视化(2026-07-02)
 
@@ -211,7 +239,7 @@ voice/
 tools/
   base.py          — Tool ABC + ToolDeps dataclass
   registry.py      — ToolRegistry + build_default_registry()
-  motion.py        — MotionTool (8 动作工具)
+  motion.py        — MotionTool (8 动作) + TurnBodyTool (带参转身)
   session.py       — EndSessionTool
   memory.py        — 4 个记忆工具类
 perception/
@@ -256,6 +284,42 @@ memory/
 
 - 9 状态 FSM: ARMED/IDLE_CENTER/ENGAGING/TRACKING/SEARCHING/RETURNING/POINTING/PLAYING
 - 5 层运动仲裁: Primary > Playing > SoundTurn > Tracking > Idle
+
+### 工具系统架构规范（⚠️ 必须遵守，禁止散弹式修改）
+
+```
+新增/修改工具的唯一正确路径:
+
+1. 创建 Tool 子类 (tools/*.py)
+   - 继承 Tool ABC，实现 name / description / execute
+   - 有参数覆盖 parameters property，无参不写(默认空)
+   - execute() 返回 JSON str → 调用方统一 create_item + _record_tool_output
+   - execute() 返回 None → 工具自行处理输出(异步)
+
+2. 注册 (tools/registry.py → build_default_registry())
+   - reg.register(MyTool()) 一行即可
+   - 顺序：motion(8) → turn_body → end_session → memory(4)
+
+3. 分发 — 自动通过 registry.get(name).execute(deps, ...)
+   - voice/realtime.py ChatCallback 统一分发，无需修改
+   - 特殊执行逻辑(如 turn_body 需改 st 状态) → d01 motion_loop 加分支
+
+❌ 禁止:
+   - 在 voice/config.py BASE_TOOLS 加工具定义 (DEPRECATED)
+   - 在 memory/manager.py QWEN_TOOLS 加工具定义 (DEPRECATED)
+   - 在 voice/realtime.py 加 if/elif 分支处理新工具
+   - 在多个文件散弹式添加工具相关代码
+
+运行时依赖注入:
+   ToolDeps(st, conv, motion_q, memory_mgr, owner_mgr, id_recognizer, face_pipeline)
+   每次工具调用由分发层构建，工具内部通过 deps 访问所有资源
+
+工具分类:
+   - 无状态/fire-and-forget: MotionTool — 放 motion_q 立即返回
+   - 有状态: TurnBodyTool — 放 motion_q + args，motion_loop 特殊分支执行
+   - 委托: Memory 工具 — 委托 memory_mgr / safety 模块
+   - 副作用: EndSessionTool — 修改 st.exit_request
+```
 
 ### 多人"我是谁"误答修复(2026-07-06,bug-068)
 - **现象**:已认识 A 在场,新人 B 问"我是谁",模型答"你是 A";但全都认识时接力问则回答正确。

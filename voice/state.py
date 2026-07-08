@@ -240,6 +240,9 @@ class State:
         self.track_yaw = 0.0
         self.track_pitch = 0.0
         self.body_yaw_deg = 0.0
+        self.turn_body_hold = False       # turn_body(left/right)后 True; center 或 idle 60s 后 False
+        self.turn_body_hold_since = 0.0   # hold 激活时的 monotonic 时戳
+        self.turn_body_fallback_fired = False  # qwen-plus 兜底补发了 turn_body,下轮 resp_directive 提醒模型
         self.face_seen_at = 0.0
         self.face_locked = False
         self.user_speaking = False

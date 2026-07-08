@@ -124,9 +124,10 @@ class IdentityStore:
             zone = "unknown"
 
         self._log_distance(best_dist, zone, best_name)
+        _ext_name = best_name if (zone == "known" and not best_provisional) else None
         return MatchResult(
             identity_id=best_id if zone == "known" else None,
-            identity_name=best_name if zone == "known" else None,
+            identity_name=_ext_name,
             distance=best_dist,
             confidence=max(0.0, 1.0 - best_dist),
             is_known=(zone == "known"),
@@ -184,14 +185,15 @@ class IdentityStore:
             ident = self.identities[best_prov_id]
             if quality >= self.cfg.min_quality:
                 ident.add_embedding(embedding, quality, self.cfg.max_gallery_per_id)
-            return MatchResult(best_prov_id, ident.name, best_prov_dist,
+            _ext_name = ident.name if ident.is_confirmed else None
+            return MatchResult(best_prov_id, _ext_name, best_prov_dist,
                                max(0.0, 1.0 - best_prov_dist), True, is_provisional=True, zone="known")
 
         self._next_unknown_id += 1
         prov_name = f"Unknown-{self._next_unknown_id}"
         prov_id = self.register_identity(prov_name, [embedding], [quality], confirmed=False)
         logger.info(f"Created provisional identity: {prov_name}")
-        return MatchResult(prov_id, prov_name, 0.0, 1.0, True, is_provisional=True, zone="known")
+        return MatchResult(prov_id, None, 0.0, 1.0, True, is_provisional=True, zone="known")
 
     def confirm_identity(self, identity_id: str, name: str) -> bool:
         """provisional → confirmed(用户命名)。"""

@@ -201,3 +201,27 @@
 | 14:35 | d01 切换到 registry: TOOLS列表→build_default_registry(); no_memory→registry.exclude() | voice/d01_realtime_chat.py | 接线完成 | ~1k |
 | 14:40 | 验证: py_compile 10/10 绿 + 新旧 specs 13/13 完全一致 + exclude 正常 | — | 回归通过 | ~500 |
 | 14:45 | 更新 PROJECT_STATE.md + anatomy.md | PROJECT_STATE.md .wolf/anatomy.md | 状态同步 | ~1k |
+| 07-07 | 新增 turn_body 工具(TurnBodyTool + _do_turn_body + motion_loop 分支) | tools/motion.py, tools/registry.py, voice/d01_realtime_chat.py, voice/config.py | py_compile 4/4 绿, 14 工具 | ~3000 |
+| 17:30 | fix gaze position compensation sign (- not +): L2CS yaw negative=eyes right, positive=eyes left; corrected=smooth-offset | perception/gaze.py | fix false-positive/negative | ~3k |
+| 17:30 | turn_body suppress tracking: body stays at user-directed angle, clears on new face or new speech | voice/d01_realtime_chat.py, voice/realtime.py, voice/state.py | implemented | ~4k |
+| 07-07 | fix: ASD不可用时 st.asd_speaker 回退最大脸(治全部归属"画外") | voice/d01_realtime_chat.py | 编译OK | ~1k |
+| 07-07 | fix: turn_body 兜底—用户说"向右转"但模型未调工具时自动补发 | voice/realtime.py | regex+fallback | ~2k |
+| 07-07 | fix: gaze仅ARMED态运行(L2CS+FSM),非ARMED清gaze_behavior="IDLE" | voice/d01_realtime_chat.py | 省35ms/face | ~1k |
+| 07-07 | fix: _valid_name 加 bot name 黑名单,防"小艺"注册为人名 | voice/realtime.py | 已修 | ~500 |
+| 07-07 | 根因: "小艺"被注册为人名来自save_summary/consolidation——LLM从对话"💬 小艺:xxx"提取了机器人名当用户名,consolidate_facts直接写name不走_valid_name | voice/realtime.py, memory/manager.py | 修: consolidation name过_valid_name+prompt强调小艺是机器人 | ~2k |
+| 07-07 | turn_body改为bad case收集(data/bad_cases/turn_body.jsonl)而非自动补发;后续统一优化数据 | voice/realtime.py | 记录不补发 | ~1k |
+| 07-07 | data/memories/id_*_unknown-2.json 名字从null改为"陛下"，恢复记忆内容 | data/memories/ | 数据修复 | ~500 |
+| 00:30 | fix body drift between consecutive turn_body: hold extended during active conversation (user_speaking/in_flight/playback) within 10s of turn_body | voice/d01_realtime_chat.py:1072-1080 | bug-076 fixed | ~2k |
+| 01:00 | fix body drift v2: root cause was approach() in ENGAGING/RETURNING also writes body_yaw_deg without hold protection; extracted _turn_body_hold_active() shared guard, added last_interaction_at 1s grace for speech_stopped→response.created gap | voice/d01_realtime_chat.py:231-254,1282-1298,1091-1092 | bug-076 v2 | ~4k |
+| 01:30 | fix body drift v3: hold must also gate state machine (TRACKING→SEARCHING, SEARCHING→ENGAGING DOA path) and DOA glance trigger; approach+body_follow protection alone insufficient because track_yaw still drifts toward user during ENGAGING | voice/d01_realtime_chat.py:1032,1638,1657,1092 | bug-076 v3 | ~3k |
+
+## Session: 2026-07-08 (turn_body hold flag 驱动)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 14:00 | turn_body hold 改 flag 驱动+支持 center 回正: hold 不再按时间过期,持续到 center 或 idle 60s; direction enum 加 center; _do_turn_body 支持 center 回正+释放 hold | state.py, config.py, d01_realtime_chat.py, tools/motion.py, realtime.py | py_compile 5/5 绿 | ~5k |
+| 14:30 | turn_body 兜底补发: 正则预过滤+qwen-plus语义判断(daemon线程),确认是指令才补发motion_q;resp_directive下轮提醒模型;工具执行失败/未注册补error output | realtime.py, state.py | py_compile 绿 | ~3k |
+| 15:00 | fix bug-077: Unknown-N 泄漏模型上下文,3处过滤(realtime._real_name+d01._pname/_pname_fb+manager.get_prompt);resp_directive未命名分支改自然引导问名字 | realtime.py, d01, manager.py | bug-077; py_compile 3/3 绿 | ~4k |
+| 15:30 | 源头治 Unknown-N: identity_store 对 provisional 返回 identity_name=None;去掉下游 3 处 startswith 兜底(脆弱) | identity_store.py, realtime.py, d01, manager.py | 干净 | ~2k |
+| 16:00 | 删改名守卫门3(改名意图正则):用户自己纠正名字直接接受;remember_fact先过守卫再写facts,拒绝时不撒谎 | realtime.py, tools/memory.py | bug-078; py_compile 绿 | ~3k |
+| 16:30 | 日志分析:unsure zone 死区致 T6 30s 无 person_id;根因是两不同人脸距离~0.7 落在 0.65~0.80;暂不改架构,待模型精度提升 | (分析) | 记录待观察 | ~2k |
