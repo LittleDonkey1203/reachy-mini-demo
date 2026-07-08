@@ -620,7 +620,15 @@
       "file": "voice/d01_realtime_chat.py",
       "root_cause": "时序竞态:对话中喊'小艺'二次唤醒后,用户紧接着又说话('小叶,小叶'),semantic_vad 在 speech_stopped 后会自动为这句起一个 active response;与此同时 behavior 锁脸置 greet_now → 音频循环'唤醒应答'又调 conv.create_response(招呼)→ 两个回复撞车。招呼守卫只看 in_flight>0,但用户这句的回复刚 transcription.completed、response.created 还没到 → in_flight 还是 0 → 守卫漏过 → create_response 撞上服务端已起的 active response。create_response 只发 WS 不等结果,错误是异步 error 事件回来,try/except 抓不到。",
       "fix": "招呼守卫扩展:_busy = in_flight>0 OR st.thinking(speech_stopped→True、首音频→False,正好是'说完等回复'的竞态窗) OR (now - turn_speaker_at)<2s(刚有用户说话→服务端会自动起回复的兜底,时间自清不会卡死)。任一为真就跳过招呼(已有 '👋 唤醒应答跳过' 日志)。",
-      "tags": ["realtime", "race-condition", "create-response", "wake", "greet", "semantic-vad", "in-flight"],
+      "tags": [
+        "realtime",
+        "race-condition",
+        "create-response",
+        "wake",
+        "greet",
+        "semantic-vad",
+        "in-flight"
+      ],
       "related_bugs": [],
       "occurrences": 1,
       "last_seen": "2026-06-29T15:50:00.000Z"
@@ -652,7 +660,13 @@
       "file": "voice/realtime.py (RealtimeDialog.extract_memory_async)",
       "root_cause": "每轮兜底记忆抽取器 prompt 让 qwen-plus 吐自由文本 facts 列表,循环里 save_fact(pid, f) 只传 2 参;但本分支(origin/main)MemoryManager 是 key-value 模型 save_fact(pid, key, value) 要 3 参 → 每轮抽取保存都 TypeError,兜底记忆网失效(只有模型主动调 remember_fact 才存得进)",
       "fix": "抽取器 prompt 改产 key-value dict(而非自由文本 list);解析 facts 按 dict items 循环 save_fact(pid, k, v);非 dict(模型偶发吐旧 list)当空跳过防再崩",
-      "tags": ["memory", "save_fact", "extract_memory_async", "key-value", "typeerror"],
+      "tags": [
+        "memory",
+        "save_fact",
+        "extract_memory_async",
+        "key-value",
+        "typeerror"
+      ],
       "related_bugs": [],
       "occurrences": 5,
       "last_seen": "2026-07-06"
@@ -664,10 +678,152 @@
       "file": "voice/realtime.py (注入 + turn-taking + create_response)",
       "root_cause": "三层叠加:①共享 realtime 会话历史污染(所有人轮次混在一个 session,一旦答错就滚雪球)②semantic_vad 在 speech_stopped 就自动 commit,注入(transcription.completed)慢一拍,没进已提交上下文 ③concise create_item 的 system 条目被 Qwen Omni 低权重/忽略,压不过音频历史",
       "fix": "WIP(PR #16,待真机验证):inject_context 走 create_item + 每轮刷新;收回 turn-taking(turn_detection create_response=false + 注入后手动 create_response,in_flight==0 守卫)治抢跑;resp_directive() 用 response.instructions 给单次回复下当前说话人强指令(普通轮+工具轮都带)治 system 条目被忽略;过滤称呼/名字 fact 防名字打架。若仍不够则上 Option C(身份切换重启会话清历史)",
-      "tags": ["memory", "identity", "多人", "张冠李戴", "create_item", "turn-taking", "semantic_vad", "response.instructions", "wip"],
-      "related_bugs": ["bug-067", "bug-068"],
+      "tags": [
+        "memory",
+        "identity",
+        "多人",
+        "张冠李戴",
+        "create_item",
+        "turn-taking",
+        "semantic_vad",
+        "response.instructions",
+        "wip"
+      ],
+      "related_bugs": [
+        "bug-067",
+        "bug-068"
+      ],
       "occurrences": 1,
       "last_seen": "2026-07-06"
+    },
+    {
+      "id": "bug-071",
+      "timestamp": "2026-07-07",
+      "error_message": "gaze 位置补偿符号反了:用户坐在机器人左前方,看正前方(没看机器人)高概率被判 look=Y;真正看机器人时反而 look=N",
+      "file": "perception/gaze.py",
+      "root_cause": "L2CS-Net(经 5 点对齐)的 yaw 符号约定与代码注释假设相反:人在画面左侧看相机 → 眼球向右 → gaze_yaw 输出为 负值(非正值)。pos_offset_yaw 为负(人在左),corrected=smooth+offset 使真看机器人时 corrected 远离 0(|−8+(−13)|=21>15 false negative),看正前方时 corrected 靠近 0(|+14+(−13)|=1<15 false positive)。上一次'修正'(- 改 +)基于错误的 L2CS 符号假设,实际应为 corrected=smooth−offset",
+      "fix": "corrected_yaw = smooth_yaw - pos_offset_yaw (同理 pitch)。修正后:看机器人 corrected=−8−(−13)=+5 → |5|<15 mutual ✓;看正前方 corrected=+14−(−13)=+27 → |27|>15 not mutual ✓。更新代码注释为正确的 L2CS 符号约定",
+      "tags": [
+        "gaze",
+        "position-compensation",
+        "sign-convention",
+        "l2cs-net",
+        "false-positive",
+        "false-negative"
+      ],
+      "related_bugs": [
+        "bug-068"
+      ],
+      "occurrences": 2,
+      "last_seen": "2026-07-07"
+    },
+    {
+      "id": "bug-072",
+      "timestamp": "2026-07-07T00:00:00+08:00",
+      "error_message": "ASD不可用时所有语音归属判为'画外',即使面前有人脸",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "ASD disabled时vision_result_loop从不设st.asd_speaker,realtime.py fallback读到None直接走'画外'路径。'回退最大脸'只在日志中提到但未实现。",
+      "fix": "ASD不可用时将st.asd_speaker设为primary(最大)脸的{pid,name,track_id,score:0,at:now}",
+      "tags": [
+        "asd",
+        "attribution",
+        "fallback",
+        "画外"
+      ],
+      "related_bugs": [
+        "bug-060",
+        "bug-061"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-07-07"
+    },
+    {
+      "id": "bug-073",
+      "timestamp": "2026-07-07T00:00:00+08:00",
+      "error_message": "用户说'向右转'但模型只回文字'好嘞,我转过去啦'不调turn_body工具",
+      "file": "voice/realtime.py",
+      "root_cause": "Qwen-Omni-Realtime模型偶发把工具调用文本化(已知特性:flash更严重,plus也有)。长对话后工具调用率下降。",
+      "fix": "在transcription.completed检测用户转身指令(正则),response.done时若模型未调turn_body则自动补发motion_q",
+      "tags": [
+        "turn_body",
+        "tool_call",
+        "fallback",
+        "model_behavior"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-07-07"
+    },
+    {
+      "id": "bug-074",
+      "timestamp": "2026-07-07T00:00:00+08:00",
+      "error_message": "gaze L2CS-Net在TRACKING态也运行,浪费~35ms/face且无用",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "FaceReIDPipeline._gaze始终指向GazeModule,process()每帧都跑L2推理。FSM也在所有状态运行。",
+      "fix": "vision_result_loop按st.state切换_face_pipeline._gaze(ARMED→_gaze_mod,否则None);FSM update加ST_ARMED门;非ARMED时重置gaze_behavior='IDLE'防阻塞behavior_loop状态转换",
+      "tags": [
+        "gaze",
+        "performance",
+        "armed",
+        "state_gate"
+      ],
+      "related_bugs": [],
+      "occurrences": 1,
+      "last_seen": "2026-07-07"
+    },
+    {
+      "id": "bug-075",
+      "timestamp": "2026-07-07T00:00:00+08:00",
+      "error_message": "人脸识别把'小艺'(机器人名)注册为人物身份",
+      "file": "voice/realtime.py",
+      "root_cause": "save_summary/consolidation LLM从对话中提取了'小艺'作为用户名(实际是机器人自称),consolidate_facts直接写data['name']+face_db.set_name,不走_valid_name/try_name_identity校验。对话内容充满'💬 小艺:xxx'格式的机器人回复,LLM混淆了机器人名和用户名。",
+      "fix": "1. save_summary里consolidation返回的name过_valid_name拦截bot名/非法名;2. consolidation prompt强调'小艺是机器人不是用户';3. _valid_name黑名单(已有)防漏网",
+      "tags": [
+        "identity",
+        "naming",
+        "bot_name"
+      ],
+      "related_bugs": [
+        "bug-064"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-07-07"
+    },
+    {
+      "id": "bug-076",
+      "timestamp": "2026-07-07",
+      "error_message": "连续 turn_body 指令间身体被 body_follow 拉回:右转→再右转时中间先往左转了33°",
+      "file": "voice/d01_realtime_chat.py",
+      "root_cause": "turn_body 后 body 被拉回有 3 层根因:①approach() 在 ENGAGING 态写 body(v2 已保护);②状态机 TRACKING→SEARCHING→ENGAGING→approach 把 track_yaw 拉向用户方向,hold 过期后 body_follow 追赶;③DOA 瞟头/声源 ENGAGING 在 hold 期间不应触发(转身后丢脸是预期的);④body_follow 的 glance 绕过 hold 的设计在 turn_body 后场景下是错的。",
+      "fix": "v3:_turn_body_hold_active() 共享函数保护 4 个层面:①approach() body 冻结(v2);②TRACKING→SEARCHING 加 hold 门(hold 期间不因丢脸跳 SEARCHING);③SEARCHING→ENGAGING DOA 路径加 hold 门(hold 期间不响应声源);④DOA glance 触发加 hold 门(hold 期间不瞟头);⑤body_follow glance 不再绕过 hold。",
+      "tags": [
+        "body_follow",
+        "turn_body",
+        "hold",
+        "drift"
+      ],
+      "related_bugs": [],
+      "occurrences": 3,
+      "last_seen": "2026-07-08"
+    },
+    {
+      "id": "bug-077",
+      "timestamp": "2026-07-08T15:00:00+08:00",
+      "error_message": "模型对未命名人说\"unknown-1\"而非自然询问名字",
+      "file": "voice/realtime.py, voice/d01_realtime_chat.py, memory/manager.py",
+      "root_cause": "identity_store 为陌生人注册 provisional 身份 Unknown-N,该名字通过 TrackView.person_name → asd_speaker[name] → _real_name → resp_directive/update_memory 泄漏进模型上下文,模型误以为对方叫 Unknown-1",
+      "fix": "在3处过滤 Unknown-* 前缀名:①realtime.py _real_name 赋值处 ②d01 current_person_name 赋值处+ASD fallback ③memory/manager.py get_prompt();resp_directive elif present 分支改为引导模型自然问名字",
+      "tags": [
+        "identity",
+        "prompt-injection",
+        "unknown-name",
+        "model-context"
+      ],
+      "related_bugs": [
+        "bug-063"
+      ],
+      "occurrences": 1,
+      "last_seen": "2026-07-08T15:00:00+08:00"
     }
   ]
 }
