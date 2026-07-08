@@ -41,7 +41,6 @@ LLM 可调用 `turn_body(direction, angle)` 控制底盘旋转，大角度转向
 - **已验**:D 被 honor(回复带当轮 B#);单人 + 初步多人无张冠李戴(归属对→答对,不确定→中性)。
 - **待验**:两人都已识别、都在画面、轮流问身份 → 确认 D 的"忽略历史里的其他人"能压住(真正对抗历史)。
 - **后手(若 D 不够)**:Option C —— 身份切换重启会话清历史(`restart_session_for_switch` 现死代码,需接线+去抖)。
-
 ### ✅ 工具系统重构 — 硬编码 → 插件式 Tool ABC(2026-07-06)
 
 将分散在三个文件的工具系统（config.py BASE_TOOLS + manager.py QWEN_TOOLS + realtime.py 130 行 if/elif 分发链）重构为插件式 Tool 基类模式。
