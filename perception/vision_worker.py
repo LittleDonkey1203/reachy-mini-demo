@@ -425,10 +425,21 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
                         pys = [p.y * H for p in lms]
                         bx, by = min(pxs), min(pys)
                         bw, bh = max(pxs) - bx, max(pys) - by
+                        def _mp_eye(i1, i2):
+                            return ((lms[i1].x + lms[i2].x) * 0.5 * W,
+                                    (lms[i1].y + lms[i2].y) * 0.5 * H)
+                        _mp_kps = [
+                            _mp_eye(*_MP_LEFT_EYE),
+                            _mp_eye(*_MP_RIGHT_EYE),
+                            (lms[_MP_NOSE].x * W, lms[_MP_NOSE].y * H),
+                            (lms[_MP_MOUTH_LEFT].x * W, lms[_MP_MOUTH_LEFT].y * H),
+                            (lms[_MP_MOUTH_RIGHT].x * W, lms[_MP_MOUTH_RIGHT].y * H),
+                        ]
                         _all_mp.append({
                             "u": float(fu), "v": float(fv), "h": float(fh),
                             "box": (int(bx), int(by), int(bw), int(bh)),
-                            "kps": None,
+                            "kps": _mp_kps,
+                            "conf": 1.0,
                         })
                     best = max(mp_faces, key=lambda f: f[2])
                     out["face"] = best
@@ -447,23 +458,10 @@ def vision_worker(face_model: str, hand_model: str, frame_q, result_q,
                             _frown += cat.score * 0.5
                     out["smile"] = _smile
                     out["frown"] = _frown
-                if out["face"] is not None and fres.face_landmarks:
-                    lms = fres.face_landmarks[0]
-                    pxs = [p.x * W for p in lms]
-                    pys = [p.y * H for p in lms]
-                    bx, by = min(pxs), min(pys)
-                    bw, bh = max(pxs) - bx, max(pys) - by
-                    out["face_box"] = (int(bx), int(by), int(bw), int(bh))
-                    def _eye_center(i1, i2):
-                        return ((lms[i1].x + lms[i2].x) * 0.5 * W,
-                                (lms[i1].y + lms[i2].y) * 0.5 * H)
-                    out["face_kps"] = [
-                        _eye_center(*_MP_LEFT_EYE),
-                        _eye_center(*_MP_RIGHT_EYE),
-                        (lms[_MP_NOSE].x * W, lms[_MP_NOSE].y * H),
-                        (lms[_MP_MOUTH_LEFT].x * W, lms[_MP_MOUTH_LEFT].y * H),
-                        (lms[_MP_MOUTH_RIGHT].x * W, lms[_MP_MOUTH_RIGHT].y * H),
-                    ]
+                if out["face"] is not None and out.get("all_faces"):
+                    _prim = max(out["all_faces"], key=lambda a: a["h"])
+                    out["face_box"] = _prim["box"]
+                    out["face_kps"] = _prim["kps"]
 
             # ── 手部检测(MediaPipe,降频)──
             _hand_ready = (hand_lm is not None or use_gesture_rec)
