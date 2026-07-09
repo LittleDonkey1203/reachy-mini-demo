@@ -114,11 +114,10 @@ def test_04_history():
         mm.save_fact("p1", "age", "25")
 
         data = mm.load_memory("p1")
-        history = data["history"]
-        _check("历史 3 条", len(history) == 3)
-        _check("第1条 action=set", history[0]["action"] == "set")
-        _check("第2条记录旧值", history[1]["old_value"] == "小明")
-        _check("每条有时间戳", all("at" in h for h in history))
+        # 该分支已移除 per-person history 字段(manager.py load_memory 自动删除),改用 episodes 承载
+        _check("history 字段已移除", "history" not in data)
+        _check("改用 episodes 承载", "episodes" in data)
+        _check("facts 为 LWW 最新值", data["facts"].get("name") == "小红")
     finally:
         shutil.rmtree(d)
 
@@ -139,10 +138,8 @@ def test_05_clear():
         _check("确认后返回'已清除'", "已清除" in result)
         _check("facts 为空", len(mm.get_facts("p1")) == 0)
 
-        data = mm.load_memory("p1")
-        last = data["history"][-1]
-        _check("历史记录 clear_all", last["action"] == "clear_all")
-        _check("历史保留旧 facts", "name" in last.get("old_facts", {}))
+        # history 字段已移除(见 manager.py);clear_all 行为由上面 facts 断言覆盖
+        _check("clear 后 history 不残留", "history" not in mm.load_memory("p1"))
     finally:
         shutil.rmtree(d)
 
@@ -251,6 +248,54 @@ def test_10_qwen_tools():
         _check(f"{t['name']} type=function", t["type"] == "function")
 
 
+def test_11_concurrency():
+    print("\n[Test 11] 并发冒烟(MemoryManager RLock:可重入不死锁 + 无丢数据)")
+    import threading
+    d = tempfile.mkdtemp()
+    try:
+        mm = MemoryManager(d)
+
+        def worker(pid):
+            for i in range(50):                      # 每 pid 50 key(避开 MAX_FACTS=50 的 trim)
+                mm.save_fact(pid, f"k{i}", f"v{i}")
+
+        t1 = threading.Thread(target=worker, args=("alice",))
+        t2 = threading.Thread(target=worker, args=("bob",))
+        t1.start(); t2.start()
+        t1.join(timeout=10); t2.join(timeout=10)
+        alive = t1.is_alive() or t2.is_alive()
+        na, nb = len(mm.get_facts("alice")), len(mm.get_facts("bob"))
+        _check("两线程均完成(无 RLock 死锁)", not alive)
+        _check(f"alice 50 facts 完整(实得 {na})", na == 50)
+        _check(f"bob 50 facts 完整(实得 {nb})", nb == 50)
+        assert not alive, "并发写卡死(RLock 死锁?)"
+        assert na == 50 and nb == 50, f"并发丢数据:alice={na}, bob={nb}"
+    finally:
+        shutil.rmtree(d)
+
+
+def test_12_concurrency_same_pid():
+    print("\n[Test 12] 并发冒烟·同 pid(RLock 序列化读改写,不丢)")
+    import threading
+    d = tempfile.mkdtemp()
+    try:
+        mm = MemoryManager(d)
+
+        def worker(base):
+            for i in range(20):                  # 2 线程 × 20 key = 40 < MAX_FACTS=50
+                mm.save_fact("shared", f"{base}{i}", f"v{i}")
+
+        t1 = threading.Thread(target=worker, args=("a",))
+        t2 = threading.Thread(target=worker, args=("b",))
+        t1.start(); t2.start()
+        t1.join(timeout=10); t2.join(timeout=10)
+        n = len(mm.get_facts("shared"))
+        _check(f"同 pid 40 条完整(实得 {n})", n == 40)
+        assert n == 40, f"同 pid 并发丢数据:{n}/40"
+    finally:
+        shutil.rmtree(d)
+
+
 def main():
     print("=" * 60)
     print("  记忆管理功能测试 — memory_manager.py")
@@ -267,6 +312,8 @@ def main():
         test_08_tool_call,
         test_09_flush_unload,
         test_10_qwen_tools,
+        test_11_concurrency,
+        test_12_concurrency_same_pid,
     ]
 
     for fn in tests:

@@ -2,6 +2,18 @@
 
 ## 已完成事项
 
+### 🧠 Talker-Reasoner 异步对话策略(REASONER-01/02,2026-07-07,PR #16,deepseek-v4-flash)
+- **架构**:新增 `voice/reasoner.py` ConversationReasoner —— 后台异步 LLM(Reasoner /「thinker」)在不阻塞主链路前提下,预判"接下来几轮聊什么更开心",产出 ≤180字简短策略,注入 Talker(Omni)的 `response.instructions`(resp_directive)。
+- **三条红线**:①主链路零阻塞(latest-only 队列 maxsize=1 丢旧 + worker 线程 + debounce 去抖);②策略只走 resp_directive,绝不碰 create_item;③绝不动运动侧(st.state/behavior/head_control/motion)。
+- **锁纪律**:st.lock 锁内快照 → 锁外 LLM → 锁内写回(单测 test_lock_free_during_llm 硬门);MemoryManager 补 RLock(治嵌套 save_fact→load_memory→_persist 的 P0 线程安全)。
+- **三道注入门**(hint_gate_ok):pid 匹配 / TTL 新鲜(90s)/ 落后轮数(`REASONER_MAX_STALE_TURNS` env 默认10)。invalidate 只在"已识别 A→B"触发(治单人 None↔pid 抖动致命中率归零,fd1d3c0)。
+- **模型**:`REASONER_MODEL=deepseek-v4-flash`(DashScope 托管,~7.6s,快且不超时)—— qwen3.7-max ~20s 常超时、21轮只生成1份已弃。env 可调:REASONER_MODEL/TIMEOUT_S/DEBOUNCE_S/MAX_STALE_TURNS;`--no-reasoner` 关。
+- **注入准确性 = 100% 真机验证**:`REASONER_PROBE=1`(默认关)在策略塞随机4位验证码 + "回复末尾原样输出",实测每条完整回复末尾都精确等于当轮注入码(随机码排除照抄历史)→ Reasoner 内容确实进了 Omni 上下文且被 honor。
+- **REASONER-02 prompt 决策树**:判投入度 → 来劲深挖(但同一大主题连聊 2-3 轮后转"引用户经历/搭桥邻近话题",治单向灌冷知识)→ 冷场/≥2轮无进展换话题 → 去重(上一份策略仅去重参考)→ 具身(点头/歪头/摆天线,【硬约束】严禁策略让小艺声称"看到"画面,Reasoner 侧无看图能力)→ style 仅偏离默认时填。问句政策三处统一("把话题留给用户,可轻问也可观察式留白,别每轮以问句结尾":INSTRUCTIONS/注入标签/REASONER_PROMPT)。compress_hint 空/null 字段整段跳过(修 `str(None)="None"` 污染)。
+- **真机指标(2026-07-07,18轮)**:style 非空率 **0%**(旧~100%)· 具身 hook **6/10** · 虚构视觉 **0**(硬)· 元话语 **0** · 同具体话题重复 **0**(旧4+,回避链去重)· 具身旁白无泄漏(模型没把"歪头"当话说出)。
+- **文件**:voice/reasoner.py(新)· config.py(REASONER_PROMPT/常量/INSTRUCTIONS风格)· realtime.py(resp_directive 注入 + _maybe_append_strategy + 注入标签)· state.py(reasoner_hint)· d01_realtime_chat.py(构造/start/stop/--no-reasoner/退出统计)· memory/manager.py(RLock)· tests/test_reasoner.py(23 绿)。
+- **待真机验证**:"敷衍→换话题"分支真机未触发(用户全程投入),离线 B 案已验;指标1"同大主题2-3轮后转引用户"离线已验、真机待观察。
+
 ### ✅ 身份系统统一 — 废弃 FaceDB，全切 IdentityStore(2026-07-09)
 
 两套并行的身份系统（旧 FaceDB→face_db.json vs 新 IdentityStore→gallery.json）导致同一个人在两个库中有不同条目和名字，命名/auto_merge/记忆归属全部失效。
@@ -255,7 +267,8 @@ voice/
   d01_realtime_chat.py — 主程序 (~600 行，已瘦身)
   debug_server.py  — Dashboard
   kws.py           — 唤醒词门控
-  realtime.py      — Qwen-Omni-Realtime 协议层 + registry 分发 + Session Consolidation
+  realtime.py      — Qwen-Omni-Realtime 协议层 + registry 分发 + Session Consolidation + 策略注入(resp_directive)
+  reasoner.py      — Talker-Reasoner 异步对话策略(后台 LLM,latest-only 队列 + 三道注入门)
 tools/
   base.py          — Tool ABC + ToolDeps dataclass
   registry.py      — ToolRegistry + build_default_registry()
@@ -376,3 +389,4 @@ memory/
 3. 真机测试验证身份稳定性修复 + 上下文防污染效果
 4. 继续 todo.md 未完成项(#1 DOA / #7 身份优化 / #9 对话质量)
 5. Semantic Memory 层 — 从 episodes 抽象知识 + GraphDB
+6. **Reasoner 真机再验**:①"敷衍→换话题"分支(真机造冷场段观察);②指标1"同主题2-3轮后转引用户/搭桥"真机体感;③具身 hook 是否真触发头部动作(动作工具调用,非仅口语)

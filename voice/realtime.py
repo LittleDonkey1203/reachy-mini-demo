@@ -24,6 +24,7 @@ from voice.config import (
     CONV_SUMMARY_THRESHOLD,
 )
 from voice.state import State, log, _record_event
+from voice.reasoner import hint_gate_ok   # 策略注入三道门(reasoner 不 import realtime,无环)
 import voice.state as _st_mod
 from tools.base import ToolDeps
 
@@ -187,6 +188,8 @@ class ChatCallback(OmniRealtimeCallback):
         self._pending_transcript: str = ""            # 触发 turn_cmd 的用户转写(供 bad case 记录)
         self.conv: OmniRealtimeConversation | None = None
         self.dialog: "RealtimeDialog | None" = None
+        self.reasoner = None                 # ConversationReasoner(d01 注入;--no-reasoner 时保持 None)
+        self.exit_i = 0
 
     def on_open(self) -> None:
         log("✅ WebSocket 已连接 dashscope.aliyuncs.com")
@@ -292,10 +295,17 @@ class ChatCallback(OmniRealtimeCallback):
                 # ── ① 本句说话人:记忆「存/读」唯一来源(稳),不再用飘的 current_person_id ──
                 _tspk_real = (_log_pid not in ("_unknown", "_offscreen")
                               and not _log_pid.startswith("_track"))
+                _new_tspk = _log_pid if _tspk_real else None
                 with st.lock:
-                    st.turn_speaker_pid = _log_pid if _tspk_real else None
+                    _old_tspk = st.turn_speaker_pid
+                    st.turn_speaker_pid = _new_tspk
                     st.turn_speaker_name = _real_name if _tspk_real else None   # 占位名 ?T 绝不入 turn_speaker
                     st.turn_speaker_at = now
+                if (self.reasoner is not None and _old_tspk and _new_tspk
+                        and _old_tspk != _new_tspk):
+                    # 仅"已识别人 A → 另一已识别人 B"才作废;不被同一人的画外/track/识别抖动
+                    # (None↔pid)误清(那正是命中率归零的元凶)。跨人泄漏由注入门 pid 匹配兜底。
+                    self.reasoner.invalidate()
                 log(f"📝 听到的是:「{_transcript}」 → 🗣 归属: {_attr_tag}")
                 # ── turn_body 兜底检测:用户说了转身命令,等模型是否调工具 ──
                 _tcmd = _parse_turn_direction(_transcript) if _transcript else None
@@ -359,6 +369,11 @@ class ChatCallback(OmniRealtimeCallback):
                                 log(f"⚠ create_response 失败:{type(_e).__name__}: {_e}")
                         else:
                             log(f"⏭ 跳过 create_response(in_flight={st.in_flight},招呼/旧回复在途)")
+                    # ── Reasoner:本轮转写完成 → 触发后台策略生成(notify 非阻塞;reasoner 为 None 跳过)──
+                    if self.reasoner is not None:
+                        with st.lock:
+                            _rseq = st.display_transcript_seq
+                        self.reasoner.notify(_rseq, _log_pid if _tspk_real else None)
             elif etype == "response.created":
                 with st.lock:
                     st.in_flight += 1
@@ -672,6 +687,8 @@ class RealtimeDialog:
             if st.clear_workflow is not None:
                 st.clear_workflow = None
                 st.clear_lock = False
+        if self.callback.reasoner is not None:
+            self.callback.reasoner.invalidate()   # 会话关闭:策略作废(在 st.lock 外调,invalidate 自持锁)
         if self.memory_mgr and not self.no_memory:
             for _pid, _log in _all_logs.items():
                 if _pid != "_unknown" and len(_log) >= 2:
@@ -687,6 +704,8 @@ class RealtimeDialog:
         """身份切换时重启 WS 会话，清除旧对话历史防止上下文污染。"""
         st = self.st
         log(f"🔄 身份切换重启: {old_pid and old_pid[:8]}→{new_pid[:8]} ({new_pname})")
+        if self.callback.reasoner is not None:
+            self.callback.reasoner.invalidate()   # 身份切换:策略作废
         if old_pid and self.memory_mgr and not self.no_memory:
             with st.lock:
                 _old_log = list(st.conversation_log.get(old_pid, []))
@@ -832,7 +851,31 @@ class RealtimeDialog:
                 d += ("【重要提醒】上一轮用户让你转身,你没有调用turn_body工具,系统已自动执行。"
                       "以后遇到转身指令请主动调用turn_body工具,不要只说话不调工具。")
                 self.st.turn_body_fallback_fired = False
+        d = self._maybe_append_strategy(d, cur_pid, present)   # 末尾拼 Reasoner 策略段(身份段 d 一字不动)
         return self.instructions + "\n\n" + d
+
+    def _maybe_append_strategy(self, d, cur_pid, present):
+        """resp_directive 末尾拼「对话策略」段:hint_gate_ok 三道门全过才注入,身份段 d 保持不变。
+        策略缺失/过期/换人/落后轮数 → 原样返回 d(即现状,红线1:Reasoner 失效不影响对话)。"""
+        st = self.st
+        with st.lock:
+            hint = st.reasoner_hint
+            cur_seq = st.display_transcript_seq
+        now = time.monotonic()
+        if not hint_gate_ok(hint, cur_pid, present, now, cur_seq):
+            return d
+        text = hint.get("text", "")
+        age = now - hint.get("ts", now)
+        lag = cur_seq - hint.get("seq", cur_seq)
+        _reasoner = self.callback.reasoner if self.callback else None
+        if _reasoner is not None:                 # 实际注入处自增 inject_hits(st.lock 内)
+            with st.lock:
+                _reasoner.inject_hits += 1
+        _probe = hint.get("probe")
+        log(f"🧠 注入策略(age={age:.0f}s, seq滞后={lag}"
+            + (f", 验证码={_probe}" if _probe else "") + f"): {text}")
+        return d + ("\n[对话策略·内部参考,绝不向用户提及;本轮从中挑一个点自然展开;"
+                    "把话题留给用户——可轻问也可观察式留白,别每轮以问句结尾]") + text
 
     def extract_memory_async(self, pid: str, pname: str | None,
                              current_text: str, context_turns: list) -> None:

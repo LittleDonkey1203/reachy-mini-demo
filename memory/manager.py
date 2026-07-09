@@ -21,8 +21,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -197,11 +199,37 @@ QWEN_TOOLS = [
 ]
 
 
+def _lock_all_public(cls):
+    """给 MemoryManager 的公开方法(+ _persist)整体套上 self._lock(RLock):
+    只加锁,不改任何逻辑与数据格式。RLock 可重入 → save_fact→load_memory→_persist 等嵌套调用安全。"""
+    _WRAP = (
+        "load_memory", "set_name", "get_name", "save_fact", "forget_fact",
+        "get_facts", "consolidate_facts", "save_episode", "get_prompt",
+        "clear_all", "merge_memories", "_persist", "backup_person",
+        "flush", "unload", "list_all", "handle_tool_call",
+    )
+    for _name in _WRAP:
+        _m = getattr(cls, _name, None)
+        if _m is None:
+            continue
+
+        def _wrap(m):
+            @functools.wraps(m)
+            def _locked(self, *a, **kw):
+                with self._lock:
+                    return m(self, *a, **kw)
+            return _locked
+        setattr(cls, _name, _wrap(_m))
+    return cls
+
+
+@_lock_all_public
 class MemoryManager:
     """认知记忆管理器：Entity Memory + Episodic Memory。"""
 
     def __init__(self, memories_dir: str = _MEMORIES_DIR, owner_mgr=None,
                  identity_store=None, face_db=None):
+        self._lock = threading.RLock()
         self.memories_dir = memories_dir
         os.makedirs(self.memories_dir, exist_ok=True)
         self._session: dict[str, dict] = {}

@@ -300,6 +300,7 @@ class State:
         self.current_is_owner: bool = False
         self.identity_injected = False
         self.identity_injected_pid: str | None = None
+        self.reasoner_hint: dict | None = None   # 异步 Reasoner 产出的对话策略(REASONER-01);st.lock 保护
         self.pending_identity_restart: bool = False
         self.resp_snapshot_pid: str | None = None
         self.resp_snapshot_name: str | None = None

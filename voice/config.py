@@ -18,7 +18,39 @@ VISION_MODEL = os.environ.get("VISION_MODEL", "qwen3.5-omni-plus")
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen-turbo")
 EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "qwen-plus")  # 每轮工具审视(记忆抽取),FC/判断更稳
 VISION_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-VOICE = "Ethan"
+
+# ── Reasoner(异步对话策略,Talker-Reasoner 架构,REASONER-01)──
+REASONER_MODEL = os.environ.get("REASONER_MODEL", "qwen-max")
+REASONER_BASE_URL = os.environ.get("REASONER_BASE_URL", VISION_BASE_URL)  # 默认复用 DashScope compatible-mode;留出换 GLM 端点
+REASONER_API_KEY = os.environ.get("REASONER_API_KEY") or os.environ.get("DASHSCOPE_API_KEY", "")
+REASONER_DEBOUNCE_S = float(os.environ.get("REASONER_DEBOUNCE_S", "8"))            # 两次生成最小间隔(env 可调)
+REASONER_HINT_TTL_S = float(os.environ.get("REASONER_HINT_TTL_S", "90"))           # hint 过期时长(注入门①·env 可调)
+REASONER_MAX_STALE_TURNS = int(os.environ.get("REASONER_MAX_STALE_TURNS", "10"))   # 落后轮数上限(注入门③;默认10 容慢模型;env 可调)
+REASONER_TIMEOUT_S = float(os.environ.get("REASONER_TIMEOUT_S", "20"))  # 单次 LLM 调用超时(env 可调;慢模型如 qwen3.7-max ~21s 需调大)
+# 注入验证探针:REASONER_PROBE=1 时,策略里塞一个随机验证码、要求模型回复末尾原样输出,
+# 核对"注入的验证码"与"模型回复的验证码"是否一致 → 证明 Reasoner 内容确实进了上下文(测完关掉)
+REASONER_PROBE = os.environ.get("REASONER_PROBE", "").lower() in ("1", "true", "yes")
+REASONER_PROMPT = (
+    "你是一个「对话策划」,在后台辅助桌面聊天机器人小艺。给你最近的对话和用户画像"
+    "(记忆事实/最近话题),按下面的思路给出接下来这轮的简短策略:\n"
+    "先判断用户此刻的投入度——若来劲(话多、主动追问、带情绪),就顺着他当前这句"
+    "深挖一层、补个有趣细节;但同一大主题一旦连着聊了 2-3 轮,别再单向灌冷知识,"
+    "要把话头引到用户身上(问问他的经历、做法或看法),或自然搭桥到一个邻近话题,"
+    "保持话题的宽度和双向感。若敷衍冷场(短答、「嗯」「随便」),"
+    "或某个话题已经聊了≥2轮还没新进展,就果断换个角度、或换一个新鲜话题给点新料。"
+    "去重时,「上一份策略」只作去重参考、别和它撞车,也别重复对话里已经聊透的话题。"
+    "小艺有头部动作(点头/歪头/摆天线/看向人),hook 里可以自然带一个小动作让它更生动;"
+    "但【硬约束】严禁让小艺声称「看到/看见」任何画面内容(它当前没有看图能力),绝不许编造视觉观察。"
+    "把话题留给用户——可以轻轻抛个问题,也可以用观察式的陈述留白,别每轮都以问句结尾。\n"
+    "严格只输出一个 JSON 对象,不要解释、不要代码块标记:\n"
+    '{"topics":[{"t":"话题词","hook":"一句小艺能自然说出口的接话/分享"}],'
+    '"style":"仅当本轮该偏离默认(简短+留白)时才填,如「用户在倾诉,这轮少说多听」,否则留空",'
+    '"avoid":"该回避的点,可留空","callback":"可回扣的用户已知信息点,可留空"}\n'
+    "topics 最多 2 条、hook 具体可直接说。策略仅供机器人【内部参考】——严禁在回复里提及策略本身,"
+    "也严禁说「我觉得你会感兴趣」「根据我的分析」之类的元话语。"
+)
+
+VOICE = os.environ.get("REALTIME_VOICE", "Ethan")   # TTS 音色(env 可调);Ethan=男声,女声可试 Chelsie/Cherry/Serena/Tina
 INSTRUCTIONS = (
     "你是桌面机器人,名字叫'小艺'(用户给你起的中文名),有真实的身体(头、天线)和一台摄像头。"
     "别人问你叫什么、喊'小艺'时,你都以小艺自居;不要自称 Reachy Mini(那只是你的硬件型号)。"
@@ -40,6 +72,14 @@ INSTRUCTIONS = (
     "你的文字输出只能包含你要说的话。"
     "禁止在文字中写任何动作描述、情绪标注、舞台指示——包括括号、尖括号、星号等任何形式。"
     "它们会被TTS原样念出来,非常奇怪。动作通过工具调用表达,不要写在文字里。"
+    # ── 回复风格基线(REASONER-01:默认基线;Reasoner 的 style 只做本轮微调,两者同口径不矛盾)──
+    "【回复风格】回复务必简短:通常 1-2 句、单句 ≤30 字。"
+    "把话题留给用户——可以轻轻抛个问题,也可以用观察式的陈述留白,"
+    "避免每轮都以问句结尾(连着追问像查户口、有压迫感)。"
+    "除非用户明确要求详细解释,不要长篇输出。"
+    "但当用户说「介绍一下 / 推荐 / 教我 / 怎么…」等明确要内容时,先给一两句实质回答"
+    "(举个具体例子或建议),不必每次都追加问题;别重复上一轮的问句。"
+    "例外:描述你看到的画面内容、或应用户要求讲解某事时不受此限,以说清楚为准。"
 )
 
 # ── 路径 ──

@@ -104,7 +104,7 @@ from perception.gaze import GazeModule
 from perception.gaze_behavior import GazeBehaviorFSM, GazeBehavior
 
 from voice.config import (                          # ← 配置常量集中管理
-    MODEL, VISION_MODEL, VISION_BASE_URL, VOICE, INSTRUCTIONS,
+    MODEL, VISION_MODEL, VISION_BASE_URL, VOICE, INSTRUCTIONS, REASONER_MODEL,
     SNAP_DIR, _MODELS_DIR, VIS_MODEL_PATH, HAND_MODEL_PATH, GESTURE_MODEL_PATH,
     _DATA_DIR, PROFILE_PATH, MEMORY_PATH,
     OUT_SR, PLAY_SR,
@@ -2093,6 +2093,8 @@ def main() -> int:
     no_variation = "--no-variation" in _args            # M3-a:关 cue 微变异
     no_expression = "--no-expression" in _args          # M3-b:关表情/思考反应
     no_memory = "--no-memory" in _args                  # M3-c:关记忆系统
+    no_reasoner = "--no-reasoner" in _args              # REASONER-01:关异步对话策略 Reasoner
+    reasoner = None                                     # 提前定义,退出 finally 可安全 stop()
     for a in _args:                                      # --cue-heard-pitch=8 等,调确认动作幅度/时长
         if a.startswith("--cue-") and "=" in a:
             _k, _v = a[6:].split("=", 1)
@@ -2107,6 +2109,7 @@ def main() -> int:
 
     print("=== 小艺(Reachy Mini)语音对话:可打断 + 动作 + 看图 + 人脸跟随 + 听声转头 ===", flush=True)
     log(f"模型:{MODEL}|semantic_vad|16k上行|24k→16k下行|8 动作 + 看图 + 指向 + 逗它|五层仲裁(手势/指向>逗它>声源>跟随>微动)")
+    log(f"🧠 Reasoner: {REASONER_MODEL}({'off' if no_reasoner else 'on'})")
 
     st = State()
     st.no_easing = no_easing
@@ -2239,6 +2242,13 @@ def main() -> int:
                                      instructions=active_instructions, registry=registry,
                                      no_memory=no_memory,
                                      face_pipeline=_face_pipeline, asd_engine=_asd_engine)
+
+            # ── Reasoner(异步对话策略;--no-reasoner 关闭):后台 worker,注入 ChatCallback ──
+            if not no_reasoner:
+                from voice.reasoner import ConversationReasoner
+                reasoner = ConversationReasoner(st, _memory_mgr)
+                reasoner.start()
+                dialog.callback.reasoner = reasoner
 
             conv = None
             kws_gate = None
@@ -2573,6 +2583,9 @@ def main() -> int:
                         log(f"⚠ gallery 落盘失败:{type(_e).__name__}")
                 if _asd_engine is not None:
                     _asd_engine.stop()
+                if reasoner is not None:
+                    log("🧠 Reasoner 统计: " + json.dumps(reasoner.stats(), ensure_ascii=False))
+                    reasoner.stop()
         finally:
             try:
                 mini.set_automatic_body_yaw(True)
