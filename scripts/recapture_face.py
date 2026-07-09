@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-大大 人脸重新采集工具（纯终端，无 GUI）
-用法: .venv/bin/python tools/recapture_face.py
+人脸重新采集工具（纯终端，无 GUI）
+用法: .venv/bin/python scripts/recapture_face.py --name 大大
 
 配合 dashboard 看画面，终端按 Enter 采集当前帧的 embedding。
+使用 IdentityStore (gallery.json) 存储。
 """
 
 import sys, os, time
@@ -16,40 +17,33 @@ load_dotenv(os.path.join(ROOT, ".env"))
 
 import cv2
 import numpy as np
-import json
 from reachy_mini import ReachyMini
 
 from identity.recognizer import ArcFaceONNX, _align_face
+from identity.identity_store import IdentityStore
 
-DB_PATH = os.path.join(ROOT, "data", "face_db.json")
-DADA_PID = "person_d810a436"
-KUNKUN_PID = "person_ea67b91b"
+GALLERY_PATH = os.path.join(ROOT, "data", "gallery.json")
 YUNET_PATH = os.path.join(ROOT, "models", "face_detection_yunet_2023mar.onnx")
 DECIMATE = 3
 
 
-def load_db():
-    with open(DB_PATH) as f:
-        return json.load(f)
-
-
-def save_db(db):
-    with open(DB_PATH, "w") as f:
-        json.dump(db, f, ensure_ascii=False, indent=2)
-
-
 def main():
-    db = load_db()
-    dada = db.get(DADA_PID)
-    if not dada:
-        print(f"❌ 找不到 {DADA_PID}")
+    import argparse
+    parser = argparse.ArgumentParser(description="人脸重新采集工具")
+    parser.add_argument("--name", required=True, help="目标人名")
+    parser.add_argument("--gallery", default=GALLERY_PATH, help="gallery.json 路径")
+    args = parser.parse_args()
+
+    store = IdentityStore(args.gallery)
+    target = store.find_by_name(args.name)
+    if target is None:
+        print(f"❌ 在 gallery 中找不到「{args.name}」")
+        print(f"已有身份: {[i.name for i in store.identities.values() if i.name]}")
         return
 
-    kk_embs = np.array(db.get(KUNKUN_PID, {}).get("embeddings", []), dtype=np.float32)
-    print(f"坤坤: {len(kk_embs)} embeddings")
-
-    old_count = len(dada.get("embeddings", []))
-    print(f"大大: {old_count} embeddings → 即将清空并重新采集")
+    pid = target.identity_id
+    old_count = len(target.embeddings)
+    print(f"目标: {args.name} ({pid}), 当前 {old_count} embeddings → 即将清空并重新采集")
     print()
     print("操作: Enter=采集  q=保存退出  Ctrl+C=放弃")
     print("请从不同角度采集 8-10 个（正面、左右转、抬低头）")
@@ -100,10 +94,17 @@ def main():
             aligned = _align_face(rgb, kps)
             emb = arcface.get_embedding(aligned)
 
-            # 与坤坤交叉
+            # 与其他人交叉检查
             cross_max = 0.0
-            if len(kk_embs) > 0:
-                cross_max = max(float(np.dot(emb, k)) for k in kk_embs)
+            cross_who = ""
+            for oid, ident in store.identities.items():
+                if oid == pid:
+                    continue
+                for oe in ident.embeddings:
+                    s = float(np.dot(emb, np.array(oe, dtype=np.float32)))
+                    if s > cross_max:
+                        cross_max = s
+                        cross_who = ident.name or oid[:12]
 
             # 与已采集的内部 sim
             internal_max = 0.0
@@ -116,8 +117,8 @@ def main():
                 continue
 
             collected.append(emb.tolist())
-            warn = " ⚠坤坤交叉高!" if cross_max > 0.50 else ""
-            print(f"  ✅ #{len(collected)} 坤坤sim={cross_max:.3f} 内部sim={internal_max:.3f}{warn}")
+            warn = f" ⚠{cross_who}交叉高!" if cross_max > 0.50 else ""
+            print(f"  ✅ #{len(collected)} 交叉sim={cross_max:.3f}({cross_who}) 内部sim={internal_max:.3f}{warn}")
 
     except KeyboardInterrupt:
         print("\n❌ 放弃采集")
@@ -130,19 +131,9 @@ def main():
         print(f"⚠ 至少需要 3 个，当前只有 {len(collected)}，未保存")
         return
 
-    dada["embeddings"] = collected
-    dada["last_seen_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    save_db(db)
-    print(f"\n✅ 已保存 {len(collected)} 个新 embeddings")
-
-    embs_d = np.array(collected, dtype=np.float32)
-    if len(kk_embs) > 0:
-        cross = [float(np.dot(d, k)) for d in embs_d for k in kk_embs]
-        print(f"   与坤坤: avg={np.mean(cross):.3f} max={max(cross):.3f}")
-    internal = [float(np.dot(embs_d[i], embs_d[j]))
-                for i in range(len(embs_d)) for j in range(i + 1, len(embs_d))]
-    if internal:
-        print(f"   内部多样性: avg={np.mean(internal):.3f} min={min(internal):.3f}")
+    target.embeddings = collected
+    store.save()
+    print(f"\n✅ 已保存 {len(collected)} 个新 embeddings 到 gallery.json")
 
 
 if __name__ == "__main__":

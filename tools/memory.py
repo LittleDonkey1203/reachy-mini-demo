@@ -59,7 +59,7 @@ class RememberFactTool(Tool):
 
             name_accepted = try_name_identity(
                 memory_mgr=deps.memory_mgr,
-                id_recognizer=deps.id_recognizer,
+                identity_store=deps.identity_store,
                 face_pipeline=deps.face_pipeline,
                 owner_mgr=deps.owner_mgr,
                 st=st,
@@ -124,8 +124,8 @@ class ForgetFactTool(Tool):
         keyword = args.get("keyword", "")
         if "名" in keyword or "name" in keyword.lower():
             deps.memory_mgr.set_name(pid, None)
-            if deps.id_recognizer is not None:
-                deps.id_recognizer.db.set_name(pid, None)
+            if deps.identity_store is not None:
+                deps.identity_store.set_name(pid, None)
             with st.lock:
                 st.current_person_name = None
 
@@ -163,7 +163,7 @@ class ClearMemoryTool(Tool):
         from memory.safety import handle_clear_memory_intent
 
         result = handle_clear_memory_intent(
-            deps.st, args, deps.conv, deps.id_recognizer
+            deps.st, args, deps.conv, deps.identity_store
         )
         return json.dumps({"result": result}, ensure_ascii=False)
 
@@ -200,6 +200,6 @@ class ConfirmClearTool(Tool):
         from memory.safety import handle_confirm_clear
 
         result = handle_confirm_clear(
-            deps.st, args, deps.memory_mgr, deps.id_recognizer
+            deps.st, args, deps.memory_mgr, deps.identity_store
         )
         return json.dumps({"result": result}, ensure_ascii=False)

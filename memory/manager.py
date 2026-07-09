@@ -201,13 +201,13 @@ class MemoryManager:
     """认知记忆管理器：Entity Memory + Episodic Memory。"""
 
     def __init__(self, memories_dir: str = _MEMORIES_DIR, owner_mgr=None,
-                 face_db=None):
+                 identity_store=None, face_db=None):
         self.memories_dir = memories_dir
         os.makedirs(self.memories_dir, exist_ok=True)
         self._session: dict[str, dict] = {}
         self._dirty: set[str] = set()
         self._owner = owner_mgr
-        self._face_db = face_db
+        self._identity_store = identity_store
 
     def _path(self, person_id: str) -> str:
         safe_id = person_id.replace("/", "_").replace("..", "_")
@@ -342,8 +342,8 @@ class MemoryManager:
             data["summary"] = new_summary
         if new_name and new_name != data.get("name"):
             data["name"] = new_name
-            if self._face_db:
-                self._face_db.set_name(person_id, new_name)
+            if self._identity_store:
+                self._identity_store.set_name(person_id, new_name)
         self._dirty.add(person_id)
         self._persist(person_id)
 

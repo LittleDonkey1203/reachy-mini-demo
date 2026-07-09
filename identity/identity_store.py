@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 import logging
 import collections
@@ -78,6 +80,7 @@ class IdentityStore:
         self.distance_log: "collections.deque[dict]" = collections.deque(
             maxlen=self.cfg.distance_log_max)
         self._log_enabled: bool = True
+        self._save_lock = threading.Lock()
 
     def _log_distance(self, distance: float, zone: str, identity_name: Optional[str]):
         if self._log_enabled:
@@ -136,16 +139,40 @@ class IdentityStore:
         )
 
     def match_and_update(self, embedding: np.ndarray, quality: float = 1.0) -> MatchResult:
-        """匹配;命中则按质量门更新该身份 gallery。"""
+        """匹配;命中则按质量门更新该身份 gallery(含 cross-person 污染防护)。"""
         result = self.match(embedding, quality)
         if result.is_known and result.identity_id:
             ident = self.identities[result.identity_id]
             if quality >= self.cfg.min_quality:
-                ident.add_embedding(embedding, quality, self.cfg.max_gallery_per_id)
+                if not self._cross_person_ok(embedding, result.identity_id):
+                    ident.total_sightings += 1
+                    ident.last_seen = time.time()
+                else:
+                    ident.add_embedding(embedding, quality, self.cfg.max_gallery_per_id)
             else:
                 ident.total_sightings += 1
                 ident.last_seen = time.time()
         return result
+
+    def _cross_person_ok(self, embedding: np.ndarray, target_id: str) -> bool:
+        """检查 embedding 是否与 target 最近(而非其他人)。防止交叉污染。"""
+        emb_norm = embedding / (np.linalg.norm(embedding) + 1e-8)
+        target = self.identities.get(target_id)
+        if not target or not target.embeddings:
+            return False
+        target_sims = [float(np.dot(emb_norm, s / (np.linalg.norm(s) + 1e-8)))
+                       for s in target.embeddings]
+        target_best = max(target_sims)
+        if target_best > 0.85 or target_best < 0.20:
+            return target_best > 0.85
+        for ident in self.identities.values():
+            if ident.identity_id == target_id or not ident.embeddings:
+                continue
+            other_sims = [float(np.dot(emb_norm, s / (np.linalg.norm(s) + 1e-8)))
+                          for s in ident.embeddings]
+            if max(other_sims) > target_best:
+                return False
+        return True
 
     # ── 注册 ──────────────────────────────────────────────
     def register_identity(self, name: str, embeddings: list[np.ndarray],
@@ -227,9 +254,12 @@ class IdentityStore:
                 "is_confirmed": ident.is_confirmed,
             }
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False,
-                      default=lambda x: float(x) if hasattr(x, "item") else str(x))
+        with self._save_lock:
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False,
+                          default=lambda x: float(x) if hasattr(x, "item") else str(x))
+            os.replace(tmp, str(path))
         logger.info(f"Gallery saved: {len(data)} identities → {path}")
 
     def load(self, path: Path | None = None) -> int:
@@ -303,3 +333,156 @@ class IdentityStore:
             else:
                 print(f"  {z:<8s} N=   0")
         print(f"  thresholds: match={self.cfg.match_threshold:.2f} unknown={self.cfg.unknown_threshold:.2f}")
+
+    # ── 合并 / 验证 / 备份 ────────────────────────────────
+
+    def _cross_sim(self, id_a: str, id_b: str) -> float:
+        """两人之间的最大交叉余弦相似度。"""
+        a = self.identities.get(id_a)
+        b = self.identities.get(id_b)
+        if not a or not b or not a.embeddings or not b.embeddings:
+            return 0.0
+        best = 0.0
+        for ea in a.embeddings:
+            ea_n = ea / (np.linalg.norm(ea) + 1e-8)
+            for eb in b.embeddings:
+                eb_n = eb / (np.linalg.norm(eb) + 1e-8)
+                sim = float(np.dot(ea_n, eb_n))
+                if sim > best:
+                    best = sim
+        return best
+
+    def merge_identities(self, keep_id: str, drop_id: str) -> str:
+        """合并两个身份:保留 keep,吸收 drop 的 embeddings。"""
+        keep = self.identities.get(keep_id)
+        drop = self.identities.get(drop_id)
+        if not keep or not drop:
+            return keep_id
+        for emb, q in zip(drop.embeddings, drop.quality_scores):
+            e_n = emb / (np.linalg.norm(emb) + 1e-8)
+            dup = any(float(np.dot(e_n, s / (np.linalg.norm(s) + 1e-8))) > 0.90
+                      for s in keep.embeddings)
+            if not dup:
+                keep.embeddings.append(emb)
+                keep.quality_scores.append(q)
+        max_n = self.cfg.max_gallery_per_id
+        if len(keep.embeddings) > max_n:
+            indices = np.argsort(keep.quality_scores)[::-1][:max_n]
+            keep.embeddings = [keep.embeddings[i] for i in indices]
+            keep.quality_scores = [keep.quality_scores[i] for i in indices]
+        if not keep.is_confirmed and drop.is_confirmed:
+            keep.name = drop.name
+            keep.is_confirmed = True
+        elif not keep.name or keep.name.startswith("Unknown-"):
+            if drop.name and not drop.name.startswith("Unknown-"):
+                keep.name = drop.name
+        keep.created_at = min(keep.created_at, drop.created_at)
+        keep.last_seen = max(keep.last_seen, drop.last_seen)
+        keep.total_sightings += drop.total_sightings
+        del self.identities[drop_id]
+        logger.info(f"Merged identity {drop_id} → {keep_id}")
+        return keep_id
+
+    def auto_merge(self, threshold: float = 0.50) -> dict[str, str]:
+        """扫描所有身份对,合并 cross-sim > threshold 的。返回 {dropped: kept}。"""
+        merged_map: dict[str, str] = {}
+        changed = True
+        while changed:
+            changed = False
+            ids = list(self.identities.keys())
+            for i, ia in enumerate(ids):
+                if ia not in self.identities:
+                    continue
+                for ib in ids[i + 1:]:
+                    if ib not in self.identities:
+                        continue
+                    a_confirmed = self.identities[ia].is_confirmed
+                    b_confirmed = self.identities[ib].is_confirmed
+                    if a_confirmed and b_confirmed:
+                        continue
+                    if self._cross_sim(ia, ib) >= threshold:
+                        a_n = len(self.identities[ia].embeddings)
+                        b_n = len(self.identities[ib].embeddings)
+                        if a_confirmed or (not b_confirmed and a_n >= b_n):
+                            keep, drop = ia, ib
+                        else:
+                            keep, drop = ib, ia
+                        self.merge_identities(keep, drop)
+                        merged_map[drop] = keep
+                        changed = True
+                        break
+                if changed:
+                    break
+        return merged_map
+
+    def verify_identity(self, embedding: np.ndarray, expected_id: str,
+                        threshold: float = 0.80) -> tuple[bool, float]:
+        """高阈值身份验证。"""
+        ident = self.identities.get(expected_id)
+        if not ident or not ident.embeddings:
+            return False, 0.0
+        emb_n = embedding / (np.linalg.norm(embedding) + 1e-8)
+        best_sim = max(
+            float(np.dot(emb_n, s / (np.linalg.norm(s) + 1e-8)))
+            for s in ident.embeddings
+        )
+        return best_sim >= threshold, best_sim
+
+    def backup_identity(self, identity_id: str) -> Optional[str]:
+        """备份单个身份到 data/backups/。返回备份路径。"""
+        ident = self.identities.get(identity_id)
+        if not ident:
+            return None
+        backup_dir = Path(self.cfg.gallery_path).parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%dT%H%M%S")
+        path = backup_dir / f"{ts}_{identity_id}_gallery.json"
+        data = {
+            "identity_id": ident.identity_id,
+            "name": ident.name,
+            "embeddings": [np.asarray(e).tolist() for e in ident.embeddings],
+            "quality_scores": [float(q) for q in ident.quality_scores],
+            "created_at": ident.created_at,
+            "last_seen": ident.last_seen,
+            "total_sightings": ident.total_sightings,
+            "is_confirmed": ident.is_confirmed,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return str(path)
+
+    def set_name(self, identity_id: str, name: Optional[str]):
+        """设置或清除身份名字。name=None 时取消命名(回退为 provisional)。"""
+        ident = self.identities.get(identity_id)
+        if not ident:
+            return
+        if name:
+            ident.name = name
+            ident.is_confirmed = True
+        else:
+            ident.is_confirmed = False
+        logger.info(f"Set name: {identity_id} → {name!r}")
+
+    def get_name(self, identity_id: str) -> Optional[str]:
+        """返回身份名字,provisional 返回 None。"""
+        ident = self.identities.get(identity_id)
+        if not ident:
+            return None
+        return ident.name if ident.is_confirmed else None
+
+    # ── 按名反查 ──────────────────────────────────
+    def find_by_name(self, name: str) -> Optional[Identity]:
+        """按名字反查身份(模糊匹配:子串/忽略大小写)。优先精确匹配,再 fallback 到子串。"""
+        name = name.strip()
+        if not name:
+            return None
+        nl = name.lower()
+        # 精确匹配(忽略大小写)
+        for ident in self.identities.values():
+            if ident.name and ident.name.strip().lower() == nl:
+                return ident
+        # 子串匹配(用户可能说昵称/部分名)
+        for ident in self.identities.values():
+            if ident.name and nl in ident.name.strip().lower():
+                return ident
+        return None

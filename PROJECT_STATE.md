@@ -2,6 +2,26 @@
 
 ## 已完成事项
 
+### ✅ 身份系统统一 — 废弃 FaceDB，全切 IdentityStore(2026-07-09)
+
+两套并行的身份系统（旧 FaceDB→face_db.json vs 新 IdentityStore→gallery.json）导致同一个人在两个库中有不同条目和名字，命名/auto_merge/记忆归属全部失效。
+
+**统一改动**：
+- `identity/identity_store.py` — 补全 auto_merge/cross-person污染防护/verify_identity/backup_identity/set_name/线程安全save
+- `memory/manager.py` — `face_db` 参数改为 `identity_store`
+- `memory/safety.py` — `id_recognizer` 参数改为 `identity_store`，调用链全部对齐
+- `tools/base.py` — ToolDeps.id_recognizer → identity_store
+- `tools/memory.py` — 所有旧系统引用改为 identity_store
+- `voice/realtime.py` — try_name_identity/ChatCallback/RealtimeDialog 去掉 id_recognizer，统一 identity_store
+- `voice/d01_realtime_chat.py` — 删除 _id_recognizer 全局变量，直接实例化 ArcFaceONNX，MemoryManager/RealtimeDialog 传 identity_store=_face_pipeline.store
+
+**清理**：
+- `identity/recognizer.py` — 删除 FaceDB(250行)/IdentityRecognizer(100行)类，只保留 ArcFaceONNX/_align_face/_crop_face
+- `tests/test_identity.py` — 移除 FaceDB/IdentityRecognizer 测试，只保留 ArcFaceONNX+对齐测试
+- `scripts/recapture_face.py` — 改用 IdentityStore + gallery.json
+
+**验证**：py_compile 10/10 全通过
+
 ### ✅ 新增 turn_body 身体转向工具(2026-07-07)
 
 LLM 可调用 `turn_body(direction, angle)` 控制底盘旋转，大角度转向场景不再依赖手动内部逻辑。
@@ -241,12 +261,14 @@ tools/
   registry.py      — ToolRegistry + build_default_registry()
   motion.py        — MotionTool (8 动作) + TurnBodyTool (带参转身)
   session.py       — EndSessionTool
+  seek.py          — FindPersonTool (寻人搜索)
   memory.py        — 4 个记忆工具类
 perception/
   vision_worker.py — Face(YuNet/MediaPipe) + Hand(GestureRecognizer)
   fusion.py        — 声源-视觉融合
 identity/
-  recognizer.py    — ArcFace 身份识别 + auto_merge + startup_merged
+  recognizer.py    — ArcFaceONNX embedding 提取 + _align_face/_crop_face 工具函数
+  identity_store.py — IdentityStore 统一身份管理(gallery.json, 含 auto_merge/verify/backup)
   owner.py         — 主人认定
 memory/
   manager.py       — 认知记忆管理(Entity + Episodic + Working Memory)
@@ -311,7 +333,7 @@ memory/
    - 在多个文件散弹式添加工具相关代码
 
 运行时依赖注入:
-   ToolDeps(st, conv, motion_q, memory_mgr, owner_mgr, id_recognizer, face_pipeline)
+   ToolDeps(st, conv, motion_q, memory_mgr, owner_mgr, identity_store, face_pipeline)
    每次工具调用由分发层构建，工具内部通过 deps 访问所有资源
 
 工具分类:
@@ -327,6 +349,17 @@ memory/
 - **根因**:ASD fallback(`realtime.py:222-226`)— B 刚出现,ASD 还没攒够帧,`speaker_window()` 返回 None → 2 秒内 fallback 到 `st.asd_speaker`(=A)→ 注入 A 的记忆 → 模型理所当然答"你是 A"。
 - **修法**:ASD `tracked_keys()` 暴露当前有 crop 缓冲的 key 集合;fallback 时检查追踪人数——多人(`>1`)不 fallback,走 neutral 路径;单人保持原逻辑。日志 `⚠ ASD fallback 拦截` 可追踪触发情况。
 - **待真机验证**:两人场景 + 新人问"我是谁"应答"不认识"。
+
+### 寻人特性 find_person(2026-07-08,按 Tool ABC 重新实现,待真机验证)
+- **需求**:用户说"找到大大" → 机器人调用 `find_person(name="大大")` → 转头扫场搜索 → 找到后锁定+语音播报方位。
+- **架构**:按新插件式 Tool ABC(`tools/seek.py: FindPersonTool`)实现,通过 `ToolRegistry` 统一注册分发。
+- **搜索策略**:Stop-and-Check 离散步进(非连续旋转)——ByteTrack/ArcFace 需要稳定画面。
+  - ①先检查当前画面(Acquire):目标 person_id 的 `last_seen` < 2s → 直接播报。
+  - ②不在画面 → 离散步进扫场:`[0, -30, 30, -60, 60, -90, 90]°` 交替左右。
+  - ③每步:转到位 → 停 0.6s → 检查 gallery `last_seen` → 找到即播报方位。
+  - ④全扫完 / 超时 15s → "没看到"。
+- **改动文件**:identity_store.py(find_by_name) + tools/seek.py(FindPersonTool) + tools/registry.py(注册) + voice/config.py(常量) + voice/state.py(跨线程字段) + voice/d01_realtime_chat.py(behavior_loop + 主循环)。
+- **不新增 FSM 状态**:复用 ST_ENGAGING + `seeking_person` 标志。结果通过 `st.seek_person_result` 传回主循环。
 
 ## 遗留问题
 

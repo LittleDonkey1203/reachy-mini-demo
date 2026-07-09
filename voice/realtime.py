@@ -124,7 +124,7 @@ def _valid_name(name: str) -> bool:
             and n not in ("画外", "未知") and n.lower() not in _BOT_NAMES)
 
 
-def try_name_identity(*, memory_mgr, id_recognizer, face_pipeline, owner_mgr, st,
+def try_name_identity(*, memory_mgr, identity_store, face_pipeline, owner_mgr, st,
                       pid, new_name, transcript, log_fn) -> bool:
     """命名/改名统一 guard。返回是否真正写入了名字。
     门1 名字合法;门2 名字必须出现在当轮转写里(防模型脑补)。
@@ -132,22 +132,21 @@ def try_name_identity(*, memory_mgr, id_recognizer, face_pipeline, owner_mgr, st
     if not pid or not new_name:
         return False
     n = new_name.strip()
+    existing = memory_mgr.get_name(pid) if memory_mgr else None
+    if existing and existing == n:
+        return False
     if not _valid_name(n):
         log_fn(f"🚫 命名拒绝:名字不合法「{new_name}」")
         return False
     if not (transcript and n in transcript):
         log_fn(f"🚫 命名拒绝:「{n}」不在转写里(防脑补)← 「{(transcript or '')[:30]}」")
         return False
-    existing = memory_mgr.get_name(pid) if memory_mgr else None
-    if existing and existing == n:
-        return False
     if existing:
         log_fn(f"✏ 改名:「{existing}」→「{n}」")
-    # 通过 → 写三处库 + gallery 落盘 + 认主
     if memory_mgr:
         memory_mgr.set_name(pid, n)
-    if id_recognizer is not None:
-        id_recognizer.db.set_name(pid, n)
+    if identity_store is not None:
+        identity_store.set_name(pid, n)
     if face_pipeline is not None:
         try:
             if face_pipeline.store.confirm_identity(pid, n):
@@ -169,7 +168,7 @@ class ChatCallback(OmniRealtimeCallback):
 
     def __init__(self, st: State, play_q: "queue.Queue", motion_q: "queue.Queue",
                  snap_q: "queue.Queue", mini: ReachyMini,
-                 memory_mgr, owner_mgr, id_recognizer, registry=None,
+                 memory_mgr, owner_mgr, identity_store=None, registry=None,
                  face_pipeline=None, asd_engine=None):
         self.st = st
         self.play_q = play_q
@@ -178,10 +177,10 @@ class ChatCallback(OmniRealtimeCallback):
         self.mini = mini
         self.memory_mgr = memory_mgr
         self.owner_mgr = owner_mgr
-        self.id_recognizer = id_recognizer
+        self.identity_store = identity_store
         self.registry = registry
-        self.face_pipeline = face_pipeline   # 命名时落 gallery(confirm_identity)
-        self.asd_engine = asd_engine         # 谁在说话:本句归属用 speaker_window
+        self.face_pipeline = face_pipeline
+        self.asd_engine = asd_engine
         self._speech_start_t = 0.0           # 本句说话起点(monotonic),speech_started 时记
         self._pending_turn_cmd: dict | None = None  # 用户说了转身指令但模型未调 turn_body
         self._turn_body_called = False               # 本轮 response 是否调了 turn_body
@@ -420,7 +419,7 @@ class ChatCallback(OmniRealtimeCallback):
                     deps = ToolDeps(
                         st=st, conv=self.conv, motion_q=self.motion_q,
                         memory_mgr=self.memory_mgr, owner_mgr=self.owner_mgr,
-                        id_recognizer=self.id_recognizer, face_pipeline=self.face_pipeline,
+                        identity_store=self.identity_store, face_pipeline=self.face_pipeline,
                     )
                     try:
                         output = tool.execute(deps, call_id, args_dict)
@@ -585,11 +584,11 @@ class RealtimeDialog:
     """Qwen-Omni-Realtime 对话协议管理器 — 封装 session 生命周期。"""
 
     def __init__(self, st: State, play_q, motion_q, snap_q, mini: ReachyMini,
-                 oai_client, memory_mgr, owner_mgr, id_recognizer,
-                 instructions: str, registry=None, no_memory: bool = False,
+                 oai_client, memory_mgr, owner_mgr, identity_store=None,
+                 instructions: str = "", registry=None, no_memory: bool = False,
                  face_pipeline=None, asd_engine=None):
         self.callback = ChatCallback(st, play_q, motion_q, snap_q, mini,
-                                     memory_mgr, owner_mgr, id_recognizer,
+                                     memory_mgr, owner_mgr, identity_store,
                                      registry=registry,
                                      face_pipeline=face_pipeline, asd_engine=asd_engine)
         self.callback.dialog = self
@@ -891,7 +890,7 @@ class RealtimeDialog:
             _cb = self.callback
             if new_name:
                 if try_name_identity(
-                        memory_mgr=self.memory_mgr, id_recognizer=_cb.id_recognizer,
+                        memory_mgr=self.memory_mgr, identity_store=_cb.identity_store,
                         face_pipeline=_cb.face_pipeline, owner_mgr=_cb.owner_mgr, st=self.st,
                         pid=pid, new_name=new_name, transcript=current_text,
                         log_fn=log):

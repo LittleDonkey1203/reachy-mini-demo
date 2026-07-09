@@ -22,7 +22,7 @@ class ToolDeps:
     motion_q: queue.Queue
     memory_mgr: Any | None = None
     owner_mgr: Any | None = None
-    id_recognizer: Any | None = None
+    identity_store: Any | None = None
     face_pipeline: Any | None = None
 
 
