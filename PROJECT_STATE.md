@@ -14,6 +14,54 @@
 - **文件**:voice/reasoner.py(新)· config.py(REASONER_PROMPT/常量/INSTRUCTIONS风格)· realtime.py(resp_directive 注入 + _maybe_append_strategy + 注入标签)· state.py(reasoner_hint)· d01_realtime_chat.py(构造/start/stop/--no-reasoner/退出统计)· memory/manager.py(RLock)· tests/test_reasoner.py(23 绿)。
 - **待真机验证**:"敷衍→换话题"分支真机未触发(用户全程投入),离线 B 案已验;指标1"同大主题2-3轮后转引用户"离线已验、真机待观察。
 
+### ✅ 身份系统统一 — 废弃 FaceDB，全切 IdentityStore(2026-07-09)
+
+两套并行的身份系统（旧 FaceDB→face_db.json vs 新 IdentityStore→gallery.json）导致同一个人在两个库中有不同条目和名字，命名/auto_merge/记忆归属全部失效。
+
+**统一改动**：
+- `identity/identity_store.py` — 补全 auto_merge/cross-person污染防护/verify_identity/backup_identity/set_name/线程安全save
+- `memory/manager.py` — `face_db` 参数改为 `identity_store`
+- `memory/safety.py` — `id_recognizer` 参数改为 `identity_store`，调用链全部对齐
+- `tools/base.py` — ToolDeps.id_recognizer → identity_store
+- `tools/memory.py` — 所有旧系统引用改为 identity_store
+- `voice/realtime.py` — try_name_identity/ChatCallback/RealtimeDialog 去掉 id_recognizer，统一 identity_store
+- `voice/d01_realtime_chat.py` — 删除 _id_recognizer 全局变量，直接实例化 ArcFaceONNX，MemoryManager/RealtimeDialog 传 identity_store=_face_pipeline.store
+
+**清理**：
+- `identity/recognizer.py` — 删除 FaceDB(250行)/IdentityRecognizer(100行)类，只保留 ArcFaceONNX/_align_face/_crop_face
+- `tests/test_identity.py` — 移除 FaceDB/IdentityRecognizer 测试，只保留 ArcFaceONNX+对齐测试
+- `scripts/recapture_face.py` — 改用 IdentityStore + gallery.json
+
+**验证**：py_compile 10/10 全通过
+
+### ✅ 新增 turn_body 身体转向工具(2026-07-07)
+
+LLM 可调用 `turn_body(direction, angle)` 控制底盘旋转，大角度转向场景不再依赖手动内部逻辑。
+
+- `tools/motion.py` — TurnBodyTool 类，带参数兜底（direction 默认 left，angle 默认 45°，clamp [10,90]）
+- `tools/registry.py` — 注册到 build_default_registry()（14 个工具）
+- `voice/d01_realtime_chat.py` — `_do_turn_body()` 函数 + motion_loop 特殊分支，修改 `st.body_yaw_deg` + 同步 `st.track_yaw`
+- `voice/config.py` — `TURN_BODY_DURATION=0.8` + INSTRUCTIONS 提示模型可转身
+- **与普通 MotionTool 区别**：需持久修改 `st.body_yaw_deg`，通过 motion_loop 特殊分支而非 ACTIONS 字典分发
+- **验证**：py_compile 4/4 绿；14 工具 spec 正确；待真机验证
+
+### ✅ 四项问题修复(2026-07-07,bug-072~075)
+
+1. **bot name 注册为人物身份(bug-075)**：`_valid_name()` 加 bot name 黑名单 `{"小艺","小易","小意","小亿","xiaoyi"}`；清理 `data/memories/id_*_unknown-2.json` 中被错误写入的"小艺"身份数据。
+2. **ASD 不可用时全部归属"画外"(bug-072)**：vision_result_loop 在 ASD off 时将 `st.asd_speaker` 写入 primary(最大)脸信息 `{pid, name, track_id, score:0, at:now}`；realtime.py consumer 的 `_n_tracked==0` 已兼容(≤1 通过)。
+3. **"向右转"不调 turn_body 工具(bug-073)**：用户话语正则检测转身命令(`_TURN_CMD_RE`)→ `_pending_turn_cmd`；response.done 若 `_turn_body_called=False` 则自动 `motion_q.put` 补发。与标签泄漏兜底类似但针对用户输入。→ **后改为 bad case 收集(不自动触发)，记录到 `data/turn_bad_cases.jsonl`**
+4. **gaze 仅 ARMED 态运行(bug-074)**：`_face_pipeline._gaze` 按 `st.state==ST_ARMED` 切换(None 跳过 L2CS ~35ms/face)；GazeBehaviorFSM update 加 ST_ARMED 门；非 ARMED 重置 `gaze_behavior="IDLE"` 防残值阻塞 behavior_loop 状态转换。
+
+### ✅ body_follow hold 全路径保护(2026-07-08,bug-076 v3→v4)
+
+- **v3 修法**：`_turn_body_hold_active()` 保护 5 个层面（approach/状态机/DOA glance/body_follow）
+- **v4 改进（flag 驱动）**：hold 不再按时间过期（旧：TURN_BODY_HOLD_S=2.0+对话活跃延长,最长10s），改为 flag 驱动：
+  - `st.turn_body_hold=True` 由 turn_body(left/right) 设置
+  - 持续到 ① `turn_body(direction="center")` 回正（释放 hold）② 60s 无交互（安全兜底）
+  - "什么时候转回来"的决策权交给模型，不是基础设施自动拉回
+- **direction="center"**：body 回正到 0°，释放 hold，恢复正常 DOA/body_follow/approach
+- **tool schema 更新**：direction enum 加 `"center"`，INSTRUCTIONS 加回正说明
+
 ### 🔧 多人张冠李戴修复(2026-07-06,bug-069/070,PR #16,分支 pr14-on-main,⚠️ 待两人硬测)
 - **现象**:多人在场,新人/换人问"我是谁/我叫什么/我喜欢吃什么" → 模型答成另一个人(碧霞被答"你叫大大")。
 - **诊断 & 探针实测(一锤定音)**:归属层(ASD)+注入内容都对。用随机暗号探针(create_item 埋 A#、response.instructions 埋 B#,看回复带哪个)实测:**A# 从不出现、B# 每轮都带且对得上当轮 → Qwen Omni 完全忽略会话中途的 create_item system 条目,只 honor response.instructions**。所以 v1 的 create_item 注入是废重量。
@@ -25,6 +73,25 @@
 - **已验**:D 被 honor(回复带当轮 B#);单人 + 初步多人无张冠李戴(归属对→答对,不确定→中性)。
 - **待验**:两人都已识别、都在画面、轮流问身份 → 确认 D 的"忽略历史里的其他人"能压住(真正对抗历史)。
 - **后手(若 D 不够)**:Option C —— 身份切换重启会话清历史(`restart_session_for_switch` 现死代码,需接线+去抖)。
+### ✅ 工具系统重构 — 硬编码 → 插件式 Tool ABC(2026-07-06)
+
+将分散在三个文件的工具系统（config.py BASE_TOOLS + manager.py QWEN_TOOLS + realtime.py 130 行 if/elif 分发链）重构为插件式 Tool 基类模式。
+
+**新建 tools/ 包**（原 tools/ 脚本移至 scripts/）：
+- `tools/base.py` — Tool ABC + ToolDeps dataclass
+- `tools/registry.py` — ToolRegistry（register/get/specs/exclude）+ build_default_registry()
+- `tools/motion.py` — MotionTool 类（8 个实例：nod/shake_head/look_*/wiggle/tilt）
+- `tools/session.py` — EndSessionTool（exit_i 计数器从 ChatCallback 移入）
+- `tools/memory.py` — RememberFactTool / ForgetFactTool / ClearMemoryTool / ConfirmClearTool
+
+**修改文件**：
+- `voice/realtime.py` — ChatCallback/RealtimeDialog 接受 registry 参数；130 行 if/elif 替换为 ~20 行统一分发
+- `voice/d01_realtime_chat.py` — TOOLS 列表替换为 build_default_registry()；no_memory 用 registry.exclude()
+- `voice/config.py` + `memory/manager.py` — BASE_TOOLS/QWEN_TOOLS 加 DEPRECATED 注释
+
+**验证**：py_compile 10/10 绿；新旧 specs 13/13 完全一致；exclude 过滤正确
+
+**扩展方式**：新增工具 = 创建 Tool 子类 + register()，无需改分发代码
 
 ### ✅ 注视感知 Phase 2 — ARMED 注视回看 + 时间常数平滑 + Dashboard 可视化(2026-07-02)
 
@@ -195,18 +262,26 @@
 
 ```
 voice/
-  config.py        — 常量 + 工具元数据 + prompt
+  config.py        — 常量 + prompt (工具定义已迁移到 tools/)
   state.py         — State 类 + log + OneEuroFilter
   d01_realtime_chat.py — 主程序 (~600 行，已瘦身)
   debug_server.py  — Dashboard
   kws.py           — 唤醒词门控
-  realtime.py      — Qwen-Omni-Realtime 协议层 + Session Consolidation + 策略注入(resp_directive)
+  realtime.py      — Qwen-Omni-Realtime 协议层 + registry 分发 + Session Consolidation + 策略注入(resp_directive)
   reasoner.py      — Talker-Reasoner 异步对话策略(后台 LLM,latest-only 队列 + 三道注入门)
+tools/
+  base.py          — Tool ABC + ToolDeps dataclass
+  registry.py      — ToolRegistry + build_default_registry()
+  motion.py        — MotionTool (8 动作) + TurnBodyTool (带参转身)
+  session.py       — EndSessionTool
+  seek.py          — FindPersonTool (寻人搜索)
+  memory.py        — 4 个记忆工具类
 perception/
   vision_worker.py — Face(YuNet/MediaPipe) + Hand(GestureRecognizer)
   fusion.py        — 声源-视觉融合
 identity/
-  recognizer.py    — ArcFace 身份识别 + auto_merge + startup_merged
+  recognizer.py    — ArcFaceONNX embedding 提取 + _align_face/_crop_face 工具函数
+  identity_store.py — IdentityStore 统一身份管理(gallery.json, 含 auto_merge/verify/backup)
   owner.py         — 主人认定
 memory/
   manager.py       — 认知记忆管理(Entity + Episodic + Working Memory)
@@ -245,12 +320,59 @@ memory/
 - 9 状态 FSM: ARMED/IDLE_CENTER/ENGAGING/TRACKING/SEARCHING/RETURNING/POINTING/PLAYING
 - 5 层运动仲裁: Primary > Playing > SoundTurn > Tracking > Idle
 
+### 工具系统架构规范（⚠️ 必须遵守，禁止散弹式修改）
+
+```
+新增/修改工具的唯一正确路径:
+
+1. 创建 Tool 子类 (tools/*.py)
+   - 继承 Tool ABC，实现 name / description / execute
+   - 有参数覆盖 parameters property，无参不写(默认空)
+   - execute() 返回 JSON str → 调用方统一 create_item + _record_tool_output
+   - execute() 返回 None → 工具自行处理输出(异步)
+
+2. 注册 (tools/registry.py → build_default_registry())
+   - reg.register(MyTool()) 一行即可
+   - 顺序：motion(8) → turn_body → end_session → memory(4)
+
+3. 分发 — 自动通过 registry.get(name).execute(deps, ...)
+   - voice/realtime.py ChatCallback 统一分发，无需修改
+   - 特殊执行逻辑(如 turn_body 需改 st 状态) → d01 motion_loop 加分支
+
+❌ 禁止:
+   - 在 voice/config.py BASE_TOOLS 加工具定义 (DEPRECATED)
+   - 在 memory/manager.py QWEN_TOOLS 加工具定义 (DEPRECATED)
+   - 在 voice/realtime.py 加 if/elif 分支处理新工具
+   - 在多个文件散弹式添加工具相关代码
+
+运行时依赖注入:
+   ToolDeps(st, conv, motion_q, memory_mgr, owner_mgr, identity_store, face_pipeline)
+   每次工具调用由分发层构建，工具内部通过 deps 访问所有资源
+
+工具分类:
+   - 无状态/fire-and-forget: MotionTool — 放 motion_q 立即返回
+   - 有状态: TurnBodyTool — 放 motion_q + args，motion_loop 特殊分支执行
+   - 委托: Memory 工具 — 委托 memory_mgr / safety 模块
+   - 副作用: EndSessionTool — 修改 st.exit_request
+```
+
 ### 多人"我是谁"误答修复(2026-07-06,bug-068)
 - **现象**:已认识 A 在场,新人 B 问"我是谁",模型答"你是 A";但全都认识时接力问则回答正确。
 - **诊断**:`test_identity_switch.py` 5 场景全 PASS → 模型能力没问题,能正确处理 `update_session` 中途切换 instructions(含 known→neutral、known→known、session restart)。
 - **根因**:ASD fallback(`realtime.py:222-226`)— B 刚出现,ASD 还没攒够帧,`speaker_window()` 返回 None → 2 秒内 fallback 到 `st.asd_speaker`(=A)→ 注入 A 的记忆 → 模型理所当然答"你是 A"。
 - **修法**:ASD `tracked_keys()` 暴露当前有 crop 缓冲的 key 集合;fallback 时检查追踪人数——多人(`>1`)不 fallback,走 neutral 路径;单人保持原逻辑。日志 `⚠ ASD fallback 拦截` 可追踪触发情况。
 - **待真机验证**:两人场景 + 新人问"我是谁"应答"不认识"。
+
+### 寻人特性 find_person(2026-07-08,按 Tool ABC 重新实现,待真机验证)
+- **需求**:用户说"找到大大" → 机器人调用 `find_person(name="大大")` → 转头扫场搜索 → 找到后锁定+语音播报方位。
+- **架构**:按新插件式 Tool ABC(`tools/seek.py: FindPersonTool`)实现,通过 `ToolRegistry` 统一注册分发。
+- **搜索策略**:Stop-and-Check 离散步进(非连续旋转)——ByteTrack/ArcFace 需要稳定画面。
+  - ①先检查当前画面(Acquire):目标 person_id 的 `last_seen` < 2s → 直接播报。
+  - ②不在画面 → 离散步进扫场:`[0, -30, 30, -60, 60, -90, 90]°` 交替左右。
+  - ③每步:转到位 → 停 0.6s → 检查 gallery `last_seen` → 找到即播报方位。
+  - ④全扫完 / 超时 15s → "没看到"。
+- **改动文件**:identity_store.py(find_by_name) + tools/seek.py(FindPersonTool) + tools/registry.py(注册) + voice/config.py(常量) + voice/state.py(跨线程字段) + voice/d01_realtime_chat.py(behavior_loop + 主循环)。
+- **不新增 FSM 状态**:复用 ST_ENGAGING + `seeking_person` 标志。结果通过 `st.seek_person_result` 传回主循环。
 
 ## 遗留问题
 

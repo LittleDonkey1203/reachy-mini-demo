@@ -117,19 +117,47 @@ class GazeEstimator:
         return yaw_deg, pitch_deg
 
 
-def _crop_face(full_rgb: np.ndarray, bbox_xyxy: np.ndarray,
-               decimate: int, margin: float = 0.15) -> Optional[np.ndarray]:
-    x1, y1, x2, y2 = bbox_xyxy
-    w, h = x2 - x1, y2 - y1
-    mx, my = int(w * margin * decimate), int(h * margin * decimate)
+# ── 5 点仿射对齐(复用 ArcFace 标准模板,缩放到 L2CS-Net 输入尺寸) ──
+
+# arcface 标准目标关键点(112×112 图上的 5 点坐标)
+_ARC_REF_112 = np.array([
+    [38.2946, 51.6963],   # 右眼
+    [73.5318, 51.5014],   # 左眼
+    [56.0252, 71.7366],   # 鼻尖
+    [41.5493, 92.3655],   # 右嘴角
+    [70.7299, 92.2041],   # 左嘴角
+], dtype=np.float32)
+
+
+def _align_face(full_rgb: np.ndarray, kps5: np.ndarray,
+                decimate: int, output_size: int = 448) -> Optional[np.ndarray]:
+    """用 5 关键点仿射对齐到 output_size×output_size(L2CS-Net 输入)。
+
+    kps5 是降采样坐标系,需 ×decimate 还原到 full_rgb 坐标系。
+    """
+    src = kps5.astype(np.float32) * decimate          # 还原全分辨率坐标
+    ref = _ARC_REF_112 * (output_size / 112.0)        # 模板缩放到目标尺寸
+    M = cv2.estimateAffinePartial2D(src, ref)[0]
+    if M is None:
+        return _crop_face_fallback(full_rgb, kps5, decimate)
+    return cv2.warpAffine(full_rgb, M, (output_size, output_size))
+
+
+def _crop_face_fallback(full_rgb: np.ndarray, kps5: np.ndarray,
+                        decimate: int, margin: float = 0.25) -> Optional[np.ndarray]:
+    """对齐失败时的 fallback: 以关键点中心裁正方形 crop。"""
+    pts = kps5.astype(np.float32) * decimate
+    cx, cy = pts.mean(axis=0)
+    spread = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]))  # 关键点跨度
+    half = int(spread * (1.0 + margin))
     fh, fw = full_rgb.shape[:2]
-    fx1 = max(0, int(x1 * decimate) - mx)
-    fy1 = max(0, int(y1 * decimate) - my)
-    fx2 = min(fw, int(x2 * decimate) + mx)
-    fy2 = min(fh, int(y2 * decimate) + my)
-    if fx2 - fx1 < 10 or fy2 - fy1 < 10:
+    x0 = max(0, int(cx) - half)
+    y0 = max(0, int(cy) - half)
+    x1 = min(fw, int(cx) + half)
+    y1 = min(fh, int(cy) + half)
+    if x1 - x0 < 10 or y1 - y0 < 10:
         return None
-    return full_rgb[fy1:fy2, fx1:fx2]
+    return full_rgb[y0:y1, x0:x1]
 
 
 class GazeModule:
@@ -219,7 +247,7 @@ class GazeModule:
             res.mutual_gaze = st.confirmed_mutual
             return res
 
-        crop = _crop_face(full_rgb, bbox_xyxy, decimate)
+        crop = _align_face(full_rgb, landmarks_5x2, decimate, self._estimator._input_size)
         if crop is None:
             res.mutual_gaze = st.confirmed_mutual
             return res
@@ -263,15 +291,31 @@ class GazeModule:
         st.gaze_yaw = gaze_yaw
         st.gaze_pitch = gaze_pitch
 
-        # ── 连续帧迟滞判定 mutual_gaze ──
-        # 方向一致性: L2CS-Net 的 gaze_yaw 是相对人脸坐标系,
-        # 看相机时 gaze 和 head 应同号(都偏向同一侧=眼球朝相机方向看)
-        # head 接近正中(|head_yaw|<deadband)时不检查方向
-        dir_ok = (abs(head_yaw) < self._gaze_dir_deadband
-                  or (head_yaw > 0) == (st.smooth_yaw > 0))
-        raw_mutual = (abs(st.smooth_yaw) < self._mutual_yaw
-                      and abs(st.smooth_pitch) < self._mutual_pitch
-                      and dir_ok)
+        # ── 位置补偿 + 连续帧迟滞判定 mutual_gaze ──
+        # L2CS-Net 输出约定(经 5 点对齐后的实测):
+        #   正 yaw = 人眼向自己左边看(画面右侧方向)
+        #   负 yaw = 人眼向自己右边看(画面左侧方向)
+        #
+        # 人偏离画面中心时,看相机的 gaze ≠ 0:
+        #   人在画面左侧(pos_offset<0) → 看相机需眼球右转 → gaze_yaw 偏负
+        #   人在画面右侧(pos_offset>0) → 看相机需眼球左转 → gaze_yaw 偏正
+        #   => mutual 时 gaze_yaw ≈ -pos_offset
+        #   => corrected = smooth - pos_offset → mutual 时 corrected ≈ 0
+        pos_offset_yaw = 0.0
+        pos_offset_pitch = 0.0
+        if frame_w > 0:
+            face_cx = (bbox_xyxy[0] + bbox_xyxy[2]) * 0.5 * decimate
+            pos_offset_yaw = (face_cx / frame_w - 0.5) * self._fov_x
+        if full_rgb is not None and frame_w > 0:
+            frame_h = full_rgb.shape[0]
+            face_cy = (bbox_xyxy[1] + bbox_xyxy[3]) * 0.5 * decimate
+            fov_y = self._fov_x * frame_h / frame_w   # 近似垂直 FOV
+            pos_offset_pitch = (face_cy / frame_h - 0.5) * fov_y
+        corrected_yaw = st.smooth_yaw - pos_offset_yaw
+        corrected_pitch = st.smooth_pitch - pos_offset_pitch
+
+        raw_mutual = (abs(corrected_yaw) < self._mutual_yaw
+                      and abs(corrected_pitch) < self._mutual_pitch)
         if raw_mutual:
             st.looking_streak += 1
             st.not_looking_streak = 0
@@ -287,14 +331,17 @@ class GazeModule:
         st.last_result = "LOOKING" if st.confirmed_mutual else "NOT_LOOKING"
         st.frames_since_check = 0
 
-        # ── 诊断日志(每20帧打一次,不刷屏) ──
+        # ── 诊断日志(每5帧打一次,不刷屏) ──
         _diag_ctr = getattr(st, '_diag_ctr', 0) + 1
         st._diag_ctr = _diag_ctr
         if _diag_ctr % 5 == 0:
-            _log.info("T%d gaze raw=%.1f/%.1f smooth=%.1f/%.1f head=%.1f/%.1f "
+            _log.info("T%d gaze raw=%.1f/%.1f smooth=%.1f/%.1f "
+                      "corr=%.1f/%.1f posoff=%.1f/%.1f head=%.1f/%.1f "
                       "look=%d notlook=%d mutual=%s",
                       track_id, gaze_yaw, gaze_pitch,
                       st.smooth_yaw, st.smooth_pitch,
+                      corrected_yaw, corrected_pitch,
+                      pos_offset_yaw, pos_offset_pitch,
                       head_yaw, head_pitch,
                       st.looking_streak, st.not_looking_streak,
                       st.confirmed_mutual)

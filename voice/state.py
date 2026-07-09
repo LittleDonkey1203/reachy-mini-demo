@@ -240,6 +240,9 @@ class State:
         self.track_yaw = 0.0
         self.track_pitch = 0.0
         self.body_yaw_deg = 0.0
+        self.turn_body_hold = False       # turn_body(left/right)后 True; center 或 idle 60s 后 False
+        self.turn_body_hold_since = 0.0   # hold 激活时的 monotonic 时戳
+        self.turn_body_fallback_fired = False  # qwen-plus 兜底补发了 turn_body,下轮 resp_directive 提醒模型
         self.face_seen_at = 0.0
         self.face_locked = False
         self.user_speaking = False
@@ -309,6 +312,9 @@ class State:
         self.clear_workflow: dict | None = None
         self.clear_lock: bool = False
         self.audio_gate_closed: bool = False
+        # 寻人(find_person)跨线程通信
+        self.seek_person_request: dict | None = None   # {pid, name, call_id} → behavior 消费
+        self.seek_person_result: dict | None = None    # {call_id, output} → 主循环回送模型
         self.audio_gate_buffer: list[bytes] = []
         self.audio_gate_closed_at: float = 0.0
         self.dbg_memory_prompt: str | None = None

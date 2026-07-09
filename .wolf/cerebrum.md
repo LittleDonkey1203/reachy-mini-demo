@@ -25,6 +25,7 @@
 - **记忆存储:** 认知记忆架构(Entity Memory + Episodic Memory + Working Memory 注入)
 - **Entity Memory:** per-person JSON facts (`data/memories/<pid>.json`), `dict[str,str]` KV 格式 + `summary` 叙事
 - **Session Consolidation:** 会话后 LLM(SUMMARY_MODEL) 从全量对话+当前facts KV 生成最终 entity dict + summary + episodic memory
+- **身份系统统一(2026-07-09):** 旧 FaceDB(identity/recognizer.py→face_db.json, pid=person_{uuid8}) 已废弃删除。统一使用 IdentityStore(identity/identity_store.py→gallery.json, pid=id_{ts}_{name})。所有模块(memory/manager, memory/safety, tools/base+memory, voice/realtime+d01)的 `id_recognizer`/`face_db` 参数已改为 `identity_store`。ArcFaceONNX/_align_face/_crop_face 保留在 recognizer.py 作独立工具函数。
 - **清华镜像:** UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ 所有 pip/uv 安装必用
 - **注视估计(Gaze Estimation,2026-06-29→07-03修):** 三级级联 L0(5点几何头姿,0.02ms)→L1(时间降频,NOT_LOOKING 5帧1次)→L2(L2CS-Net MobileNetV2 ONNX 448×448,~35ms/face CPU);模型来源 yakhyo/gaze-estimation releases `mobilenetv2_gaze.onnx`(9.3MB);GazeModule 注入 face_pipeline._gaze;模型缺失时 available=False 只跑 L0 不崩;GazeBehaviorFSM 4态纯逻辑不写 st.state。**重要:gaze 状态必须按 identity_key(person_id|t{track_id})键,不按 track_id——ByteTrack churn 换 id 会让 gaze streak/EMA 归零,实测3分钟零反应**。gaze 对 tentative track 也要跑(不需要 is_confirmed);views 必须包含所有 active track;FSM 不能只看 confirmed track。CONFIRM_FRAMES 在 L2 稀疏(5帧1次)下设 1 即可,EMA+入场延迟是第二道防抖。
 - **ARMED 注视回看(Phase 2,2026-07-01):** ARMED 态 gaze=CURIOUS_LOOK/SCANNING → vision_result_loop 用指数时间常数积分(`k=1-exp(-dt/τ)`, τ=0.80s)驱动 track_yaw/pitch 缓慢回看注视者。防抖:入场延迟 0.5s + deadband 3° + max_step 1.2°/帧 + 不转身。退出:gaze→IDLE/GLANCING 时 behavior_loop 恢复 approach(0,0,0) 回正。**单写者原则**:gaze active 时 vision_result_loop 写 track_yaw,behavior_loop 跳过 approach();反之 behavior_loop 写回正,vision_result_loop 不积分——决不两者同时写
@@ -42,6 +43,10 @@
 - **Dashboard 画框配色(2026-06-27 定稿):** 脸:🟩绿=正在说话(speaking_ids,>阈值且新鲜)/⬜灰=跟踪中;手:🟦青=有效/🟧橙=底部过滤/🟨黄=低置信。**绿只给说话脸**(有效手从绿改青,避免手框压脸误认);**蓝色全部去掉**(头部跟谁看机器人朝向/yaw,不用框色重复表达)。ASD 分显示 2 位小数(1 位会把 0.0x 显示成 +0.0)。
 - **记忆兜底抽取(2026-06-27):** `RealtimeDialog.extract_memory_async` 每轮 transcription 后无条件用 `EXTRACT_MODEL`(qwen-plus)+最近5轮上下文抽「本句说话人」个人事实,`save_fact` 内置去重 → 兜底 plus 偶发漏调 remember_fact("说了不做")。与 realtime 原生 remember_fact 并存不冲突。
 - **Realtime function-calling:** flash-realtime 触发可靠性差(OmniGAIA flash≈33.9 vs plus≈57.2),会把工具"说成文本"不发 function_call → 记忆/动作丢失;记忆/动作场景必用 plus。Qwen-Omni-Realtime 不支持 tool_choice/parallel_tool_calls,无法强制调用。诊断:日志看 🤖模型调用工具/🧠记忆工具/👑认主成功 三标记;动作全走"标签泄漏兜底"=模型在文本化工具。realtime.py:110 的"已注册"日志是写死文本,不反映真实 tools payload。
+- **turn_body 兜底(2026-07-07):** 模型偶发不调 turn_body 工具(说"我转过去啦"但不发 function_call),尤其长对话后。realtime.py 加了用户话语→自动补发:transcription.completed 时正则检测"向左/右转"等,response.done 时若 _turn_body_called=False 自动 motion_q.put。类比标签泄漏兜底但针对用户输入而非模型输出。
+- **ASD 不可用时归属回退(2026-07-07):** `st.asd_speaker` 是 realtime.py speaker-attribution 的 fallback 数据源。ASD disabled 时 vision_result_loop 必须主动将 primary(最大)脸写入 st.asd_speaker(score=0.0, at=now),否则 realtime.py 读到 None 全归"画外"。consumer 端 _n_tracked==0 已兼容(<=1 通过)。
+- **Gaze 仅 ARMED 态运行(2026-07-07):** L2CS-Net ~35ms/face + GazeBehaviorFSM 在对话态不需要。通过 `_face_pipeline._gaze = _gaze_mod if ARMED else None` 切换 + FSM update 加 ST_ARMED 门。**关键:非 ARMED 必须重置 `st.gaze_behavior="IDLE"`**,否则残留的 "CURIOUS_LOOK" 会阻塞 behavior_loop 的 IDLE→ARMED / TRACKING→ARMED 转换。
+- **body_yaw_deg 有 4 个写入点,turn_body hold 必须全部覆盖(2026-07-08,bug-076 v2):** ①`_do_turn_body`(用户指令)②body_follow(head_control_loop)③`approach()`(behavior_loop ENGAGING/RETURNING/IDLE)④ARMED gaze return。v1 只保护了②,实测 turn_body 后人脸丢失→TRACKING→SEARCHING→ENGAGING→approach 把 body 拉回人脸方向。另 v1 的 `_conv_active` 漏了 `speech_stopped→response.created` 空档(user_speaking=F 且 in_flight=0)。v2 提取 `_turn_body_hold_active()` 共享函数(保护②③),增加 `last_interaction_at < 1s` 覆盖空档。④只在 ARMED 态,turn_body 后不会到达,不需保护。
 
 ## Do-Not-Repeat
 
@@ -49,7 +54,7 @@
 <!-- Format: [YYYY-MM-DD] Description of what went wrong and what to do instead. -->
 
 - [2026-06-24] **clear_memory confirmed 参数不能删**: 用户明确要求保留 confirmed 守卫("如果用户确认了才可以删")。不要因为"简化流程"移除安全确认参数。
-- [2026-06-24] **记忆 = 人脸 + 事实**: clear_memory 必须同时清除 face_db 中的 person entry(`clear_person(pid)`) 和 memory facts。不能只清 facts 而留人脸。
+- [2026-06-24] **记忆 = 人脸 + 事实**: clear_memory 必须同时清除 identity_store 中的 person entry(`remove_identity(pid)`) 和 memory facts。不能只清 facts 而留人脸。
 - [2026-06-24] **state.json 字段必须完整**: 前端 JS 引用 `s.is_owner` 时，后端 state dict 必须同步添加该字段，否则前端永远显示空。添加 Dashboard 功能后检查数据通路: State class → _build_frame/state dict → JS 渲染。
 - [2026-06-24] **不要新增 tab 展示调试信息**: 用户明确要求复用已有的 Conversation 面板 payload modal，不要加新的 tab 或按钮。
 - [2026-06-24] **音频闸门不能每次 close_session 都触发**: 只在二次唤醒切人且 DOA 声源方向大幅变化(>SWITCH_AWAY_DEG)时关闸，避免常规断连重连时误拦截音频。
@@ -67,6 +72,12 @@
 - [2026-06-27] **记忆别挂在 current_person_id 上**: 它由 vision loop 瞬时 ASD+fallback 刷,会在说话人没变时 fallback 切错人 → 存错人/读错记忆。记忆存/读统一用 `st.turn_speaker_pid`(speaker_window,per-utterance)。转写归属对≠记忆归属对,两条链当时是分开的。
 - [2026-06-27] **"模型说了记住啦"≠真存了**: plus 也会偶发不发 function_call(本轮 0 次 remember_fact),靠模型主动调不可靠。必须有每轮工具模型兜底抽取。诊断"没存"先 grep `🤖 模型调用工具: remember_fact` 看调没调,再看存到谁(磁盘 data/memories/*.json facts)。
 - [2026-06-26] **realtime.py:110 的"已注册"日志不可信**: 它是写死文本,漏列 end_session 和 4 个记忆工具,不反映真实 update_session(tools=...) payload。别拿它当"工具没注册"的证据。真实注册看 d01:175→1544→1561 + realtime.py:388/463。
+- [2026-07-07] **L2CS-Net gaze yaw 符号约定(经对齐后实测)**: 人在画面左侧看相机 → 眼球向右 → gaze_yaw 为**负值**(非正值)。位置补偿公式必须用 `corrected = smooth - pos_offset`(减号),不是加号。加号会让真看机器人时 corrected 远离 0(false negative),看正前方时 corrected 靠近 0(false positive) — 效果完全反转。已翻车两次(先 `-` 后基于错误假设改 `+`,又改回 `-`),这是最终确认。
+- [2026-07-07] **st.asd_speaker 是 consumer(realtime.py)的唯一画面归属来源**: ASD disabled 时 speaker_window() 被跳过,_sw=None;如果 vision loop 不主动写 st.asd_speaker,consumer 的 fallback 读到 None → 全归"画外"。日志说"回退最大脸"不等于代码实现了——必须在 vision_result_loop 的 ASD off 分支显式写 primary 脸信息。
+- [2026-07-07] **gaze FSM 状态(gaze_behavior)被 behavior_loop 用于状态转换门控**: "CURIOUS_LOOK"会阻止 IDLE→ARMED 和 TRACKING→ARMED。如果 gaze FSM 不在非 ARMED 态运行,必须主动清 gaze_behavior="IDLE",否则残值会卡住状态机。
+
+- [2026-07-07] **consolidation(save_summary)是命名的隐藏漏洞**: `consolidate_facts` 直接写 `data["name"]` + `face_db.set_name`,不走 `try_name_identity` 三道门。LLM 从对话"💬 小艺:xxx"提取机器人自称当用户名,直接落盘。修法:调用方(save_summary)在传 name 前过 `_valid_name` 拦截非法/bot名;prompt 加强提示"小艺是机器人不是用户"。**所有写 name 的路径都必须过门**,否则上游 LLM 幻觉直达持久化。
+- [2026-07-07] **turn_body 模型不调工具时先收集 bad case 而非自动兜底**: 用户明确要求先记录(data/bad_cases/turn_body.jsonl),后续统一制作优化数据。自动补发可能干扰模型学习信号。
 
 ## Decision Log
 
@@ -227,3 +238,4 @@
 - voice 不支持情绪变体(如 Ethan-happy), 任何音色都能表达情绪
 - 缓解标签泄漏: prompt 禁令 + 引导用语气替代括号 + 已知标签→物理动作兜底
 - 正例/负例触发词模式是唯一可靠的工具触发杠杆(end_session 已有)
+- **body_follow hold 改为 flag 驱动(2026-07-08,bug-076 v4):** 旧机制是时间驱动(TURN_BODY_HOLD_S=2.0+对话活跃延长,最长10s)——hold 过期后基础设施自动拉回身体。新机制改为 flag 驱动:`st.turn_body_hold=True` 由 turn_body(left/right) 设置,**持续到** ①模型调 `turn_body(direction="center")` 回正(释放 hold)②`last_interaction_at` 超过 60s(安全兜底)。"什么时候转回来"的决策权交给模型而非基础设施。`center` 回正后释放 hold,恢复正常 DOA/body_follow/approach 行为。5 个 call site 接口不变(只读 bool)。

@@ -189,3 +189,60 @@
 | 17:10 | feat: 注视样本采集(GAZE_SAVE_SAMPLES=1)+标注评估脚本(gaze_eval.py) | gaze.py, scripts/gaze_eval.py | 新建 | ~3k |
 | 17:15 | fix: pitch阈值22→13(427张标注数据网格搜索F1=0.857最优) | config.py | 编译OK | ~1k |
 | 17:20 | feat: 注视情感反应 — 长时间对视不说话触发歪头(4s)/摆天线(10s)/再歪头(18s) | d01, config.py | 编译OK | ~5k |
+| 14:00 | rebase 冲突解决完成 + force push 更新 PR #12 | feat/gaze-aware-interaction | 3 commits cleanly on origin/main | ~2k |
+
+## Session: 2026-07-06 (工具系统重构)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 14:10 | 移动 tools/ 脚本到 scripts/ | tools/* → scripts/ | 腾出 tools/ 给 Tool 类包 | ~500 |
+| 14:20 | 创建 tools/ 包(6文件): base.py(Tool ABC+ToolDeps) + motion.py(8动作) + session.py(EndSession) + memory.py(4记忆) + registry.py(ToolRegistry+build_default) + __init__.py | tools/*.py | 新包就位 | ~3k |
+| 14:30 | 重构 realtime.py: 130行 if/elif → ~20行 registry 分发; ChatCallback/RealtimeDialog 加 registry 参数 | voice/realtime.py | 分发代码减 80% | ~2k |
+| 14:35 | d01 切换到 registry: TOOLS列表→build_default_registry(); no_memory→registry.exclude() | voice/d01_realtime_chat.py | 接线完成 | ~1k |
+| 14:40 | 验证: py_compile 10/10 绿 + 新旧 specs 13/13 完全一致 + exclude 正常 | — | 回归通过 | ~500 |
+| 14:45 | 更新 PROJECT_STATE.md + anatomy.md | PROJECT_STATE.md .wolf/anatomy.md | 状态同步 | ~1k |
+| 07-07 | 新增 turn_body 工具(TurnBodyTool + _do_turn_body + motion_loop 分支) | tools/motion.py, tools/registry.py, voice/d01_realtime_chat.py, voice/config.py | py_compile 4/4 绿, 14 工具 | ~3000 |
+| 17:30 | fix gaze position compensation sign (- not +): L2CS yaw negative=eyes right, positive=eyes left; corrected=smooth-offset | perception/gaze.py | fix false-positive/negative | ~3k |
+| 17:30 | turn_body suppress tracking: body stays at user-directed angle, clears on new face or new speech | voice/d01_realtime_chat.py, voice/realtime.py, voice/state.py | implemented | ~4k |
+| 07-07 | fix: ASD不可用时 st.asd_speaker 回退最大脸(治全部归属"画外") | voice/d01_realtime_chat.py | 编译OK | ~1k |
+| 07-07 | fix: turn_body 兜底—用户说"向右转"但模型未调工具时自动补发 | voice/realtime.py | regex+fallback | ~2k |
+| 07-07 | fix: gaze仅ARMED态运行(L2CS+FSM),非ARMED清gaze_behavior="IDLE" | voice/d01_realtime_chat.py | 省35ms/face | ~1k |
+| 07-07 | fix: _valid_name 加 bot name 黑名单,防"小艺"注册为人名 | voice/realtime.py | 已修 | ~500 |
+| 07-07 | 根因: "小艺"被注册为人名来自save_summary/consolidation——LLM从对话"💬 小艺:xxx"提取了机器人名当用户名,consolidate_facts直接写name不走_valid_name | voice/realtime.py, memory/manager.py | 修: consolidation name过_valid_name+prompt强调小艺是机器人 | ~2k |
+| 07-07 | turn_body改为bad case收集(data/bad_cases/turn_body.jsonl)而非自动补发;后续统一优化数据 | voice/realtime.py | 记录不补发 | ~1k |
+| 07-07 | data/memories/id_*_unknown-2.json 名字从null改为"陛下"，恢复记忆内容 | data/memories/ | 数据修复 | ~500 |
+| 00:30 | fix body drift between consecutive turn_body: hold extended during active conversation (user_speaking/in_flight/playback) within 10s of turn_body | voice/d01_realtime_chat.py:1072-1080 | bug-076 fixed | ~2k |
+| 01:00 | fix body drift v2: root cause was approach() in ENGAGING/RETURNING also writes body_yaw_deg without hold protection; extracted _turn_body_hold_active() shared guard, added last_interaction_at 1s grace for speech_stopped→response.created gap | voice/d01_realtime_chat.py:231-254,1282-1298,1091-1092 | bug-076 v2 | ~4k |
+| 01:30 | fix body drift v3: hold must also gate state machine (TRACKING→SEARCHING, SEARCHING→ENGAGING DOA path) and DOA glance trigger; approach+body_follow protection alone insufficient because track_yaw still drifts toward user during ENGAGING | voice/d01_realtime_chat.py:1032,1638,1657,1092 | bug-076 v3 | ~3k |
+
+## Session: 2026-07-08 (turn_body hold flag 驱动)
+
+| Time | Action | File(s) | Outcome | ~Tokens |
+|------|--------|---------|---------|--------|
+| 14:00 | turn_body hold 改 flag 驱动+支持 center 回正: hold 不再按时间过期,持续到 center 或 idle 60s; direction enum 加 center; _do_turn_body 支持 center 回正+释放 hold | state.py, config.py, d01_realtime_chat.py, tools/motion.py, realtime.py | py_compile 5/5 绿 | ~5k |
+| 14:30 | turn_body 兜底补发: 正则预过滤+qwen-plus语义判断(daemon线程),确认是指令才补发motion_q;resp_directive下轮提醒模型;工具执行失败/未注册补error output | realtime.py, state.py | py_compile 绿 | ~3k |
+| 15:00 | fix bug-077: Unknown-N 泄漏模型上下文,3处过滤(realtime._real_name+d01._pname/_pname_fb+manager.get_prompt);resp_directive未命名分支改自然引导问名字 | realtime.py, d01, manager.py | bug-077; py_compile 3/3 绿 | ~4k |
+| 15:30 | 源头治 Unknown-N: identity_store 对 provisional 返回 identity_name=None;去掉下游 3 处 startswith 兜底(脆弱) | identity_store.py, realtime.py, d01, manager.py | 干净 | ~2k |
+| 16:00 | 删改名守卫门3(改名意图正则):用户自己纠正名字直接接受;remember_fact先过守卫再写facts,拒绝时不撒谎 | realtime.py, tools/memory.py | bug-078; py_compile 绿 | ~3k |
+| 16:30 | 日志分析:unsure zone 死区致 T6 30s 无 person_id;根因是两不同人脸距离~0.7 落在 0.65~0.80;暂不改架构,待模型精度提升 | (分析) | 记录待观察 | ~2k |
+
+## 2026-07-08 寻人特性重新实现(按新 Tool ABC)
+
+| 时间 | 描述 | 文件 | 结果 | ~tokens |
+|------|------|------|------|---------|
+| 当前 | git fetch + merge origin/main(含 Tool ABC 重构+注视感知等) | — | 合并成功,无冲突 | ~500 |
+| 当前 | identity_store.py: 新增 find_by_name(name) 按名反查 | identity/identity_store.py | 精确+子串匹配 | ~500 |
+| 当前 | tools/seek.py: 新建 FindPersonTool(Tool ABC 子类) | tools/seek.py | 异步交 behavior | ~800 |
+| 当前 | tools/registry.py: 注册 FindPersonTool | tools/registry.py | EndSession 前 | ~200 |
+| 当前 | voice/config.py: 新增 SEEK_PERSON_* 搜索常量 | voice/config.py | 4 常量 | ~200 |
+| 当前 | voice/state.py: 新增 seek_person_request/result 字段 | voice/state.py | 跨线程通信 | ~200 |
+| 当前 | voice/d01_realtime_chat.py: behavior_loop 寻人 Stop-and-Check + 主循环结果回送 | voice/d01_realtime_chat.py | 完整搜索逻辑 | ~2k |
+| 当前 | py_compile 6/6 全绿 | — | 编译通过 | ~100 |
+| 09:00 | identity 统一: IdentityStore 补全 auto_merge/cross-person/verify/backup/set_name | identity/identity_store.py | 步骤1 完成 | ~1.5k |
+| 09:00 | MemoryManager 改用 identity_store 参数 | memory/manager.py | 步骤2 完成 | ~300 |
+| 09:00 | safety/tools 全部改用 identity_store | memory/safety.py, tools/base.py, tools/memory.py | 步骤3 完成 | ~500 |
+| 09:00 | realtime.py + d01 入口去掉旧系统, 改用 identity_store | voice/realtime.py, voice/d01_realtime_chat.py | 步骤4 完成 | ~1k |
+| 09:00 | 删除 FaceDB/IdentityRecognizer 类, 只保留 ArcFaceONNX/_align/_crop | identity/recognizer.py | 步骤5 清理 | ~500 |
+| 09:00 | test_identity.py 移除 FaceDB 测试, 只保留 ArcFaceONNX 测试 | tests/test_identity.py | 步骤5 清理 | ~300 |
+| 09:00 | recapture_face.py 改用 IdentityStore + gallery.json | scripts/recapture_face.py | 步骤5 清理 | ~300 |
+| 09:00 | py_compile 全 10 文件通过 | — | 编译验证 | ~100 |

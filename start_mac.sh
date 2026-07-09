@@ -83,11 +83,7 @@ if [ -z "$SERIAL_PORT" ]; then
 fi
 info "找到串口: $SERIAL_PORT"
 
-# ── 4. 停止残留进程 ──────────────────────────────────────────
-if [ -f "$DAEMON_PID" ] && kill -0 "$(cat "$DAEMON_PID")" 2>/dev/null; then
-  warn "发现旧 daemon 进程，先停止..."
-  kill "$(cat "$DAEMON_PID")" 2>/dev/null; sleep 2
-fi
+# ── 4. 停止残留主程序 ────────────────────────────────────────
 if [ -f "$MAIN_PID" ] && kill -0 "$(cat "$MAIN_PID")" 2>/dev/null; then
   warn "发现旧主程序进程，先停止..."
   kill "$(cat "$MAIN_PID")" 2>/dev/null; sleep 1
@@ -101,39 +97,47 @@ if [ -n "$_OLD_PID" ]; then
   sleep 0.5
 fi
 
-# ── 5. 启动 daemon ───────────────────────────────────────────
+# ── 5. 启动 daemon（已运行则复用）─────────────────────────────
 mkdir -p "$LOG_DIR"
-info "启动 daemon (串口: ${SERIAL_PORT})..."
 export PYTHONUNBUFFERED=1
 export HF_HUB_OFFLINE=1          # 禁止 daemon 访问 HuggingFace 网络
 export NO_PROXY="localhost,127.0.0.1,::1"
 export no_proxy="localhost,127.0.0.1,::1"
 
-nohup "$SCRIPT_DIR/.venv/bin/reachy-mini-daemon" \
-  -p "$SERIAL_PORT" \
-  --fastapi-host 127.0.0.1 \
-  --log-level INFO \
-  >> "$LOG_DIR/daemon.log" 2>&1 &
-echo $! > "$DAEMON_PID"
-info "Daemon PID: $(cat "${DAEMON_PID}"), 等待上电就绪..."
+DAEMON_ALREADY=0
+# 检测 daemon 是否已在运行（API 可达 + control_mode=enabled）
+_MODE=$(curl -s --max-time 1 http://127.0.0.1:8000/api/state/full 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['control_mode'])" 2>/dev/null || true)
+if [ "$_MODE" = "enabled" ]; then
+  DAEMON_ALREADY=1
+  info "Daemon 已在运行，跳过启动 ✅"
+else
+  info "启动 daemon (串口: ${SERIAL_PORT})..."
+  nohup "$SCRIPT_DIR/.venv/bin/reachy-mini-daemon" \
+    -p "$SERIAL_PORT" \
+    --fastapi-host 127.0.0.1 \
+    --log-level INFO \
+    >> "$LOG_DIR/daemon.log" 2>&1 &
+  echo $! > "$DAEMON_PID"
+  info "Daemon PID: $(cat "${DAEMON_PID}"), 等待上电就绪..."
 
-# 轮询 API，最多等 30 秒
-READY=0
-for i in $(seq 1 30); do
-  sleep 1
-  MODE=$(curl -s --max-time 1 http://127.0.0.1:8000/api/state/full 2>/dev/null \
-         | python3 -c "import sys,json; print(json.load(sys.stdin)['control_mode'])" 2>/dev/null || true)
-  if [ "$MODE" = "enabled" ]; then
-    READY=1; break
+  READY=0
+  for i in $(seq 1 30); do
+    sleep 1
+    MODE=$(curl -s --max-time 1 http://127.0.0.1:8000/api/state/full 2>/dev/null \
+           | python3 -c "import sys,json; print(json.load(sys.stdin)['control_mode'])" 2>/dev/null || true)
+    if [ "$MODE" = "enabled" ]; then
+      READY=1; break
+    fi
+    printf "."
+  done
+  echo ""
+
+  if [ "$READY" -eq 0 ]; then
+    error "Daemon 启动超时或 control_mode 未 enabled，请查看 $LOG_DIR/daemon.log"
   fi
-  printf "."
-done
-echo ""
-
-if [ "$READY" -eq 0 ]; then
-  error "Daemon 启动超时或 control_mode 未 enabled，请查看 $LOG_DIR/daemon.log"
+  info "Daemon 就绪，control_mode=enabled ✅"
 fi
-info "Daemon 就绪，control_mode=enabled ✅"
 
 # ── 6. 启动主程序 ────────────────────────────────────────────
 info "启动小艺主程序..."
@@ -172,13 +176,16 @@ if [ "${VIS_DEBUG:-0}" = "1" ]; then
 fi
 echo ""
 
-# ── 7. 实时跟进日志（Ctrl+C 或退出时停主程序 + daemon）──────────────
+# ── 7. 实时跟进日志（Ctrl+C 退出时只停主程序，daemon 保持运行）──────────────
 _cleanup() {
   echo ""
-  info "正在停止..."
+  info "正在停止主程序（daemon 保持运行）..."
   [ -f "$MAIN_PID" ] && kill "$(cat "$MAIN_PID")" 2>/dev/null && info "主程序已停止"
-  sleep 1
-  [ -f "$DAEMON_PID" ] && kill "$(cat "$DAEMON_PID")" 2>/dev/null && info "Daemon 已停止 (机器人将进入睡眠)"
+  if [ "$DAEMON_ALREADY" -eq 1 ]; then
+    info "Daemon 是外部启动的，保持运行"
+  else
+    info "Daemon 仍在运行，如需停止请执行: bash $0 stop"
+  fi
 }
 trap '_cleanup; exit 0' INT
 trap '_cleanup' EXIT

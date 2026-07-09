@@ -7,7 +7,7 @@ from voice.state import State, log
 
 
 def handle_clear_memory_intent(st: State, args: dict, conv,
-                               id_recognizer) -> str:
+                               identity_store) -> str:
     """模型调用 clear_memory → 仅做意图分类，启动验证工作流。"""
     with st.lock:
         pid = st.current_person_id
@@ -18,11 +18,11 @@ def handle_clear_memory_intent(st: State, args: dict, conv,
         return "已有一个删除流程在进行中,请等待完成或超时。"
     target_name = args.get("target_name")
     target_pid = pid
-    if target_name and id_recognizer is not None:
-        found = id_recognizer.db.find_by_name(target_name)
+    if target_name and identity_store is not None:
+        found = identity_store.find_by_name(target_name)
         if found is None:
             return f"没有找到叫「{target_name}」的人。"
-        target_pid = found
+        target_pid = found.identity_id
     with st.lock:
         st.clear_workflow = {
             "phase": "verifying",
@@ -48,7 +48,7 @@ def handle_clear_memory_intent(st: State, args: dict, conv,
 
 
 def handle_confirm_clear(st: State, args: dict,
-                         memory_mgr, id_recognizer) -> str:
+                         memory_mgr, identity_store) -> str:
     """模型调用 confirm_clear → 验证工作流状态后执行备份+删除。"""
     confirmed = args.get("confirmed", False)
     with st.lock:
@@ -72,8 +72,8 @@ def handle_confirm_clear(st: State, args: dict,
     target_pid = wf["target_pid"]
     backup_face = None
     backup_mem = None
-    if id_recognizer is not None:
-        backup_face = id_recognizer.db.backup_person(target_pid)
+    if identity_store is not None:
+        backup_face = identity_store.backup_identity(target_pid)
     if memory_mgr is not None:
         backup_mem = memory_mgr.backup_person(target_pid)
     log(f"🔒 备份完成: face={backup_face}, mem={backup_mem}")
@@ -81,8 +81,8 @@ def handle_confirm_clear(st: State, args: dict,
     if memory_mgr is not None:
         result = memory_mgr.clear_all(target_pid, confirmed=True,
                                       actor_pid=actor_pid)
-    if id_recognizer is not None:
-        id_recognizer.db.clear_person(target_pid)
+    if identity_store is not None:
+        identity_store.remove_identity(target_pid)
     if target_pid == cur_pid:
         with st.lock:
             st.current_person_id = None

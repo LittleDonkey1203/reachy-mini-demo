@@ -50,13 +50,14 @@ export NO_PROXY="localhost,127.0.0.1,::1"
 export no_proxy="localhost,127.0.0.1,::1"
 
 info "启动 daemon..."
-nohup "$PROJECT_ROOT/.venv/bin/reachy-mini-daemon" \
+"$PROJECT_ROOT/.venv/bin/reachy-mini-daemon" \
   -p "$SERIAL_PORT" \
-  --localhost-only \
+  --fastapi-host 127.0.0.1 \
   --log-level INFO \
   >> "$LOG_DIR/daemon.log" 2>&1 &
-echo $! > "$DAEMON_PID"
-info "PID: $(cat "${DAEMON_PID}")"
+DAEMON_CHILD=$!
+echo $DAEMON_CHILD > "$DAEMON_PID"
+info "PID: ${DAEMON_CHILD}"
 
 # ── 等待就绪 ────────────────────────────────────────────────
 info "等待 control_mode=enabled..."
@@ -67,9 +68,25 @@ for i in $(seq 1 30); do
   if [ "$MODE" = "enabled" ]; then
     echo ""
     info "Daemon 就绪 ✅  (http://127.0.0.1:8000)"
-    exit 0
+    break
   fi
   printf "."
+  if [ "$i" -eq 30 ]; then
+    echo ""
+    error "启动超时，请查看: $LOG_DIR/daemon.log"
+  fi
 done
-echo ""
-error "启动超时，请查看: $LOG_DIR/daemon.log"
+
+# ── hold: 前台等待，Ctrl+C 时 kill daemon ──────────────────
+_cleanup() {
+  echo ""
+  info "正在停止 daemon (机器人将进入睡眠)..."
+  kill "$DAEMON_CHILD" 2>/dev/null && wait "$DAEMON_CHILD" 2>/dev/null
+  rm -f "$DAEMON_PID"
+  info "Daemon 已停止"
+}
+trap '_cleanup; exit 0' INT TERM
+trap '_cleanup' EXIT
+
+info "Daemon 运行中，Ctrl+C 停止"
+wait "$DAEMON_CHILD"
