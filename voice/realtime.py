@@ -132,14 +132,14 @@ def try_name_identity(*, memory_mgr, identity_store, face_pipeline, owner_mgr, s
     if not pid or not new_name:
         return False
     n = new_name.strip()
+    existing = memory_mgr.get_name(pid) if memory_mgr else None
+    if existing and existing == n:
+        return False
     if not _valid_name(n):
         log_fn(f"🚫 命名拒绝:名字不合法「{new_name}」")
         return False
     if not (transcript and n in transcript):
         log_fn(f"🚫 命名拒绝:「{n}」不在转写里(防脑补)← 「{(transcript or '')[:30]}」")
-        return False
-    existing = memory_mgr.get_name(pid) if memory_mgr else None
-    if existing and existing == n:
         return False
     if existing:
         log_fn(f"✏ 改名:「{existing}」→「{n}」")
